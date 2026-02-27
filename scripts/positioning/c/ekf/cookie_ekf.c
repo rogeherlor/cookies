@@ -10,8 +10,8 @@
 static const float a = 6378137.0f;
 // static const float f = 1.0f / 298.257223563f;
 static const float b = 6356752.3142f; // a * (1 - f)
-static const float e2 = 0.00669437999f; // sqrt(1-b^2/a^2)
-static const float ep2 = 0.00673949674f; // sqrt(a^2/b^2 -1)
+static const float e2 = 0.00669437999f; // eccentricity^2 (1-b^2/a^2)
+static const float ep2 = 0.00673949674f; // second eccentricity^2 (a^2/b^2 -1)
 
 // Gauss-Markov Coefficients
 static const float beta_acc = 3.7e-7f;

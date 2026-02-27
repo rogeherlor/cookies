@@ -56,167 +56,109 @@ orient = read_csv('orient.csv', header=0, index_col=0)
 orient = orient.values
 
 ########################## VAR INIT ###############
-
 # No GNSS loss: t1=0, d=0
 t1 = 0  # time init loss in seconds
 d = 0   # duration of GNSS loss in seconds
-
-NN = lla.shape[0]   # number of data points in the trajectory
 frecIMU = 10        # 10 Hz
 frecGPS = 1         # 1 Hz
+
+lla0 = np.array([49.01,8.43,116.43])    # origin of ENU coordinate system
+g = np.array([0,0,9.81])                # gravity acceleration
+a = 6378137.0                           # equatorial radius [m]
+b = 6356752.3142                        # polar radius [m]
+e2 = 0.00669437999                      # eccentricity^2 (1-b^2/a^2)
+ep2 = 0.00673949674                     # second eccentricity^2 (a^2/b^2 -1)
 
 t2 = t1+d                               # time end loss in seconds
 A = t1*frecIMU                          # data index start loss
 B = t2*frecIMU                          # data index end loss
 Ts= 1/frecIMU                           # sampling time
-g = np.array([0,0,9.81])                # gravity acceleration
-lla0 = np.array([49.01,8.43,116.43])    # origin of ENU coordinate system
-sigma = 7.2921151467e-5                 # Earth rotation rate [rad/s]
-a = 6378137.0                           # equatorial radius [m]
-b = 6356752.3142                        # polar radius [m]
-ecc = sqrt(1-b**2/a**2)                 # eccentricity
-e2 = 0.00669437999                      # sqrt(1-b^2/a^2)
-ep2 = 0.00673949674                     # sqrt(a^2/b^2 -1)
 
-# VARIABLES PARA GUARDAR LOS ESTADOS DE NAVEGACION ESTIMADOS
-
-p = np.zeros((NN,3)) # para guardar las posiciones estimadas
-v = np.zeros((NN,3)) # para guardar las velocidades estimadas
-r = np.zeros((NN,3)) # para guardar las orientaciones estimadas
-
-# Como primer estado de navegacion se guardan los datos de KITTI
-# Esta no es la inicialización del estado de navegación; estas
-# variables son exclusivamente para guardar resultados
+# Output Storage Navigation State Estimates
+NN = lla.shape[0]   # number of data points in the trajectory
+p = np.zeros((NN,3))
+v = np.zeros((NN,3))
+r = np.zeros((NN,3))
+# First state
 p[0,:] = pm.geodetic2enu(lla[0,0],lla[0,1],lla[0,2],lla0[0],lla0[1],lla0[2])
 v[0,:] = vel_enu[0,:]
 r[0,:] = orient[0,:]
 
-# INICIALIZACION DEL ESTADO DE NAVEGACION
+# Navigation State Initialisation
+pIMU = p[0,:].T     # known position
+vIMU = v[0,:].T     # known velocity
+ypr = np.zeros(3)   # unkwon attitude (yaw, pitch, roll)
 
-pIMU = p[0,:].T     # posicion inicial conocida
-vIMU = v[0,:].T     # velocidad inicial conocida
-ypr = np.zeros(3)   # orientacion inicial desconocida, ypr = (yaw, pitch, roll)
+## Filter Initialisation
+beta_acc = 3.7e-7 # Gauss-Markov coef # TODO: get from modelling
+beta_gyr = 2.9e-1 # Gauss-Markov coef # TODO: get from modelling
 
-# Se inicializa la orientacion como conocida cuando se crea el dataset
-# de entrenamiento de la LSTM
-# ypr[0] = r[0,2]
-# ypr[1] = r[0,1]
-# ypr[2] = r[0,0]
-
-# INICIALIZACION DE COMPONENTES DEL FILTRO
-
-# Estado
-
-x = np.zeros(15)    # estado del filtro de Kalman
-                    # x = (errorPos, errorVel, errorOrient, accBias, gyrBias)
+# State initialisation x
 accBias = 1e-6      # bias inicial
 gyrBias = 1e-7      # bias inicial
+x = np.zeros(15)    # state x = (δp[3], δv[3], δϵ[3], b_acc[3], b_gyr[3])
+                    # δϵ = [δroll, δpitch, δyaw] (indices 6,7,8)
 x[9:12] = accBias
 x[12:15] = gyrBias
 
-# Coeficientes de Gauss-Markov
+# Process noise Q # TODO: get from genetic
+Qpos, Qvel = 2, 2
+QorientX, QorientY, QorientZ = 0.0002, 0.0002, 0.2
+Qacc = 0.1
+QgyrX, QgyrY, QgyrZ = 0.0001, 0.0001, 0.1
+Q = np.diag([Qpos]*3 + [Qvel]*3 + [QorientX, QorientY, QorientZ] + [Qacc]*3 + [QgyrX, QgyrY, QgyrZ])
 
-beta_acc = 3.7e-7
-beta_gyr = 2.9e-1
-
-# Matriz de ruido de medicion (R)
-
+# Measurement noise R # TODO: get from genetic
 Rpos = 2
 R = np.eye(3)*Rpos
 
-# Matriz de ruido del proceso (Q)
-
-Qpos = 2
-Qvel = 2
-QorientX = 0.0002
-QorientY = 0.0002
-QorientZ = 0.2
-Qacc = 0.1
-QgyrX = 0.0001
-QgyrY = 0.0001
-QgyrZ = 0.1
-Q = np.zeros((15,15))
-Q[0:3,0:3] = np.eye(3)*Qpos
-Q[3:6,3:6] = np.eye(3)*Qvel
-Q[6:9,6:9] = np.array([[QorientX,0,0],[0,QorientY,0],[0,0,QorientZ]])
-Q[9:12,9:12] = np.eye(3)*Qacc
-Q[12:16,12:16] = np.array([[QgyrX,0,0],[0,QgyrY,0],[0,0,QgyrZ]])
-
-# Matriz de observacion (H)
-
+# Observation matrix H
 H = np.zeros((3,15))
 H[0:3,0:3]=np.eye(3)
 
-# Matrices de covarianza del estado (P) y de ganancia de Kalman (K) iniciales
-
-P = np.zeros((15,15))
+# Initial state covariance matrix (P) and Kalman gain (K)
+P = np.eye(15)*0.1 # TODO: get from modelling
 K = np.zeros((15,3))
-#%%
-################## IMPLEMENTACION DEL SISTEMA #########################
 
+################## RUN #########################
 for i in range(0,NN-1):
     
-   # CORRECION DE MEDIDAS DE LA IMU 
-   # con el accBias y el gyrBias
-   # estimados por el EKF
+    # IMU Correction
+    acc = accel_flu[i,:] + x[9:12]
+    gyr = gyro_flu[i,:] + x[12:15]
+
+    # Navigation equations. IMU State Estimation
+    yaw, pitch, roll = ypr
+    
+    Rbn = np.array([[cos(yaw),-sin(yaw),0],[sin(yaw),cos(yaw),0],[0,0,1]])
+    accENU = Rbn@acc
         
-    accX = accel_flu[i,0] + x[9]
-    accY = accel_flu[i,1] + x[10]
-    accZ = accel_flu[i,2] + x[11]
-    acc = np.array([accX,accY,accZ]) # medidas corregidas de aceleracion
-    gyrX = gyro_flu[i,0] + x[12]
-    gyrY = gyro_flu[i,1] + x[13]
-    gyrZ = gyro_flu[i,2] + x[14]
-    gyr = np.array([gyrX,gyrY,gyrZ]) # medidas corregidas de velocidad angular
-
-    # ECUACIONES DE NAVEGACION
+    pIMU = pIMU + Ts*vIMU + Ts**2/2*(accENU-g) # position ENU
+    vIMU = vIMU + Ts*(accENU-g) # velocity ENU
+    W = np.array([
+        [0, sin(roll)/cos(pitch), cos(roll)/cos(pitch)],
+        [0, cos(roll), -sin(roll)],
+        [1, sin(roll)*tan(pitch), cos(roll)*tan(pitch)]
+    ])
+    ypr = ypr + Ts*W@gyr # attitude update
     
-    yaw = ypr[0] # angulos de Euler
-    pitch = ypr[1]
-    roll = ypr[2]
-    
-    Rbn=np.array([[cos(yaw),-sin(yaw),0],[sin(yaw),cos(yaw),0],[0,0,1]]) # matriz de rotacion
-    
-    accENU = Rbn@acc # aceleracion en coordenadas ENU
-        
-    pIMU = pIMU + Ts*vIMU + Ts**2/2*(accENU-g) # posicion en coordenadas ENU
-    vIMU = vIMU + Ts*(accENU-g) # velocidad en coordenadas ENU
-    ypr = ypr + Ts*np.array([[0,sin(roll)/cos(pitch),cos(roll)/cos(pitch)],[0,cos(roll),-sin(roll)],[1,sin(roll)*tan(pitch),cos(roll)*tan(pitch)]])@gyr # orientacion
-    
-    # Se modifican los angulos de Euler para que esten dentro de los
-    # limites de los datos de KITTI y el calculo de los errores de
-    # orientacion sea mas exacto.
-    # El unico motivo de esta modificacion es el calculo de errores, no
-    # tiene nigun efecto en la implementacion del sistema.
-    # Solo se modifica el angulo yaw porque es el unico que puede
-    # llegar a sobrepasar los limites en el caso de un vehiculo
-    # terrestre.
-
-    # Modificacion del angulo yaw con limites (-pi, +pi)
-    
-    if(ypr[0]<-3.14):
-        ypr[0] = 2*np.pi+ypr[0]
-    if(ypr[0]>=3.14):
-        ypr[0] = -2*np.pi+ypr[0]
+    # Wrap yaw to [-π, π]
+    if ypr[0] < -np.pi:
+        ypr[0] = 2*np.pi + ypr[0]
+    if ypr[0] >= np.pi:
+        ypr[0] = -2*np.pi + ypr[0]
     
 
-    # FILTRO DE KALMAN (EKF)
-    
-    # Variables necesarias para la matriz dinamica del sistema
-    
-    accE = accENU[0]
-    accN = accENU[1]
-    accU = accENU[2]
-    
-    llaIMU = pm.enu2geodetic(pIMU[0],pIMU[1],pIMU[2],lla0[0],lla0[1],lla0[2]) # posicion estimada en coordenadas geodesicas
+    # Prediction
+    accE, accN, accU = accENU
+    llaIMU = pm.enu2geodetic(pIMU[0],pIMU[1],pIMU[2],lla0[0],lla0[1],lla0[2])
     lat = radians(llaIMU[0])
     alt = llaIMU[2]
     
-    M = a*(1-ecc**2)/((1-ecc**2*sin(lat)**2)**(3/2)) # radio de curvatura en el meridiano
-    N = a/sqrt(1-ecc**2*sin(lat)**2) # radio de curvatura en el plano vertical principal
+    M = a*(1-e2)/((1-e2*sin(lat)**2)**(3/2)) # radio de curvatura en el meridiano
+    N = a/sqrt(1-e2*sin(lat)**2) # radio de curvatura en el plano vertical principal
 
-    # Matriz dinamica del sistema (F)
-
+    # Dynamic matrix F
     F = np.zeros((15,15))
     F[0:3,3:6] = np.eye(3)
     F[3,7] = accU
@@ -232,52 +174,46 @@ for i in range(0,NN-1):
     F[6:9,12:15] = Rbn
     F[9:12,9:12] = -beta_acc*np.eye(3)
     F[12:15,12:15] = -beta_gyr*np.eye(3)
-        
-    #Prediccion
     
     F = np.eye(15) + F*Ts
     P = F@P@F.T + Q
     x = F@x
     
-    #Actualizacion
+    # Update
+    if ((i+1)<A or (i+1)>B): # if out of GNSS outage simulation
     
-    if ((i+1)<A or (i+1)>B): # si estamos fuera del tramo de perdida de GPS
-    
-        if not((i+1)%(frecIMU/frecGPS)): # si se recibe medida de GPS (frecGPS = 1 Hz)
+        if not((i+1)%(frecIMU/frecGPS)): # if GNSS measurement is available
             
-            K = P@H.T@np.linalg.inv(H@P@H.T + R) # Ganancia de Kalman
-            z = pm.geodetic2enu(lla[i,0],lla[i,1],lla[i,2],lla0[0],lla0[1],lla0[2]) - pIMU # Error de posicion entre medida de GPS en coordenadas ENU 
-                                                                                           # y posicion calculada por ecuaciones de navegacion
+            K = P@H.T@np.linalg.inv(H@P@H.T + R)
+            z = pm.geodetic2enu(lla[i,0],lla[i,1],lla[i,2],lla0[0],lla0[1],lla0[2]) - pIMU
             x = x + K@(z - H@x)
             P = (np.eye(15) - K@H)@P
     
-            # CORRECCION DE ESTADO DE NAVEGACION (cuando se completa la actualizacion)
-            pIMU = pIMU + x[0:3]    # posicion corregida
-            vIMU = vIMU + x[3:6]    # velocidad corregida
-            ypr[0] = ypr[0] + x[8]  # orientacion corregida
-            ypr[1] = ypr[1] + x[7]
-            ypr[2] = ypr[2] + x[6]
+            # Inject error state into nominal state
+            pIMU += x[0:3]  # position correction
+            vIMU += x[3:6]  # velocity correction
+            # Orientation correction: x[6:9] = [δroll, δpitch, δyaw]
+            ypr[2] += x[6]  # roll
+            ypr[1] += x[7]  # pitch  
+            ypr[0] += x[8]  # yaw
         
-    # GUARDAR RESULTADOS DE LA ITERACION ACTUAL
+    # Store current iteration results
+    p[i+1,:] = pIMU.T  # position
+    v[i+1,:] = vIMU.T  # velocity
+    r[i+1,0] = ypr[2]  # roll
+    r[i+1,1] = ypr[1]  # pitch
+    r[i+1,2] = ypr[0]  # yaw
     
-    p[i+1,:] = pIMU.T # posicion
-    v[i+1,:] = vIMU.T # velocidad
-    r[i+1,0] = ypr[2] # orientacion
-    r[i+1,1] = ypr[1]
-    r[i+1,2] = ypr[0]
-    
-    # REINICIO DE ERRORES DE NAVEGACION:
-    # cuando se produce la actualizacion del filtro y se corrigen el
-    # estado de navegacion, se asume que los errores de navegacion son
-    # nulos tras la correccion
+    # Error state reset after update (Error-State EKF)
+    # After injecting errors into nominal state, reset error state to zero
+    # Ref: Joan Solà 'Quaternion kinematics for the error-state KF'
     if ((i+1)<A or (i+1)>B):
         if not((i+1)%(frecIMU/frecGPS)):
-            ## x[0:9] = 0 # Incompleto Ref: Joan Solà 'Quaternion kinematics for the error-state KF'
-            # 1. Obtener el error de orientación estimado actual (x[6:9])
-            # Se usa antes de resetear x para calcular el Jacobiano.
-            d_theta = x[6:9] 
+            # 1. Get orientation error before reset (needed for covariance update)
+            d_theta = x[6:9]  # [δroll, δpitch, δyaw]
             
-            # 2. Bloque del Jacobiano para error local: G_theta = I - skew(0.5 * d_theta)
+            # 2. Compute reset Jacobian for small angle approximation
+            # G_theta = I - [0.5*δθ]ₓ (first-order approximation)
             half_skew = np.array([
                 [0, -0.5*d_theta[2], 0.5*d_theta[1]],
                 [0.5*d_theta[2], 0, -0.5*d_theta[0]],
@@ -285,13 +221,11 @@ for i in range(0,NN-1):
             ])
             G_theta = np.eye(3) - half_skew
             
-            # OPTIMIZED STEP 3 & 4 for Embedded (15-state)
-            # Only update the rows and columns related to orientation (indices 6:9)
-            P[6:9, :] = G_theta @ P[6:9, :]  # Update rows
-            P[:, 6:9] = P[:, 6:9] @ G_theta.T # Update columns
+            # 3. Update covariance for orientation block only (computational efficiency)
+            P[6:9, :] = G_theta @ P[6:9, :]      # Update rows
+            P[:, 6:9] = P[:, 6:9] @ G_theta.T    # Update columns
             
-            # 5. Reiniciar la media del vector de error a cero
-            # Los primeros 9 estados son (pos, vel, orient).
+            # 4. Reset navigation error state to zero (pos, vel, orient)
             x[0:9] = 0
 #%%
 ########################### MOSTRAR RESULTADOS Y ERRORES ########################
