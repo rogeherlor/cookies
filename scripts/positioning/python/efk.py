@@ -57,13 +57,13 @@ orient = orient.values
 
 ########################## VAR INIT ###############
 # No GNSS loss: t1=0, d=0
-t1 = 0  # time init loss in seconds
-d = 0   # duration of GNSS loss in seconds
+t1 = 20  # time init loss in seconds
+d = 10   # duration of GNSS loss in seconds
 frecIMU = 10        # 10 Hz
 frecGPS = 1         # 1 Hz
 
 lla0 = np.array([49.01,8.43,116.43])    # origin of ENU coordinate system
-g = np.array([0,0,9.81])                # gravity acceleration
+g = np.array([0,0,-9.81])               # gravity acceleration
 a = 6378137.0                           # equatorial radius [m]
 b = 6356752.3142                        # polar radius [m]
 e2 = 0.00669437999                      # eccentricity^2 (1-b^2/a^2)
@@ -87,17 +87,17 @@ r[0,:] = orient[0,:]
 # Navigation State Initialisation
 pIMU = p[0,:].T     # known position
 vIMU = v[0,:].T     # known velocity
-ypr = np.zeros(3)   # unkwon attitude (yaw, pitch, roll)
+rpy = np.zeros(3)   # unknown attitude [roll, pitch, yaw]
 
 ## Filter Initialisation
-beta_acc = 3.7e-7 # Gauss-Markov coef # TODO: get from modelling
-beta_gyr = 2.9e-1 # Gauss-Markov coef # TODO: get from modelling
+beta_acc = -3.7e-7 # Gauss-Markov coef # TODO: get from modelling
+beta_gyr = -2.9e-1 # Gauss-Markov coef # TODO: get from modelling
 
 # State initialisation x
 accBias = 1e-6      # bias inicial
 gyrBias = 1e-7      # bias inicial
 x = np.zeros(15)    # state x = (δp[3], δv[3], δϵ[3], b_acc[3], b_gyr[3])
-                    # δϵ = [δroll, δpitch, δyaw] (indices 6,7,8)
+                    # δϵ = [δφ, δθ, δψ] = [δroll, δpitch, δyaw] (indices 6,7,8)
 x[9:12] = accBias
 x[12:15] = gyrBias
 
@@ -117,63 +117,69 @@ H = np.zeros((3,15))
 H[0:3,0:3]=np.eye(3)
 
 # Initial state covariance matrix (P) and Kalman gain (K)
-P = np.eye(15)*0.1 # TODO: get from modelling
+P = np.eye(15)*0.0 # TODO: get from modelling
 K = np.zeros((15,3))
 
 ################## RUN #########################
 for i in range(0,NN-1):
     
-    # IMU Correction
-    acc = accel_flu[i,:] + x[9:12]
-    gyr = gyro_flu[i,:] + x[12:15]
+    # IMU Correction - subtract estimated biases from measurements
+    acc = accel_flu[i,:] - x[9:12]
+    gyr = gyro_flu[i,:] - x[12:15]
 
     # Navigation equations. IMU State Estimation
-    yaw, pitch, roll = ypr
+    roll, pitch, yaw = rpy
     
-    Rbn = np.array([[cos(yaw),-sin(yaw),0],[sin(yaw),cos(yaw),0],[0,0,1]])
+    Rz = np.array([[cos(yaw), -sin(yaw), 0], [sin(yaw), cos(yaw), 0], [0, 0, 1]])
+    # Ry = np.array([[cos(pitch), 0, sin(pitch)], [0, 1, 0], [-sin(pitch), 0, cos(pitch)]])
+    # Rx = np.array([[1, 0, 0], [0, cos(roll), -sin(roll)], [0, sin(roll), cos(roll)]])
+    # Rbn = Rz @ Ry @ Rx
+    Rbn = Rz
     accENU = Rbn@acc
         
-    pIMU = pIMU + Ts*vIMU + Ts**2/2*(accENU-g) # position ENU
-    vIMU = vIMU + Ts*(accENU-g) # velocity ENU
+    pIMU = pIMU + Ts*vIMU + Ts**2/2*(accENU+g) # position ENU
+    vIMU = vIMU + Ts*(accENU+g) # velocity ENU
     W = np.array([
-        [0, sin(roll)/cos(pitch), cos(roll)/cos(pitch)],
+        [1, sin(roll)*tan(pitch), cos(roll)*tan(pitch)],
         [0, cos(roll), -sin(roll)],
-        [1, sin(roll)*tan(pitch), cos(roll)*tan(pitch)]
+        [0, sin(roll)/cos(pitch), cos(roll)/cos(pitch)]
     ])
-    ypr = ypr + Ts*W@gyr # attitude update
+    rpy = rpy + Ts*W@gyr # attitude update
     
     # Wrap yaw to [-π, π]
-    if ypr[0] < -np.pi:
-        ypr[0] = 2*np.pi + ypr[0]
-    if ypr[0] >= np.pi:
-        ypr[0] = -2*np.pi + ypr[0]
+    if rpy[2] < -np.pi:
+        rpy[2] = 2*np.pi + rpy[2]
+    if rpy[2] >= np.pi:
+        rpy[2] = -2*np.pi + rpy[2]
     
 
     # Prediction
-    accE, accN, accU = accENU
+    fE, fN, fU = accENU  # specific force in navigation frame
     llaIMU = pm.enu2geodetic(pIMU[0],pIMU[1],pIMU[2],lla0[0],lla0[1],lla0[2])
     lat = radians(llaIMU[0])
     alt = llaIMU[2]
     
-    M = a*(1-e2)/((1-e2*sin(lat)**2)**(3/2)) # radio de curvatura en el meridiano
-    N = a/sqrt(1-e2*sin(lat)**2) # radio de curvatura en el plano vertical principal
+    M = a*(1-e2)/((1-e2*sin(lat)**2)**(3/2)) # meridian radius of curvature
+    N = a/sqrt(1-e2*sin(lat)**2) # prime vertical radius of curvature
 
-    # Dynamic matrix F
+    # Dynamic matrix F (equation 6)
     F = np.zeros((15,15))
+    # F_pv block: position to velocity coupling
     F[0:3,3:6] = np.eye(3)
-    F[3,7] = accU
-    F[3,8] = -accN
-    F[4,6] = -accU
-    F[4,8] = accE
-    F[5,6] = accN
-    F[5,7] = -accE
-    F[6,4] = 1/(M+alt)
-    F[7,3] = 1/(N+alt)
-    F[8,3] = tan(lat)/(N+alt)
-    F[3:6,9:12] = Rbn
-    F[6:9,12:15] = Rbn
-    F[9:12,9:12] = -beta_acc*np.eye(3)
-    F[12:15,12:15] = -beta_gyr*np.eye(3)
+    # -F_vε block: negative of skew-symmetric matrix -[f^n ×]
+    F[3,7] = fU
+    F[3,8] = -fN
+    F[4,6] = -fU
+    F[4,8] = fE
+    F[5,6] = fN
+    F[5,7] = -fE
+    # Accelerometer bias coupling
+    F[3:6,9:12] = -Rbn
+    # Gyroscope bias coupling
+    F[6:9,12:15] = -Rbn
+    # Gauss-Markov bias dynamics
+    F[9:12,9:12] = beta_acc*np.eye(3)
+    F[12:15,12:15] = beta_gyr*np.eye(3)
     
     F = np.eye(15) + F*Ts
     P = F@P@F.T + Q
@@ -192,17 +198,17 @@ for i in range(0,NN-1):
             # Inject error state into nominal state
             pIMU += x[0:3]  # position correction
             vIMU += x[3:6]  # velocity correction
-            # Orientation correction: x[6:9] = [δroll, δpitch, δyaw]
-            ypr[2] += x[6]  # roll
-            ypr[1] += x[7]  # pitch  
-            ypr[0] += x[8]  # yaw
+            # Orientation correction: x[6:9] = [δφ, δθ, δψ] = [δroll, δpitch, δyaw], rpy = [roll, pitch, yaw]
+            rpy[0] += x[6]  # roll
+            rpy[1] += x[7]  # pitch
+            rpy[2] += x[8]  # yaw
         
     # Store current iteration results
     p[i+1,:] = pIMU.T  # position
     v[i+1,:] = vIMU.T  # velocity
-    r[i+1,0] = ypr[2]  # roll
-    r[i+1,1] = ypr[1]  # pitch
-    r[i+1,2] = ypr[0]  # yaw
+    r[i+1,0] = rpy[0]  # roll (orient is [roll, pitch, yaw])
+    r[i+1,1] = rpy[1]  # pitch
+    r[i+1,2] = rpy[2]  # yaw
     
     # Error state reset after update (Error-State EKF)
     # After injecting errors into nominal state, reset error state to zero
@@ -227,19 +233,18 @@ for i in range(0,NN-1):
             
             # 4. Reset navigation error state to zero (pos, vel, orient)
             x[0:9] = 0
-#%%
-########################### MOSTRAR RESULTADOS Y ERRORES ########################
 
-# DIBUJAR LA TRAYECTORIA
+########################### RESULTS AND VISUALISATION ###########################
 
-f = pm.geodetic2enu(lla[:,0],lla[:,1],lla[:,2],lla0[0],lla0[1],lla0[2]) # pasar la trayectoria real de geodesicas a ENU
+# PLOT THE TRAJECTORY
+f = pm.geodetic2enu(lla[:,0],lla[:,1],lla[:,2],lla0[0],lla0[1],lla0[2]) # convert the real trajectory from geodetic to ENU
 
-plt.plot(f[0],f[1],'k',label='Trayectoria') # trayectoria real en negro
-plt.plot(p[:,0],p[:,1],'b',label='EKF') # trayectoria estimada por el sistema en azul
+plt.plot(f[0],f[1],'k',label='Trajectory') # real trajectory in black
+plt.plot(p[:,0],p[:,1],'b',label='EKF') # estimated trajectory by the system in blue
 
-if A!=0 or B!=0: # tramo perdida de datos de GPS 
-    plt.plot(p[A:B,0],p[A:B,1],'r',label='EKF en pérdida GPS') # salida del sistema en rojo
-    plt.plot(f[0][A:B],f[1][A:B],'g',label='Trayectoria en pérdida GPS' ) # trayectoria real en verde
+if A!=0 or B!=0: # GNSS outage segment
+    plt.plot(p[A:B,0],p[A:B,1],'r',label='EKF during GPS outage') # system output in red
+    plt.plot(f[0][A:B],f[1][A:B],'g',label='Trajectory during GPS outage' ) # real trajectory in green
 plt.legend()
 plt.show()
 

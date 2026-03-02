@@ -63,8 +63,8 @@ orient = orient.values
 # DATOS
 
 # Si no se quiere simular un tramo de perdida de GPS: t1=0, d=0
-t1 = 0  # instante inicial de perdida de GPS en segundos
-d = 0   # duracion del tramo de perdida de GPS en segundos
+t1 = 20  # instante inicial de perdida de GPS en segundos
+d = 10   # duracion del tramo de perdida de GPS en segundos
 
 NN = lla.shape[0]   # numero de datos en la trayectoria
 frecIMU = 10        # 10 Hz
