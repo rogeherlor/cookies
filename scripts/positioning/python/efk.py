@@ -1,66 +1,31 @@
 import os
+import logging
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-from pandas import read_csv
-from math import sqrt
-from math import sin
-from math import cos
-from math import tan
-from math import radians
+from math import sin, cos, tan, radians, sqrt
 import pymap3d as pm
-from scipy.io import loadmat
 from pathlib import Path
-from sklearn.metrics import mean_squared_error
+from datetime import datetime
+import metrics
+import data_loader
 
 ################### LOAD DATA ###########################
-# Load raw KITTI ('10_03_0034.mat')
-base_dir = Path(__file__).parent
-data_path = os.path.join(base_dir, '../../../', 'datasets','raw_kitti', '10_03_0034.mat')
-data = loadmat(data_path)
+# Load navigation data from KITTI dataset
+nav_data = data_loader.get_kitti_dataset('10_03_0034')
 
-accel_flu = data['accel_flu']
-gyro_flu = data['gyro_flu']
-vel_enu = data['vel_enu']
-lla = data['lla']
-orient = data['rpy']
-
-accel_flu = pd.DataFrame(accel_flu)
-accel_flu.columns = ['accelX','accelY','accelZ']
-accel_flu.to_csv('accel_flu.csv')
-accel_flu = read_csv('accel_flu.csv', header=0, index_col=0)
-accel_flu = accel_flu.values
-
-gyro_flu = pd.DataFrame(gyro_flu)
-gyro_flu.columns = ['gyroX','gyroY','gyroZ']
-gyro_flu.to_csv('gyro_flu.csv')
-gyro_flu = read_csv('gyro_flu.csv', header=0, index_col=0)
-gyro_flu = gyro_flu.values
-
-vel_enu = pd.DataFrame(vel_enu)
-vel_enu.columns = ['velE','velN','velU']
-vel_enu.to_csv('vel_enu.csv')
-vel_enu = read_csv('vel_enu.csv', header=0, index_col=0)
-vel_enu = vel_enu.values
-
-lla = pd.DataFrame(lla)
-lla.columns = ['lat','lon','alt']
-lla.to_csv('lla.csv')
-lla = read_csv('lla.csv', header=0, index_col=0)
-lla = lla.values
-
-orient = pd.DataFrame(orient)
-orient.columns = ['roll','pitch','yaw']
-orient.to_csv('orient.csv')
-orient = read_csv('orient.csv', header=0, index_col=0)
-orient = orient.values
+# Extract data arrays
+accel_flu = nav_data.accel_flu
+gyro_flu = nav_data.gyro_flu
+vel_enu = nav_data.vel_enu
+lla = nav_data.lla
+orient = nav_data.orient
 
 ########################## VAR INIT ###############
 # No GNSS loss: t1=0, d=0
 t1 = 20  # time init loss in seconds
 d = 10   # duration of GNSS loss in seconds
-frecIMU = 10        # 10 Hz
-frecGPS = 1         # 1 Hz
+frecIMU = nav_data.sample_rate  # Use sample rate from data
+frecGPS = 1                      # 1 Hz
 
 lla0 = np.array([49.01,8.43,116.43])    # origin of ENU coordinate system
 g = np.array([0,0,-9.81])               # gravity acceleration
@@ -70,8 +35,8 @@ e2 = 0.00669437999                      # eccentricity^2 (1-b^2/a^2)
 ep2 = 0.00673949674                     # second eccentricity^2 (a^2/b^2 -1)
 
 t2 = t1+d                               # time end loss in seconds
-A = t1*frecIMU                          # data index start loss
-B = t2*frecIMU                          # data index end loss
+A = int(t1*frecIMU)                     # data index start loss
+B = int(t2*frecIMU)                     # data index end loss
 Ts= 1/frecIMU                           # sampling time
 
 # Output Storage Navigation State Estimates
@@ -239,57 +204,76 @@ for i in range(0,NN-1):
 # PLOT THE TRAJECTORY
 f = pm.geodetic2enu(lla[:,0],lla[:,1],lla[:,2],lla0[0],lla0[1],lla0[2]) # convert the real trajectory from geodetic to ENU
 
-plt.plot(f[0],f[1],'k',label='Trajectory') # real trajectory in black
-plt.plot(p[:,0],p[:,1],'b',label='EKF') # estimated trajectory by the system in blue
+# Create interactive figure with zoom capability
+fig, ax = plt.subplots(figsize=(12, 8))
+ax.plot(f[0],f[1],'k',linewidth=1.5, label='Ground Truth') # real trajectory in black
+ax.plot(p[:,0],p[:,1],'b',linewidth=1.5, alpha=0.7, label='EKF Estimate') # estimated trajectory by the system in blue
 
 if A!=0 or B!=0: # GNSS outage segment
-    plt.plot(p[A:B,0],p[A:B,1],'r',label='EKF during GPS outage') # system output in red
-    plt.plot(f[0][A:B],f[1][A:B],'g',label='Trajectory during GPS outage' ) # real trajectory in green
-plt.legend()
+    ax.plot(p[A:B,0],p[A:B,1],'r',linewidth=2, label='EKF during GPS outage') # system output in red
+    ax.plot(f[0][A:B],f[1][A:B],'g',linewidth=2, label='Ground Truth during GPS outage') # real trajectory in green
+
+ax.set_xlabel('East (m)', fontsize=12)
+ax.set_ylabel('North (m)', fontsize=12)
+ax.set_title('EKF Trajectory Estimation (Scroll to Zoom)', fontsize=14)
+ax.grid(True, alpha=0.3)
+ax.legend(fontsize=10)
+ax.axis('equal')
+
+# Enable interactive zooming with scroll wheel
+plt.tight_layout()
 plt.show()
 
-# ERRORES 
+########################### TRAJECTORY EVALUATION ###########################
 
-# Error posicion en coordenadas ENU
-pRMS_E = sqrt(mean_squared_error(f[0],p[:,0]))
-pRMS_N = sqrt(mean_squared_error(f[1],p[:,1]))
-pRMS_U = sqrt(mean_squared_error(f[2],p[:,2]))
-    
-# Error velocidad en coordenadas ENU
-vRMS_E = sqrt(mean_squared_error(vel_enu[:,0],v[:,0]))
-vRMS_N = sqrt(mean_squared_error(vel_enu[:,1],v[:,1]))
-vRMS_U = sqrt(mean_squared_error(vel_enu[:,2],v[:,2]))
+# Convert ground truth trajectory to ENU array format
+f = pm.geodetic2enu(lla[:,0],lla[:,1],lla[:,2],lla0[0],lla0[1],lla0[2])
+f_array = np.column_stack([f[0], f[1], f[2]])  # Nx3 array [E, N, U]
 
-# Error orientacion en angulos de Euler
-rRMS_R = sqrt(mean_squared_error(orient[:,0],r[:,0]))
-rRMS_P = sqrt(mean_squared_error(orient[:,1],r[:,1]))
-rRMS_Y = sqrt(mean_squared_error(orient[:,2],r[:,2]))
-    
-print('Error en posicion E: %.3f' % pRMS_E)
-print('N: %.3f' %pRMS_N)
-print('U: %.3f' %pRMS_U)
+# Prepare GNSS outage information
+gnss_outage_info = {
+    'start': t1,
+    'end': t2,
+    'duration': d,
+    'start_idx': A,
+    'end_idx': B
+}
 
-print('Error en velocidad E: %.3f' % vRMS_E )
-print('N: %.3f' %vRMS_N)
-print('U: %.3f' %vRMS_U)
+# Run comprehensive evaluation
+results = metrics.evaluate_navigation_performance(
+    p_est=p,
+    v_est=v,
+    r_est=r,
+    p_gt=f_array,
+    v_gt=vel_enu,
+    r_gt=orient,
+    dataset_name=nav_data.dataset_name,
+    gnss_outage_info=gnss_outage_info,
+    sample_rate=frecIMU
+)
 
-print('Error en orientacion roll: %.3f' % rRMS_R)
-print('pitch: %.3f' %rRMS_P)
-print('yaw: %.3f' %rRMS_Y)
+# Create logs directory and save results
+base_dir = Path(__file__).parent
+logs_dir = os.path.join(base_dir, '../../../logs')
+os.makedirs(logs_dir, exist_ok=True)
 
-# Errores absolutos de posicion 
-error_E_EKF=np.zeros((p.shape[0],1))
-error_N_EKF=np.zeros((p.shape[0],1))
+timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+log_file = os.path.join(logs_dir, f'ekf_errors_{timestamp}.log')
 
-for i in range(0,p.shape[0]-1):
-    error_E_EKF[i]= abs(f[0][i]-p[i,0])
-    error_N_EKF[i]= abs(f[1][i]-p[i,1])
-        
-# Errores absolutos de orientacion 
-error_yaw_EKF=np.zeros((1000,1))
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
 
-for i in range(0,1000):
-    error_yaw_EKF[i]= abs(orient[i,2]-r[i,2])
+logger = logging.getLogger(__name__)
+
+# Log all evaluation results
+metrics.log_evaluation_results(logger, results, log_file)
 
 
 
