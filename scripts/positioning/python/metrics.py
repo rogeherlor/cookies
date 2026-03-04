@@ -55,29 +55,46 @@ def compute_ate(p_est, p_gt, align=True):
     ATE measures the global consistency of the trajectory after removing
     systematic biases through alignment. Lower is better.
     
+    Note: Set align=False when trajectories are already in the same coordinate
+    frame (e.g., both in ENU with same origin). Alignment is only needed when
+    comparing trajectories from different sensors/coordinate systems.
+    
     Args:
-        p_est: Estimated trajectory (Nx3 numpy array)
-        p_gt: Ground truth trajectory (Nx3 numpy array)
+        p_est: Estimated trajectory (Nx3 numpy array) [E, N, U]
+        p_gt: Ground truth trajectory (Nx3 numpy array) [E, N, U]
         align: Whether to perform SE(3) alignment (default: True)
     
     Returns:
-        dict: Statistics including rmse, mean, median, std, min, max, and raw errors
+        dict: Statistics including rmse (total, E, N, 2D, U, 3D), mean, median, std, min, max, and raw errors
     """
     if align:
         p_est_aligned, _, _, _ = align_trajectories(p_est, p_gt)
     else:
         p_est_aligned = p_est
     
-    errors = np.linalg.norm(p_gt - p_est_aligned, axis=1)
+    # Component-wise errors
+    diff = p_gt - p_est_aligned
+    error_E = np.abs(diff[:, 0])
+    error_N = np.abs(diff[:, 1])
+    error_U = np.abs(diff[:, 2])
+    
+    # Aggregate errors
+    error_2D = np.sqrt(diff[:, 0]**2 + diff[:, 1]**2)
+    error_3D = np.linalg.norm(diff, axis=1)
     
     return {
-        'rmse': np.sqrt(np.mean(errors**2)),
-        'mean': np.mean(errors),
-        'median': np.median(errors),
-        'std': np.std(errors),
-        'min': np.min(errors),
-        'max': np.max(errors),
-        'errors': errors
+        'rmse': np.sqrt(np.mean(error_3D**2)),
+        'rmse_E': np.sqrt(np.mean(error_E**2)),
+        'rmse_N': np.sqrt(np.mean(error_N**2)),
+        'rmse_2D': np.sqrt(np.mean(error_2D**2)),
+        'rmse_U': np.sqrt(np.mean(error_U**2)),
+        'rmse_3D': np.sqrt(np.mean(error_3D**2)),
+        'mean': np.mean(error_3D),
+        'median': np.median(error_3D),
+        'std': np.std(error_3D),
+        'min': np.min(error_3D),
+        'max': np.max(error_3D),
+        'errors': error_3D
     }
 
 
@@ -138,6 +155,26 @@ def compute_traditional_rmse(est, gt):
     return sqrt(mean_squared_error(gt, est))
 
 
+def compute_angle_rmse(est_angles, gt_angles):
+    """
+    Compute RMSE for angular values with proper wrapping.
+    
+    Handles discontinuities at ±π by computing the smallest angular difference.
+    
+    Args:
+        est_angles: Estimated angles in radians (N-dimensional array)
+        gt_angles: Ground truth angles in radians (N-dimensional array)
+    
+    Returns:
+        float: Root mean squared angular error
+    """
+    # Compute angle difference with wrapping
+    diff = gt_angles - est_angles
+    # Wrap to [-π, π] using atan2 trick
+    diff_wrapped = np.arctan2(np.sin(diff), np.cos(diff))
+    return sqrt(np.mean(diff_wrapped**2))
+
+
 def compute_instantaneous_errors(p_est, p_gt):
     """
     Compute instantaneous absolute errors at each timestep.
@@ -147,18 +184,20 @@ def compute_instantaneous_errors(p_est, p_gt):
         p_gt: Ground truth trajectory (Nx3 numpy array) [E, N, U]
     
     Returns:
-        dict: Errors in each axis and 2D horizontal error
+        dict: Errors in each axis, 2D horizontal error, and 3D total error
     """
     error_E = np.abs(p_gt[:, 0] - p_est[:, 0])
     error_N = np.abs(p_gt[:, 1] - p_est[:, 1])
     error_U = np.abs(p_gt[:, 2] - p_est[:, 2])
     error_pos_2D = np.sqrt(error_E**2 + error_N**2)
+    error_pos_3D = np.sqrt(error_E**2 + error_N**2 + error_U**2)
     
     return {
         'E': error_E,
         'N': error_N,
         'U': error_U,
-        '2D': error_pos_2D
+        '2D': error_pos_2D,
+        '3D': error_pos_3D
     }
 
 
@@ -207,12 +246,16 @@ def log_evaluation_results(logger, results, log_file):
     logger.info('Position RMSE (meters):')
     logger.info(f'  East:  {results["position_rmse"]["E"]:.3f} m')
     logger.info(f'  North: {results["position_rmse"]["N"]:.3f} m')
+    logger.info(f'  2D Horizontal: {results["position_rmse"]["2D"]:.3f} m')
     logger.info(f'  Up:    {results["position_rmse"]["U"]:.3f} m')
+    logger.info(f'  3D Total: {results["position_rmse"]["3D"]:.3f} m')
     logger.info('')
     logger.info('Velocity RMSE (m/s):')
     logger.info(f'  East:  {results["velocity_rmse"]["E"]:.3f} m/s')
     logger.info(f'  North: {results["velocity_rmse"]["N"]:.3f} m/s')
+    logger.info(f'  2D Horizontal: {results["velocity_rmse"]["2D"]:.3f} m/s')
     logger.info(f'  Up:    {results["velocity_rmse"]["U"]:.3f} m/s')
+    logger.info(f'  3D Total: {results["velocity_rmse"]["3D"]:.3f} m/s')
     logger.info('')
     logger.info('Orientation RMSE (radians):')
     logger.info(f'  Roll:  {results["orientation_rmse"]["roll"]:.3f} rad')
@@ -221,9 +264,16 @@ def log_evaluation_results(logger, results, log_file):
     logger.info('')
     
     # ATE
-    logger.info('--- Absolute Trajectory Error (ATE) - with SE(3) alignment ---')
+    logger.info('--- Absolute Trajectory Error (ATE) - no alignment (same ENU frame) ---')
     ate = results["ate"]
-    logger.info(f'  RMSE:   {ate["rmse"]:.3f} m')
+    logger.info('ATE RMSE (meters):')
+    logger.info(f'  East:  {ate["rmse_E"]:.3f} m')
+    logger.info(f'  North: {ate["rmse_N"]:.3f} m')
+    logger.info(f'  2D Horizontal: {ate["rmse_2D"]:.3f} m')
+    logger.info(f'  Up:    {ate["rmse_U"]:.3f} m')
+    logger.info(f'  3D Total: {ate["rmse_3D"]:.3f} m')
+    logger.info('')
+    logger.info('ATE Statistics (3D):')
     logger.info(f'  Mean:   {ate["mean"]:.3f} m')
     logger.info(f'  Median: {ate["median"]:.3f} m')
     logger.info(f'  Std:    {ate["std"]:.3f} m')
@@ -294,30 +344,40 @@ def evaluate_navigation_performance(p_est, v_est, r_est, p_gt, v_gt, r_gt,
     position_rmse = {
         'E': compute_traditional_rmse(p_est[:, 0], p_gt[:, 0]),
         'N': compute_traditional_rmse(p_est[:, 1], p_gt[:, 1]),
-        'U': compute_traditional_rmse(p_est[:, 2], p_gt[:, 2])
+        '2D': sqrt(mean_squared_error(p_gt[:, :2].ravel(), p_est[:, :2].ravel())),  # Horizontal 2D RMSE
+        'U': compute_traditional_rmse(p_est[:, 2], p_gt[:, 2]),
+        '3D': sqrt(mean_squared_error(p_gt.ravel(), p_est.ravel()))  # Total 3D RMSE
     }
     
     velocity_rmse = {
         'E': compute_traditional_rmse(v_est[:, 0], v_gt[:, 0]),
         'N': compute_traditional_rmse(v_est[:, 1], v_gt[:, 1]),
-        'U': compute_traditional_rmse(v_est[:, 2], v_gt[:, 2])
+        '2D': sqrt(mean_squared_error(v_gt[:, :2].ravel(), v_est[:, :2].ravel())),  # Horizontal 2D RMSE
+        'U': compute_traditional_rmse(v_est[:, 2], v_gt[:, 2]),
+        '3D': sqrt(mean_squared_error(v_gt.ravel(), v_est.ravel()))  # Total 3D RMSE
     }
     
     orientation_rmse = {
         'roll': compute_traditional_rmse(r_est[:, 0], r_gt[:, 0]),
         'pitch': compute_traditional_rmse(r_est[:, 1], r_gt[:, 1]),
-        'yaw': compute_traditional_rmse(r_est[:, 2], r_gt[:, 2])
+        'yaw': compute_angle_rmse(r_est[:, 2], r_gt[:, 2])  # Use angle-aware RMSE
     }
     
     # Advanced trajectory metrics
-    ate = compute_ate(p_est, p_gt, align=True)
+    # Both trajectories are in same ENU frame - no alignment needed
+    # Alignment would introduce artificial scaling errors
+    ate = compute_ate(p_est, p_gt, align=False)
     rte_1s = compute_rte(p_est, p_gt, delta=int(1*sample_rate))   # 1 second
     rte_5s = compute_rte(p_est, p_gt, delta=int(5*sample_rate))   # 5 seconds
     rte_10s = compute_rte(p_est, p_gt, delta=int(10*sample_rate)) # 10 seconds
     
     # Instantaneous errors
     inst_errors = compute_instantaneous_errors(p_est, p_gt)
-    error_yaw = np.abs(r_gt[:, 2] - r_est[:, 2])
+    # Yaw error with proper angle wrapping (handle ±π transitions)
+    yaw_diff = r_gt[:, 2] - r_est[:, 2]
+    # Wrap to [-π, π] range
+    yaw_diff = np.arctan2(np.sin(yaw_diff), np.cos(yaw_diff))
+    error_yaw = np.abs(yaw_diff)
     
     # Peak errors
     peak_errors = {

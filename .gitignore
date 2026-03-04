@@ -3,6 +3,7 @@ datasets/*
 external/*
 artifacts/*
 logs/*
+outputs/*
 
 simplicity/**/*.mk
 

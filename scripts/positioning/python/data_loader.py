@@ -29,10 +29,14 @@ class NavigationData:
     vel_enu: np.ndarray        # Velocity in ENU frame [east, north, up] (m/s)
     lla: np.ndarray            # Position in geodetic coordinates [lat, lon, alt] (deg, deg, m)
     orient: np.ndarray         # Orientation as Euler angles [roll, pitch, yaw] (rad)
+    gps_available: np.ndarray  # Boolean array indicating which samples have actual GPS measurements (N,)
     
     # Metadata
     sample_rate: float         # Sampling rate in Hz
     dataset_name: str          # Name/identifier of the dataset
+    gps_rate: float            # GPS update rate in Hz
+    lla0: np.ndarray = None    # ENU origin coordinates [lat, lon, alt] (deg, deg, m)
+    time: np.ndarray = None    # Time array in seconds from start (optional, for asynchronous data)
     
     def __len__(self):
         """Return number of samples in the dataset."""
@@ -47,6 +51,8 @@ class NavigationData:
         assert self.vel_enu.shape == (n_samples, 3), f"vel_enu shape mismatch: {self.vel_enu.shape}"
         assert self.lla.shape == (n_samples, 3), f"lla shape mismatch: {self.lla.shape}"
         assert self.orient.shape == (n_samples, 3), f"orient shape mismatch: {self.orient.shape}"
+        assert self.gps_available.shape == (n_samples,), f"gps_available shape mismatch: {self.gps_available.shape}"
+        assert self.gps_available.dtype == bool, f"gps_available must be boolean array"
         
         return True
 
@@ -85,6 +91,25 @@ def load_kitti_mat(filepath: str, sample_rate: float = 10.0) -> NavigationData:
     # Get dataset name from filename
     dataset_name = Path(filepath).stem
     
+    # Create GPS availability mask (1 Hz updates)
+    # Assume GPS arrives at 1 Hz, so mark every (sample_rate) samples
+    n_samples = len(lla)
+    gps_rate = 1.0  # Hz
+    gps_interval = int(sample_rate / gps_rate)
+    gps_available = np.zeros(n_samples, dtype=bool)
+    gps_available[::gps_interval] = True  # Mark GPS updates at 1 Hz
+    
+    # Compute IMU samples between GPS updates statistics
+    gps_indices = np.where(gps_available)[0]
+    if len(gps_indices) > 1:
+        imu_between_gps = np.diff(gps_indices)
+        mean_imu_between = np.mean(imu_between_gps)
+        min_imu_between = np.min(imu_between_gps)
+        max_imu_between = np.max(imu_between_gps)
+        print(f"IMU samples between GPS updates: mean={mean_imu_between:.1f}, min={min_imu_between}, max={max_imu_between}")
+    
+    print(f"KITTI data: {n_samples} samples at {sample_rate} Hz, GPS updates at {gps_rate} Hz ({np.sum(gps_available)} updates)")
+    
     # Create NavigationData object
     nav_data = NavigationData(
         accel_flu=accel_flu,
@@ -92,8 +117,11 @@ def load_kitti_mat(filepath: str, sample_rate: float = 10.0) -> NavigationData:
         vel_enu=vel_enu,
         lla=lla,
         orient=orient,
+        gps_available=gps_available,
         sample_rate=sample_rate,
-        dataset_name=dataset_name
+        dataset_name=dataset_name,
+        gps_rate=gps_rate,
+        lla0=lla[0].copy(),  # ENU origin = first GPS position
     )
     
     # Validate data consistency
@@ -102,20 +130,349 @@ def load_kitti_mat(filepath: str, sample_rate: float = 10.0) -> NavigationData:
     return nav_data
 
 
-def load_cookies_data(filepath: str, sample_rate: float = 10.0) -> NavigationData:
+def load_cookies_data(filepath: str, sample_rate: float = None, resample: bool = False, target_rate: float = 10.0) -> NavigationData:
     """
-    Load COOKIES dataset from custom format.
+    Load COOKIES dataset from log file.
     
     Args:
-        filepath: Path to the COOKIES data file
-        sample_rate: Sampling rate in Hz
+        filepath: Path to the COOKIES .log file
+        sample_rate: Auto-detected from data if None
+        resample: Whether to resample to uniform rate (default: True)
+        target_rate: Target sample rate in Hz if resampling (default: 10 Hz)
     
     Returns:
         NavigationData object with standardized format
     
-    TODO: Implement based on COOKIES data format
+    COOKIES Log Format:
+        - Timestamp: [YYYY-MM-DD HH:MM:SS.nnnnnnnnn]
+        - IMU: A = ax, ay, az;G = gx, gy, gz;Ts1 = dt; Sum = cumsum;
+        - GPS: KUpd; lat_s: lat_scaled, lon_s: lon_scaled, alt_s: alt_scaled; vel_s: vel_scaled;
+        
+    Scaling factors (from hardware):
+        - lat/lon: GPS outputs NMEA format (DDMM.MMMM) as integer without decimal point
+          e.g., 40264184 = 4026.4184 = 40° 26.4184' = 40 + 26.4184/60 = 40.440306°
+          Format: First 2-3 digits are degrees, remaining 6 digits are minutes × 10000
+        - alt: divide by 100 to get meters
+        - vel: divide by 100 to get m/s
+        - accel: raw values in milli-g, divide by 1000 and multiply by 9.81 for m/s²
+        - gyro: raw values in milli-dps, divide by 1000 and convert to rad/s
+        
+    Note: Longitude should be negative for western hemisphere (Madrid is ~-3.7°W)
     """
-    raise NotImplementedError("COOKIES data loader not yet implemented")
+    import re
+    from datetime import datetime
+    from scipy.interpolate import interp1d
+    import pymap3d as pm
+    
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"COOKIES file not found: {filepath}")
+    
+    # Lists to store parsed data
+    timestamps = []
+    accel_raw = []  # Raw accelerometer in body frame
+    gyro_raw = []   # Raw gyroscope in body frame
+    gps_data = []   # GPS measurements: [timestamp, lat, lon, alt, vel]
+    
+    # Regular expressions for parsing
+    timestamp_pattern = r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\]'
+    imu_pattern = r'A = (-?\d+), (-?\d+), (-?\d+);G = (-?\d+), (-?\d+), (-?\d+)'
+    gps_pattern = r'KUpd; lat_s: (\d+), lon_s: (\d+), alt_s: (\d+); vel_s: (\d+)'
+    
+    # Track last GPS values to detect actual updates (GPS updates at 1Hz, but KUpd printed at ~8Hz)
+    last_gps_values = None
+    
+    print(f"Parsing COOKIES log file: {filepath}")
+    with open(filepath, 'r') as f:
+        for line in f:
+            # Extract timestamp
+            ts_match = re.search(timestamp_pattern, line)
+            if not ts_match:
+                continue
+            
+            ts_str = ts_match.group(1)
+            # Handle nanosecond precision (9 digits) - Python only supports microseconds (6 digits)
+            # Split timestamp at decimal point and truncate fractional seconds to 6 digits
+            if '.' in ts_str:
+                date_part, frac_part = ts_str.rsplit('.', 1)
+                frac_part = frac_part[:6]  # Keep only first 6 digits (microseconds)
+                ts_str = f"{date_part}.{frac_part}"
+            ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S.%f')
+            
+            # Check for IMU data
+            imu_match = re.search(imu_pattern, line)
+            if imu_match:
+                ax, ay, az = map(int, imu_match.groups()[0:3])
+                gx, gy, gz = map(int, imu_match.groups()[3:6])
+                
+                timestamps.append(ts)
+                
+                # Convert from milli-g to m/s² and milli-dps to rad/s
+                accel_mg = np.array([ax, ay, az]) / 1000.0  # milli-g to g
+                gyro_mdps = np.array([gx, gy, gz]) / 1000.0  # milli-dps to dps
+                
+                # Apply axis transformation from COOKIES frame to EKF FLU frame
+                # COOKIES: x_cookie -> -x_ekf (forward)
+                #          y_cookie -> -z_ekf (up)  
+                #          z_cookie -> -y_ekf (left)
+                # Result: [Forward, Left, Up] in EKF frame
+                accel_flu = np.array([
+                    -accel_mg[0] * 9.81,      # Forward = -x_cookie * g
+                    -accel_mg[2] * 9.81,      # Left = -z_cookie * g
+                    -accel_mg[1] * 9.81       # Up = -y_cookie * g
+                ])
+                
+                gyro_flu = np.array([
+                    -np.radians(gyro_mdps[0]),  # Roll rate (around forward) = -x_cookie
+                    -np.radians(gyro_mdps[2]),  # Pitch rate (around left) = -z_cookie
+                    -np.radians(gyro_mdps[1])   # Yaw rate (around up) = -y_cookie
+                ])
+                
+                accel_raw.append(accel_flu)
+                gyro_raw.append(gyro_flu)
+            
+            # Check for GPS data
+            gps_match = re.search(gps_pattern, line)
+            if gps_match:
+                lat_s, lon_s, alt_s, vel_s = map(int, gps_match.groups())
+                
+                # Only add GPS data if values have changed (actual 1Hz update, not just re-printed value)
+                current_gps_values = (lat_s, lon_s, alt_s, vel_s)
+                if last_gps_values is None or current_gps_values != last_gps_values:
+                    # Convert from NMEA format (DDMM.MMMM stored as integer without decimal)
+                    # e.g., 40264184 = 4026.4184 = 40° 26.4184' = 40 + 26.4184/60 = 40.440306°
+                    
+                    # Latitude: format DDMM.MMMM (first 2 digits = degrees, rest = minutes)
+                    lat_deg = lat_s // 1000000  # 40264184 // 1000000 = 40
+                    lat_min = (lat_s % 1000000) / 10000.0  # (40264184 % 1000000) / 10000 = 26.4184
+                    lat = lat_deg + lat_min / 60.0  # 40 + 26.4184/60 = 40.440306°
+                    
+                    # Longitude: format depends on value range
+                    # For single-digit degrees (< 10°): DMM.MMMM = 7 digits (e.g., 3415075 = 3° 41.5075')
+                    # For double-digit degrees (10-99°): DDMM.MMMM = 8 digits  
+                    # For triple-digit degrees (100-180°): DDDMM.MMMM = 9 digits
+                    # Madrid example: 3415075 = 3° 41.5075' = 3 + 41.5075/60 = 3.69179°
+                    if lon_s < 10000000:  # Single digit degrees (DMM.MMMM format)
+                        lon_deg = lon_s // 1000000  # 3415075 // 1000000 = 3
+                        lon_min = (lon_s % 1000000) / 10000.0  # 415075 / 10000 = 41.5075
+                        lon = lon_deg + lon_min / 60.0  # 3 + 41.5075/60 = 3.69179°
+                    elif lon_s < 100000000:  # Double digit degrees (DDMM.MMMM format)
+                        lon_deg = lon_s // 1000000
+                        lon_min = (lon_s % 1000000) / 10000.0
+                        lon = lon_deg + lon_min / 60.0
+                    else:  # Triple digit degrees (DDDMM.MMMM format)
+                        lon_deg = lon_s // 1000000
+                        lon_min = (lon_s % 1000000) / 10000.0
+                        lon = lon_deg + lon_min / 60.0
+                    
+                    # Madrid is in western hemisphere - longitude should be negative
+                    # The C code doesn't log the hemisphere sign, so we apply it based on known location
+                    if lon > 0 and lon < 30:  # Western Europe/Mediterranean longitude range
+                        lon = -lon
+                    
+                    alt = alt_s / 100.0
+                    vel = vel_s / 100.0
+                    gps_data.append([ts, lat, lon, alt, vel])
+                    last_gps_values = current_gps_values
+    
+    if len(timestamps) == 0:
+        raise ValueError("No IMU data found in COOKIES log file")
+    
+    if len(gps_data) == 0:
+        raise ValueError("No GPS data found in COOKIES log file")
+    
+    # Check if we have at least 10 valid GPS measurements to start
+    min_gps_required = 10
+    if len(gps_data) < min_gps_required:
+        raise ValueError(f"Insufficient GPS data: found {len(gps_data)} updates, need at least {min_gps_required} to start")
+    
+    print(f"Parsed {len(timestamps)} IMU samples and {len(gps_data)} unique GPS updates (~{len(gps_data)/(len(timestamps)/sample_rate if sample_rate else 1):.1f} Hz)")
+    
+    # Convert to numpy arrays
+    accel_raw = np.array(accel_raw)
+    gyro_raw = np.array(gyro_raw)
+    
+    # Process GPS data first to establish lla0 from 10th GPS measurement
+    gps_array = np.array(gps_data, dtype=object)
+    
+    # Use 10th GPS measurement as the origin (lla0) for ENU conversion
+    # This ensures we have a stable GPS fix before starting
+    lla0 = [
+        float(gps_array[9, 1]),  # lat from 10th GPS
+        float(gps_array[9, 2]),  # lon from 10th GPS
+        float(gps_array[9, 3])   # alt from 10th GPS
+    ]
+    print(f"Using GPS measurement #10 as ENU origin (lla0): lat={lla0[0]:.7f}°, lon={lla0[1]:.7f}°, alt={lla0[2]:.2f}m")
+    
+    # Find timestamp of 10th GPS measurement to trim IMU data
+    gps_start_time = gps_array[9, 0]  # datetime object
+    
+    # Trim IMU data to start from 10th GPS measurement
+    imu_start_idx = 0
+    for idx, ts in enumerate(timestamps):
+        if ts >= gps_start_time:
+            imu_start_idx = idx
+            break
+    
+    # Trim arrays
+    timestamps = timestamps[imu_start_idx:]
+    accel_raw = accel_raw[imu_start_idx:]
+    gyro_raw = gyro_raw[imu_start_idx:]
+    
+    print(f"Trimmed IMU data to start from 10th GPS measurement: {len(timestamps)} samples remaining")
+    
+    # Convert timestamps to seconds from start (now starting from 10th GPS)
+    t0 = timestamps[0]
+    time_imu = np.array([(t - t0).total_seconds() for t in timestamps])
+    
+    # Determine sample rate from actual timestamps
+    if sample_rate is None:
+        # Calculate actual mean sample rate from timestamp differences
+        dt_actual = np.diff(time_imu)
+        actual_mean_rate = 1.0 / np.mean(dt_actual)
+        actual_median_rate = 1.0 / np.median(dt_actual)
+        nominal_rate = 200.0  # Ts1 = 5ms (what the sensor uses internally)
+        
+        print(f"Timestamp analysis:")
+        print(f"  Nominal rate (Ts1=5ms): {nominal_rate:.2f} Hz (used by sensor for integration)")
+        print(f"  Actual mean rate: {actual_mean_rate:.2f} Hz (mean dt={np.mean(dt_actual)*1000:.2f}ms)")
+        print(f"  Actual median rate: {actual_median_rate:.2f} Hz (median dt={np.median(dt_actual)*1000:.2f}ms)")
+        print(f"  dt range: [{np.min(dt_actual)*1000:.2f}ms, {np.max(dt_actual)*1000:.2f}ms]")
+        print(f"  Jitter std: {np.std(dt_actual)*1000:.3f}ms")
+        
+        # Use nominal rate for EKF (matches sensor's internal integration)
+        # The timestamp jitter is due to logging/OS overhead, not actual sensor timing
+        sample_rate = nominal_rate
+    
+    # Process GPS data - use from 10th measurement onwards, relative to new t0
+    time_gps = np.array([(t - t0).total_seconds() for t in gps_array[9:, 0]])
+    lat_gps = gps_array[9:, 1].astype(float)
+    lon_gps = gps_array[9:, 2].astype(float)
+    alt_gps = gps_array[9:, 3].astype(float)
+    vel_gps = gps_array[9:, 4].astype(float)
+    
+    # Interpolate GPS to IMU timestamps
+    if len(time_gps) > 1:
+        f_lat = interp1d(time_gps, lat_gps, kind='linear', fill_value='extrapolate')
+        f_lon = interp1d(time_gps, lon_gps, kind='linear', fill_value='extrapolate')
+        f_alt = interp1d(time_gps, alt_gps, kind='linear', fill_value='extrapolate')
+        
+        lat_interp = f_lat(time_imu)
+        lon_interp = f_lon(time_imu)
+        alt_interp = f_alt(time_imu)
+    else:
+        # If only one GPS sample, use it for all
+        lat_interp = np.full(len(time_imu), lat_gps[0])
+        lon_interp = np.full(len(time_imu), lon_gps[0])
+        alt_interp = np.full(len(time_imu), alt_gps[0])
+    
+    lla = np.column_stack([lat_interp, lon_interp, alt_interp])
+    enu_positions = np.array([pm.geodetic2enu(lat, lon, alt, lla0[0], lla0[1], lla0[2]) 
+                              for lat, lon, alt in zip(lat_interp, lon_interp, alt_interp)])
+    
+    # Compute velocity from position differences
+    dt_imu = np.diff(time_imu)
+    dt_imu = np.append(dt_imu, dt_imu[-1])  # Pad last value
+    vel_enu = np.zeros((len(time_imu), 3))
+    vel_enu[1:] = np.diff(enu_positions, axis=0) / dt_imu[1:, np.newaxis]
+    vel_enu[0] = vel_enu[1]  # Copy first velocity
+    
+    # Estimate orientation from accelerometer (initial attitude)
+    # Assuming stationary or low dynamics at start
+    # Roll and pitch from gravity, yaw from initial heading (assume 0)
+    orient = np.zeros((len(time_imu), 3))
+    for i in range(len(time_imu)):
+        ax, ay, az = accel_raw[i]
+        # Roll (rotation about x-axis)
+        orient[i, 0] = np.arctan2(ay, az)
+        # Pitch (rotation about y-axis)  
+        orient[i, 1] = np.arctan2(-ax, np.sqrt(ay**2 + az**2))
+        # Yaw - would need magnetometer or GPS heading, set to 0 for now
+        orient[i, 2] = 0.0
+    
+    # Create GPS availability mask based on actual unique GPS updates
+    gps_rate = len(gps_data) / time_gps[-1] if len(gps_data) > 1 else 1.0
+    
+    # Optionally resample to uniform rate
+    if resample and target_rate != sample_rate:
+        print(f"Resampling to uniform {target_rate:.2f} Hz grid")
+        
+        # Create uniform time grid
+        time_uniform = np.arange(time_imu[0], time_imu[-1], 1.0/target_rate)
+        
+        # Interpolate all data to uniform grid
+        accel_flu = np.array([interp1d(time_imu, accel_raw[:, i], kind='linear')(time_uniform) 
+                              for i in range(3)]).T
+        gyro_flu = np.array([interp1d(time_imu, gyro_raw[:, i], kind='linear')(time_uniform) 
+                             for i in range(3)]).T
+        vel_enu_interp = np.array([interp1d(time_imu, vel_enu[:, i], kind='linear')(time_uniform) 
+                                   for i in range(3)]).T
+        lla_interp = np.array([interp1d(time_imu, lla[:, i], kind='linear')(time_uniform) 
+                               for i in range(3)]).T
+        orient_interp = np.array([interp1d(time_imu, orient[:, i], kind='linear')(time_uniform) 
+                                  for i in range(3)]).T
+        
+        # Mark GPS availability at resampled timestamps
+        # GPS is available when resampled timestamp is close to an actual GPS timestamp
+        gps_available = np.zeros(len(time_uniform), dtype=bool)
+        tolerance = 0.05  # 50ms tolerance for GPS matching
+        for gps_time in time_gps:
+            closest_idx = np.argmin(np.abs(time_uniform - gps_time))
+            if np.abs(time_uniform[closest_idx] - gps_time) < tolerance:
+                gps_available[closest_idx] = True
+        
+        sample_rate = target_rate
+        time_array = time_uniform
+    else:
+        # Keep original asynchronous timestamps
+        accel_flu = accel_raw
+        gyro_flu = gyro_raw
+        vel_enu_interp = vel_enu
+        lla_interp = lla
+        orient_interp = orient
+        time_array = time_imu
+        
+        # Mark GPS availability at original IMU timestamps
+        gps_available = np.zeros(len(time_imu), dtype=bool)
+        tolerance = 0.05  # 50ms tolerance for GPS matching
+        for gps_time in time_gps:
+            closest_idx = np.argmin(np.abs(time_imu - gps_time))
+            if np.abs(time_imu[closest_idx] - gps_time) < tolerance:
+                gps_available[closest_idx] = True
+    
+    # Get dataset name from filename
+    dataset_name = Path(filepath).parent.name
+    
+    # Compute IMU samples between GPS updates statistics
+    gps_indices = np.where(gps_available)[0]
+    if len(gps_indices) > 1:
+        imu_between_gps = np.diff(gps_indices)  # Number of IMU samples between consecutive GPS updates
+        mean_imu_between = np.mean(imu_between_gps)
+        min_imu_between = np.min(imu_between_gps)
+        max_imu_between = np.max(imu_between_gps)
+        print(f"IMU samples between GPS updates: mean={mean_imu_between:.1f}, min={min_imu_between}, max={max_imu_between}")
+    else:
+        print("Warning: Not enough GPS updates to compute inter-GPS statistics")
+    
+    print(f"Loaded {len(lla_interp)} samples at nominal {sample_rate:.2f} Hz with {np.sum(gps_available)} GPS updates ({gps_rate:.2f} Hz)")
+    
+    # Create NavigationData object
+    nav_data = NavigationData(
+        accel_flu=accel_flu,
+        gyro_flu=gyro_flu,
+        vel_enu=vel_enu_interp,
+        lla=lla_interp,
+        orient=orient_interp,
+        gps_available=gps_available,
+        sample_rate=sample_rate,
+        dataset_name=dataset_name,
+        gps_rate=gps_rate,
+        lla0=np.array(lla0),
+        time=time_array
+    )
+    
+    nav_data.validate()
+    
+    return nav_data
 
 
 
@@ -143,6 +500,10 @@ def get_data_loader(filepath: str, sample_rate: float = 10.0) -> NavigationData:
         else:
             # Try KITTI format by default for .mat files
             return load_kitti_mat(str(filepath), sample_rate)
+    
+    elif filepath.suffix == '.log':
+        # COOKIES log file
+        return load_cookies_data(str(filepath), sample_rate=None, resample=True, target_rate=sample_rate)
     
     else:
         raise ValueError(f"Unsupported file format: {filepath.suffix}")
@@ -172,3 +533,66 @@ def get_kitti_dataset(dataset_id: str, base_dir: Optional[Path] = None,
     filepath = base_dir / f'{dataset_id}.mat'
     
     return load_kitti_mat(str(filepath), sample_rate)
+
+
+def get_cookies_dataset(dataset_id: str, base_dir: Optional[Path] = None, 
+                       sample_rate: float = 10.0, log_file: str = None) -> NavigationData:
+    """
+    Convenience function to load COOKIES dataset by ID.
+    
+    Args:
+        dataset_id: COOKIES dataset folder name (e.g., 'castellana_270226_5')
+        base_dir: Base directory for datasets (default: auto-detect from script location)
+        sample_rate: Target sampling rate in Hz for resampling (default: 10 Hz)
+        log_file: Specific log filename to load (e.g., 'ttyUSB0_2026-02-27_11-45-04.542636036.log'). 
+                 If None, uses first available log file.
+    
+    Returns:
+        NavigationData object
+    
+    Example:
+        data = get_cookies_dataset('castellana_270226_5')  # Use first device
+        data = get_cookies_dataset('castellana_270226_5', log_file='ttyUSB0_2026-02-27_11-45-04.542636036.log')  # Specific file
+    
+    Note:
+        Each .log file in the dataset directory represents data from a different device.
+        - ttyUSB0, ttyUSB1, etc. are different physical sensors/devices
+        - You should select which device contains the relevant sensor data
+    """
+    if base_dir is None:
+        # Auto-detect base directory relative to this script
+        script_dir = Path(__file__).parent
+        base_dir = script_dir / '../../../datasets/raw_cookies'
+    
+    dataset_dir = base_dir / dataset_id
+    
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"COOKIES dataset directory not found: {dataset_dir}")
+    
+    # Select specific log file or use first available
+    if log_file:
+        filepath = dataset_dir / log_file
+        if not filepath.exists():
+            # Show available files
+            available_files = [f.name for f in sorted(dataset_dir.glob('*.log'))]
+            raise FileNotFoundError(
+                f"Log file '{log_file}' not found in {dataset_dir}.\n"
+                f"Available files: {', '.join(available_files)}"
+            )
+        print(f"Loading COOKIES dataset '{dataset_id}' from: {log_file}")
+    else:
+        # Find log files in directory
+        log_files = sorted(list(dataset_dir.glob('*.log')))
+        
+        if not log_files:
+            raise FileNotFoundError(f"No .log files found in {dataset_dir}")
+        
+        # Use first log file
+        filepath = log_files[0]
+        device_name = filepath.name.split('_')[0]
+        print(f"Loading COOKIES dataset '{dataset_id}' from: {filepath.name}")
+        print(f"Note: Using device '{device_name}'. Specify log_file='<filename>' to select a different sensor.")
+    
+    # Resample to target_rate when one is explicitly requested (default None = keep 200 Hz raw)
+    do_resample = sample_rate is not None
+    return load_cookies_data(str(filepath), sample_rate=None, resample=do_resample, target_rate=sample_rate or 200.0)
