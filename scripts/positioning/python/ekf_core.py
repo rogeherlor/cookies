@@ -39,6 +39,25 @@ DEFAULT_EKF_PARAMS = {
     'P_orient_std': 0.239,
     'P_acc_std': 0.01,
     'P_gyr_std': 0.001,
+
+    # Non-Holonomic Constraints (NHC)
+    # Cars can't slide sideways or fly: v_lateral ≈ 0, v_vertical ≈ 0 in body frame
+    'enable_nhc': True,
+    'Rnhc': 0.1,              # NHC measurement noise (m/s)² — how much lateral/vertical slip to tolerate
+
+    # Zero Velocity Updates (ZUPT)
+    # When vehicle is stationary: v ~ 0 in navigation frame
+    'enable_zupt': True,
+    'Rzupt': 0.01,            # ZUPT measurement noise (m/s)^2 -- very tight since truly stopped
+    'zupt_accel_threshold': 0.3,  # Specific-force deviation from gravity (m/s^2) to detect standstill
+    'zupt_gyro_threshold': 0.05,  # Gyro magnitude threshold (rad/s) to detect standstill
+
+    # Leveling constraint (2D mode only)
+    # On flat ground roll ~ 0 and pitch ~ 0; inject as pseudo-measurement every epoch.
+    # Only active when use_3d_rotation=False (2D mode), since in 3D the vehicle
+    # may actually have non-zero roll/pitch.
+    'enable_level': True,
+    'Rlevel': 0.001,          # Leveling measurement noise (rad)^2 -- tight for flat roads
 }
 
 
@@ -53,6 +72,9 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
             - Rpos (measurement noise)
             - beta_acc, beta_gyr (Gauss-Markov coefficients)
             - P_pos_std, P_vel_std, P_orient_std, P_acc_std, P_gyr_std (initial covariance)
+            - enable_nhc, Rnhc (Non-Holonomic Constraints)
+            - enable_zupt, Rzupt, zupt_accel_threshold, zupt_gyro_threshold (Zero Velocity Updates)
+            - enable_level, Rlevel (Leveling constraint: roll/pitch ~ 0 in 2D mode)
         outage_config: Optional dict with 'start' (seconds) and 'duration' (seconds) for GPS outage
         use_3d_rotation: If True, use full 3D rotation (roll/pitch/yaw). If False, use 2D rotation (yaw only).
     
@@ -164,32 +186,35 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
         roll, pitch, yaw = rpy
         
         # Rotation matrix (Body to Navigation frame)
+        #   Rbn = Rz(yaw) @ Ry(pitch) @ Rx(roll)   (ZYX Euler sequence, FLU body)
+        cr, sr_ = cos(roll), sin(roll)
+        cp, sp  = cos(pitch), sin(pitch)
+        cy, sy  = cos(yaw), sin(yaw)
+
+        Rz_mat = np.array([[ cy, -sy, 0], [ sy, cy, 0], [0, 0, 1]])
+        Ry_mat = np.array([[ cp, 0, -sp], [  0, 1,  0], [sp, 0, cp]])
+        Rx_mat = np.array([[  1, 0,   0], [  0, cr, -sr_], [0, sr_, cr]])
+
         if use_3d_rotation:
-            # Full 3D rotation for FLU (Forward-Left-Up) body frame, ZYX Euler sequence.
-            # Ry uses -sin in [0,2] / +sin in [2,0] because the FLU pitch axis (y) points
-            # left, opposite to the FRD aerospace convention where Ry has +sin in [0,2].
-            Rz = np.array([[cos(yaw), -sin(yaw), 0], [sin(yaw), cos(yaw), 0], [0, 0, 1]])
-            Ry = np.array([[cos(pitch), 0, -sin(pitch)], [0, 1, 0], [sin(pitch), 0, cos(pitch)]])
-            Rx = np.array([[1, 0, 0], [0, cos(roll), -sin(roll)], [0, sin(roll), cos(roll)]])
-            Rbn = Rz @ Ry @ Rx  # ZYX Euler angle sequence
+            Rbn = Rz_mat @ Ry_mat @ Rx_mat
         else:
             # 2D rotation (yaw only - simpler for planar motion)
-            Rz = np.array([[cos(yaw), -sin(yaw), 0], [sin(yaw), cos(yaw), 0], [0, 0, 1]])
-            Rbn = Rz
+            Rbn = Rz_mat
         
         accENU = Rbn @ acc
         
         pIMU = pIMU + Ts * vIMU + Ts**2 / 2 * (accENU + g)
         vIMU = vIMU + Ts * (accENU + g)
         # Euler Rate Transformation Matrix (W) to relate Angular Velocity to Euler Angle Rates
+        tp = tan(pitch)
         W = np.array([
-            [1, sin(roll) * tan(pitch), cos(roll) * tan(pitch)],
-            [0, cos(roll), -sin(roll)],
-            [0, sin(roll) / cos(pitch), cos(roll) / cos(pitch)]
+            [1, sr_ * tp, cr * tp],
+            [0, cr,       -sr_],
+            [0, sr_ / cp,  cr / cp]
         ])
         rpy = rpy + Ts * W @ gyr
         
-        # Wrap yaw to [-π, π]
+        # Wrap yaw to [-pi, pi]
         rpy[2] = (rpy[2] + np.pi) % (2 * np.pi) - np.pi
         
         # Prediction
@@ -204,14 +229,36 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
         N_radius = a / sqrt(1 - e2 * sin_lat**2)        # Prime vertical radius
         
         # Dynamic matrix F
+        #
+        # Velocity–orientation coupling  F[3:6, 6:9]
+        # ---------------------------------------------------------
+        # The error-state uses Euler-angle perturbations (δroll, δpitch, δyaw),
+        # so the correct Jacobian is  d(Rbn·a_body)/d(roll, pitch, yaw):
+        #
+        #   col 0 (∂/∂roll)  = Rz · Ry · dRx/droll  · a_body
+        #   col 1 (∂/∂pitch) = Rz · dRy/dpitch · Rx · a_body
+        #   col 2 (∂/∂yaw)   = dRz/dyaw · Ry · Rx   · a_body
+        #
+        # Note: the ±skew(f) formula from Sola/Groves is for rotation-vector
+        # error states, NOT Euler-angle error states.  Using it here causes a
+        # sign error that creates positive feedback ⇒ pitch divergence.
+        # ---------------------------------------------------------
+        dRx = np.array([[ 0,   0,    0],
+                        [ 0, -sr_, -cr],
+                        [ 0,  cr,  -sr_]])
+        dRy = np.array([[-sp, 0, -cp],
+                        [  0, 0,   0],
+                        [ cp, 0, -sp]])
+        dRz = np.array([[-sy, -cy, 0],
+                        [ cy, -sy, 0],
+                        [  0,   0, 0]])
+
         F = np.zeros((15, 15))
         F[0:3, 3:6] = np.eye(3)
-        F[3, 7] = fU
-        F[3, 8] = -fN
-        F[4, 6] = -fU
-        F[4, 8] = fE
-        F[5, 6] = fN
-        F[5, 7] = -fE
+        # Each column is the derivative of accENU w.r.t. one Euler angle
+        F[3:6, 6] = Rz_mat @ Ry_mat @ dRx @ acc   # d(accENU)/d(roll)
+        F[3:6, 7] = Rz_mat @ dRy @ Rx_mat @ acc   # d(accENU)/d(pitch)
+        F[3:6, 8] = dRz @ Ry_mat @ Rx_mat @ acc   # d(accENU)/d(yaw)
         
         # Orientation error dynamics (Earth curvature / transport rate coupling)
         # Transport rate: ω_en = [vN/(M+h), -vE/(N+h), -vE·tan(lat)/(N+h)]
@@ -250,7 +297,130 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
             rpy[0] += x[6]
             rpy[1] += x[7]
             rpy[2] += x[8]
+            # Reset injected states so downstream updates (NHC/ZUPT/Level)
+            # start from a clean error state and don't double-count
+            x[0:9] = 0
         
+        # ── Non-Holonomic Constraint (NHC) update ────────────────────────
+        # A car cannot slide sideways or fly: body-frame lateral and vertical
+        # velocity should be ~0.  We express this as a pseudo-measurement:
+        #   h(x) = Rbn^T * v_ENU  -> [v_lateral, v_vertical] = [0, 0]
+        #
+        # Linearisation for the error-state EKF:
+        #   delta_v_body = Rnb * delta_v  -  Rnb * [v_ENU]x * delta_eps
+        # The negative sign arises because the true rotation is
+        #   R_true = (I + [delta_eps]x) * R_nominal
+        # so  R_true^T = R_nominal^T * (I - [delta_eps]x)
+        # =>  v_body_true = Rnb*v - Rnb*[v]x*delta_eps + Rnb*delta_v
+        if ekf_params['enable_nhc']:
+            # Recompute Rbn from current (possibly GPS-corrected) rpy
+            roll_c, pitch_c, yaw_c = rpy
+            if use_3d_rotation:
+                Rz_c = np.array([[cos(yaw_c), -sin(yaw_c), 0], [sin(yaw_c), cos(yaw_c), 0], [0, 0, 1]])
+                Ry_c = np.array([[cos(pitch_c), 0, -sin(pitch_c)], [0, 1, 0], [sin(pitch_c), 0, cos(pitch_c)]])
+                Rx_c = np.array([[1, 0, 0], [0, cos(roll_c), -sin(roll_c)], [0, sin(roll_c), cos(roll_c)]])
+                Rbn_c = Rz_c @ Ry_c @ Rx_c
+            else:
+                Rz_c = np.array([[cos(yaw_c), -sin(yaw_c), 0], [sin(yaw_c), cos(yaw_c), 0], [0, 0, 1]])
+                Rbn_c = Rz_c
+
+            Rnb_c = Rbn_c.T  # Navigation-to-body rotation
+            v_body = Rnb_c @ vIMU  # Velocity in body frame [forward, lateral, vertical]
+
+            # Measurement: lateral and vertical body velocity should be zero
+            z_nhc = -v_body[1:3]  # innovation = 0 - v_body(lateral, vertical)
+
+            # Observation matrix: H_nhc maps error state -> body-frame velocity error
+            H_nhc = np.zeros((2, 15))
+            H_nhc[:, 3:6] = Rnb_c[1:3, :]  # dv_body / d(delta_v)
+
+            # Skew-symmetric matrix of vIMU for cross-product [vIMU]x
+            vE, vN, vU = vIMU
+            skew_v = np.array([[0, -vU, vN],
+                               [vU, 0, -vE],
+                               [-vN, vE, 0]])
+            # Negative sign: see derivation above
+            H_nhc[:, 6:9] = -(Rnb_c @ skew_v)[1:3, :]  # dv_body / d(delta_eps)
+
+            R_nhc = np.eye(2) * ekf_params['Rnhc']
+            S_nhc = H_nhc @ P @ H_nhc.T + R_nhc
+            K_nhc = P @ H_nhc.T @ np.linalg.inv(S_nhc)
+            x = x + K_nhc @ (z_nhc - H_nhc @ x)
+
+            IKH_nhc = np.eye(15) - K_nhc @ H_nhc
+            P = IKH_nhc @ P @ IKH_nhc.T + K_nhc @ R_nhc @ K_nhc.T
+
+            # Inject NHC corrections into nominal state
+            vIMU += x[3:6]
+            rpy[0] += x[6]
+            rpy[1] += x[7]
+            rpy[2] += x[8]
+            x[3:9] = 0  # Reset corrected error states
+
+        # ── Zero Velocity Update (ZUPT) ──────────────────────────────────
+        # Detect standstill from IMU: if specific force ~ gravity and gyro ~ 0,
+        # the vehicle is stationary -> inject v = [0,0,0] as measurement.
+        #
+        # Detection uses THREE conditions to avoid false triggers during
+        # constant-velocity cruising (where accel ~ gravity and gyro ~ 0 too):
+        #   1. Specific-force magnitude ~ 9.81  (no dynamic acceleration)
+        #   2. Gyro magnitude ~ 0               (no rotation)
+        #   3. Current estimated speed ~ 0      (not cruising)
+        if ekf_params['enable_zupt']:
+            accel_mag = np.linalg.norm(acc)
+            accel_dev = abs(accel_mag - 9.81)
+            gyro_mag = np.linalg.norm(gyr)
+            speed = np.linalg.norm(vIMU)
+
+            is_stationary = (accel_dev < ekf_params['zupt_accel_threshold'] and
+                             gyro_mag < ekf_params['zupt_gyro_threshold'] and
+                             speed < 1.0)  # m/s - must already be near-stopped
+
+            if is_stationary:
+                # Measurement: velocity in navigation frame = 0
+                z_zupt = -vIMU  # innovation = 0 - vIMU
+
+                H_zupt = np.zeros((3, 15))
+                H_zupt[0:3, 3:6] = np.eye(3)  # Observes δv directly
+
+                R_zupt = np.eye(3) * ekf_params['Rzupt']
+                S_zupt = H_zupt @ P @ H_zupt.T + R_zupt
+                K_zupt = P @ H_zupt.T @ np.linalg.inv(S_zupt)
+                x = x + K_zupt @ (z_zupt - H_zupt @ x)
+
+                IKH_zupt = np.eye(15) - K_zupt @ H_zupt
+                P = IKH_zupt @ P @ IKH_zupt.T + K_zupt @ R_zupt @ K_zupt.T
+
+                # Inject ZUPT corrections
+                vIMU += x[3:6]
+                x[3:6] = 0  # Reset velocity error state
+
+        # -- Leveling constraint (roll ~ 0, pitch ~ 0) -----------------------
+        # In 2D mode the vehicle is assumed to stay on flat ground, so
+        # roll and pitch are observable as ~0.  This directly constrains
+        # the orientation error states delta_eps_roll and delta_eps_pitch,
+        # preventing gravity-projection drift that dominates position error.
+        if ekf_params['enable_level'] and not use_3d_rotation:
+            # Measurement: roll and pitch should be zero
+            z_level = np.array([-rpy[0], -rpy[1]])  # innovation = 0 - [roll, pitch]
+
+            H_level = np.zeros((2, 15))
+            H_level[0, 6] = 1.0  # observes delta_eps_roll
+            H_level[1, 7] = 1.0  # observes delta_eps_pitch
+
+            R_level = np.eye(2) * ekf_params['Rlevel']
+            S_level = H_level @ P @ H_level.T + R_level
+            K_level = P @ H_level.T @ np.linalg.inv(S_level)
+            x = x + K_level @ (z_level - H_level @ x)
+
+            IKH_level = np.eye(15) - K_level @ H_level
+            P = IKH_level @ P @ IKH_level.T + K_level @ R_level @ K_level.T
+
+            # Inject leveling corrections
+            rpy[0] += x[6]
+            rpy[1] += x[7]
+            x[6:8] = 0  # Reset roll/pitch error states
+
         # Store current iteration results
         p[i + 1, :] = pIMU.T
         v[i + 1, :] = vIMU.T
@@ -269,9 +439,11 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
         std_bias_acc[i + 1, :] = np.sqrt(np.diag(P[9:12, 9:12]))
         std_bias_gyr[i + 1, :] = np.sqrt(np.diag(P[12:15, 12:15]))
         
-        # Error state reset after update (Error-State EKF)
-        if gps_is_available and not_in_outage:
-            x[0:9] = 0
+        # Error state reset after storing (Error-State EKF)
+        # Position/velocity/orientation error states are reset every step
+        # because the nominal state always absorbs them. Bias states
+        # (x[9:14]) persist and are estimated cumulatively.
+        x[0:9] = 0
     
     return {
         'p': p,
