@@ -95,19 +95,23 @@ def decode_params(x: np.ndarray) -> dict:
 
 def fitness_function(x: np.ndarray, nav_data, t1: float, d: float) -> float:
     """
-    Fitness function for optimization: ATE RMSE during GPS outage.
-    
-    This is the standard metric used in SLAM/navigation evaluation.
+    Comprehensive fitness function for EKF parameter optimization.
+
+    Combines multiple state-of-the-art navigation metrics into a single
+    scalar cost, ensuring the optimizer produces a physically consistent
+    filter — not just one that minimises 2D position during the outage.
+
+    Components (weighted sum):
+      1. Position ATE RMSE during outage (2D + vertical)
+      2. Position RMSE during GPS-aided phase (filter should track well)
+      3. Orientation RMSE vs ground truth (roll, pitch, yaw)
+      4. Velocity RMSE vs ground truth
+      5. ANEES penalty — Average Normalised Estimation Error Squared.
+         For a consistent filter ANEES ≈ 1.  If ANEES >> 1 the filter is
+         overconfident; if ANEES << 1 it is too conservative.  Both are
+         penalised so the optimizer cannot cheat with absurd Q values.
+
     Lower is better.
-    
-    Args:
-        x: Parameter vector (log scale)
-        nav_data: Navigation dataset
-        t1: GNSS outage start time (seconds)
-        d: GNSS outage duration (seconds)
-    
-    Returns:
-        ATE RMSE during outage period (meters)
     """
     # Initialize counter and logger on first call
     if not hasattr(fitness_function, 'eval_count'):
@@ -124,7 +128,7 @@ def fitness_function(x: np.ndarray, nav_data, t1: float, d: float) -> float:
         outage_config = {'start': t1, 'duration': d}
         ekf_result = ekf_core.run_ekf(nav_data, params, outage_config, USE_3D_ROTATION)
         
-        # Compute fitness: ATE RMSE during outage
+        # Ground truth
         lla0 = nav_data.lla0
         lla = nav_data.lla
         frecIMU = nav_data.sample_rate
@@ -133,33 +137,107 @@ def fitness_function(x: np.ndarray, nav_data, t1: float, d: float) -> float:
         
         f = pm.geodetic2enu(lla[:, 0], lla[:, 1], lla[:, 2], lla0[0], lla0[1], lla0[2])
         f_array = np.column_stack([f[0], f[1], f[2]])
-        
-        # Error during outage segment (standard ATE metric)
-        diff = f_array[A:B] - ekf_result['p'][A:B]
-        error_2D = np.sqrt(diff[:, 0]**2 + diff[:, 1]**2)
-        ate_rmse = np.sqrt(np.mean(error_2D**2))
+
+        p = ekf_result['p']
+        v = ekf_result['v']
+        r = ekf_result['r']
+        std_pos = ekf_result['std_pos']
+        std_vel = ekf_result['std_vel']
+        std_orient = ekf_result['std_orient']
+
+        N = len(p)
+        orient_gt = nav_data.orient
+        vel_gt = nav_data.vel_enu
+
+        # ─── 1. Position error (2D + 3D) ────────────────────────────────
+        pos_err = p - f_array
+
+        # Outage phase — 2D + vertical
+        err_2d_outage = np.sqrt(pos_err[A:B, 0]**2 + pos_err[A:B, 1]**2)
+        ate_2d_outage = np.sqrt(np.mean(err_2d_outage**2))
+        ate_up_outage = np.sqrt(np.mean(pos_err[A:B, 2]**2))
+
+        # GPS-aided phase (everything outside the outage)
+        gps_mask = np.ones(N, dtype=bool)
+        gps_mask[A:B] = False
+        err_2d_gps = np.sqrt(pos_err[gps_mask, 0]**2 + pos_err[gps_mask, 1]**2)
+        ate_2d_gps = np.sqrt(np.mean(err_2d_gps**2))
+
+        # ─── 2. Orientation error ────────────────────────────────────────
+        orient_err = r - orient_gt
+        # Wrap to [-pi, pi]
+        orient_err = (orient_err + np.pi) % (2 * np.pi) - np.pi
+        rmse_roll  = np.sqrt(np.mean(orient_err[:, 0]**2))
+        rmse_pitch = np.sqrt(np.mean(orient_err[:, 1]**2))
+        rmse_yaw   = np.sqrt(np.mean(orient_err[:, 2]**2))
+
+        # ─── 3. Velocity error ───────────────────────────────────────────
+        vel_err = v - vel_gt
+        rmse_vel = np.sqrt(np.mean(vel_err[:, 0]**2 + vel_err[:, 1]**2))
+
+        # ─── 4. ANEES — filter consistency ───────────────────────────────
+        # ANEES = (1/N) * Σ  (error' * P⁻¹ * error)  for position states
+        # For a 3-state (E,N,U) position this should equal 3 when consistent.
+        # We normalise to per-dimension: ANEES_dim ≈ 1 when consistent.
+        # Use GPS-aided phase only (during outage, errors grow naturally).
+        eps = 1e-12
+        nees_sum = 0.0
+        nees_count = 0
+        # Subsample to keep computation light (every 10th sample)
+        for k in range(0, N, 10):
+            if A <= k < B:
+                continue  # Skip outage
+            var_p = std_pos[k]**2 + eps
+            nees_k = np.sum(pos_err[k]**2 / var_p)
+            nees_sum += nees_k
+            nees_count += 1
+        anees = nees_sum / max(nees_count, 1) / 3.0  # Per-dimension, ideal = 1.0
+
+        # Penalty: deviation from ANEES = 1  (symmetric in log space)
+        # anees_penalty = |log10(ANEES)|, so anees=1 → 0, anees=10 → 1, anees=0.1 → 1
+        anees_penalty = abs(np.log10(max(anees, 1e-6)))
+
+        # ─── Combine into scalar cost ───────────────────────────────────
+        # Weights reflect priorities:
+        #   - Primary: 2D outage position (the traditional metric)
+        #   - Secondary: vertical, GPS-aided tracking, orientation
+        #   - Regulariser: ANEES consistency
+        cost = (
+            5.0  * ate_2d_outage       # 2D position during outage [m]
+          + 5.0  * ate_up_outage       # Vertical during outage [m]
+          + 5.0  * ate_2d_gps          # GPS-aided tracking quality [m]
+          + 5.0  * rmse_roll           # Roll RMSE [rad] (~57 deg = 1 rad)
+          + 5.0  * rmse_pitch          # Pitch RMSE [rad]
+          + 2.0  * rmse_yaw            # Yaw RMSE [rad]
+          + 1.0  * rmse_vel            # Velocity RMSE [m/s]
+          + 3.0  * anees_penalty       # Filter consistency
+        )
         
         # Sanity checks
-        if np.isnan(ate_rmse) or np.isinf(ate_rmse) or ate_rmse > 10000:
+        if np.isnan(cost) or np.isinf(cost) or cost > 10000:
             if fitness_function.logger:
                 fitness_function.logger.info(f"Eval {fitness_function.eval_count}: DIVERGED (fitness=1e6)")
             return 1e6
         
-        # Log every evaluation with copy-pasteable dict
+        # Log every evaluation with breakdown
         if fitness_function.logger:
             fitness_function.logger.info(
-                f"Eval {fitness_function.eval_count}: fitness={ate_rmse:.2f}m\n"
+                f"Eval {fitness_function.eval_count}: cost={cost:.3f} "
+                f"[pos2d_out={ate_2d_outage:.2f} up_out={ate_up_outage:.2f} "
+                f"pos2d_gps={ate_2d_gps:.2f} roll={np.degrees(rmse_roll):.2f}deg "
+                f"pitch={np.degrees(rmse_pitch):.2f}deg yaw={np.degrees(rmse_yaw):.1f}deg "
+                f"vel={rmse_vel:.2f} ANEES={anees:.2f}]\n"
                 + format_params_dict(params)
             )
             # Log new global minimum
-            if ate_rmse < fitness_function.best_fitness:
-                fitness_function.best_fitness = ate_rmse
+            if cost < fitness_function.best_fitness:
+                fitness_function.best_fitness = cost
                 fitness_function.logger.info(
-                    f"*** NEW BEST at eval {fitness_function.eval_count}: {ate_rmse:.2f}m ***\n"
+                    f"*** NEW BEST at eval {fitness_function.eval_count}: cost={cost:.3f} ***\n"
                     + format_params_dict(params)
                 )
         
-        return ate_rmse
+        return cost
         
     except Exception as e:
         if fitness_function.logger:
@@ -224,7 +302,7 @@ if __name__ == "__main__":
     logger.info(f"Samples: {len(NAV_DATA.lla)}")
     logger.info(f"GNSS outage: {OUTAGE_START}s to {OUTAGE_START+OUTAGE_DURATION}s")
     logger.info(f"Parameters: {len(BOUNDS)}")
-    logger.info(f"Fitness metric: ATE RMSE during outage (standard SLAM metric)")
+    logger.info(f"Fitness metric: Multi-objective (pos + orient + vel + ANEES consistency)")
     logger.info(f"Log file: {log_file}")
     logger.info("="*60)
     
@@ -265,7 +343,7 @@ if __name__ == "__main__":
     logger.info("\n" + "="*60)
     logger.info("OPTIMIZATION COMPLETE")
     logger.info("="*60)
-    logger.info(f"Final ATE RMSE: {result.fun:.2f} meters")
+    logger.info(f"Final cost: {result.fun:.4f}")
     logger.info(f"Evaluations: {result.nfev}")
     logger.info(f"Iterations: {result.nit}")
     logger.info(f"Success: {result.success}")
@@ -290,7 +368,7 @@ if __name__ == "__main__":
     print("COPY-PASTE INTO ekf.py:")
     print("="*60)
     print(dict_str)
-    print(f"\n# ATE RMSE: {result.fun:.2f}m | Dataset: {NAV_DATA.dataset_name} | "
+    print(f"\n# Cost: {result.fun:.4f} | Dataset: {NAV_DATA.dataset_name} | "
           f"Outage: {OUTAGE_START}s+{OUTAGE_DURATION}s")
     
     # Save to JSON (same keys as DEFAULT_EKF_PARAMS for direct loading)
@@ -298,7 +376,7 @@ if __name__ == "__main__":
     params_to_save = {
         'ekf_params': {k: float(v) for k, v in best_params.items()},
         'metadata': {
-            'ate_rmse_outage': float(result.fun),
+            'cost': float(result.fun),
             'dataset': NAV_DATA.dataset_name,
             'outage_config': {'start': OUTAGE_START, 'duration': OUTAGE_DURATION},
             'use_3d_rotation': USE_3D_ROTATION,

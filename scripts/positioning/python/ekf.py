@@ -207,6 +207,16 @@ visualize_state.plot_filter_consistency(
 )
 generated_files.append(f'{run_id}_filter_consistency.png')
 
+# Convergence dashboard - all states, errors and uncertainties in one figure
+visualize_state.plot_convergence_dashboard(
+    time_array, p, f_array, v, vel_enu, r, orient,
+    std_pos, std_vel, std_orient,
+    bias_acc, bias_gyr, std_bias_acc, std_bias_gyr,
+    gnss_outage_info, gps_available=nav_data.gps_available,
+    save_path=os.path.join(outputs_dir, f'{run_id}_convergence_dashboard.png')
+)
+generated_files.append(f'{run_id}_convergence_dashboard.png')
+
 logger.info(f'Total generated charts: {len(generated_files)}')
 logger.info(f'Run ID: {run_id}')
 

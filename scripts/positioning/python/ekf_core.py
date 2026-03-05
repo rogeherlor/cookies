@@ -242,6 +242,16 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
         # Note: the ±skew(f) formula from Sola/Groves is for rotation-vector
         # error states, NOT Euler-angle error states.  Using it here causes a
         # sign error that creates positive feedback ⇒ pitch divergence.
+        #
+        # IMPORTANT: In 2D mode the mechanization uses Rbn = Rz (yaw only),
+        # so accENU = Rz @ acc.  The Jacobian MUST be consistent:
+        #   d(Rz·acc)/d(roll)  = 0      (Rz does not depend on roll)
+        #   d(Rz·acc)/d(pitch) = 0      (Rz does not depend on pitch)
+        #   d(Rz·acc)/d(yaw)   = dRz · acc
+        # Using the full 3D derivatives in 2D mode creates a mismatch:
+        # the filter thinks roll/pitch affect position, but they don't
+        # in the actual dynamics => GPS corrections inject noise into
+        # roll/pitch to explain position errors unrelated to them.
         # ---------------------------------------------------------
         dRx = np.array([[ 0,   0,    0],
                         [ 0, -sr_, -cr],
@@ -256,9 +266,15 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
         F = np.zeros((15, 15))
         F[0:3, 3:6] = np.eye(3)
         # Each column is the derivative of accENU w.r.t. one Euler angle
-        F[3:6, 6] = Rz_mat @ Ry_mat @ dRx @ acc   # d(accENU)/d(roll)
-        F[3:6, 7] = Rz_mat @ dRy @ Rx_mat @ acc   # d(accENU)/d(pitch)
-        F[3:6, 8] = dRz @ Ry_mat @ Rx_mat @ acc   # d(accENU)/d(yaw)
+        if use_3d_rotation:
+            F[3:6, 6] = Rz_mat @ Ry_mat @ dRx @ acc   # d(accENU)/d(roll)
+            F[3:6, 7] = Rz_mat @ dRy @ Rx_mat @ acc   # d(accENU)/d(pitch)
+            F[3:6, 8] = dRz @ Ry_mat @ Rx_mat @ acc   # d(accENU)/d(yaw)
+        else:
+            # 2D mode: Rbn = Rz, so only yaw column is nonzero
+            # F[3:6, 6] = 0  (roll doesn't affect Rz·acc)
+            # F[3:6, 7] = 0  (pitch doesn't affect Rz·acc)
+            F[3:6, 8] = dRz @ acc                      # d(Rz·acc)/d(yaw)
         
         # Orientation error dynamics (Earth curvature / transport rate coupling)
         # Transport rate: ω_en = [vN/(M+h), -vE/(N+h), -vE·tan(lat)/(N+h)]

@@ -250,3 +250,214 @@ def plot_filter_consistency(time, errors_pos, std_pos, gnss_outage_info, save_pa
         plt.close()
     
     return
+
+
+def plot_convergence_dashboard(time, p_est, p_gt, v_est, v_gt, r_est, r_gt,
+                                std_pos, std_vel, std_orient,
+                                bias_acc, bias_gyr, std_bias_acc, std_bias_gyr,
+                                gnss_outage_info, gps_available=None,
+                                save_path=None):
+    """
+    Comprehensive convergence dashboard: shows at a glance whether the filter
+    converged, diverged, or became overconfident.
+
+    Layout (6 rows x 2 cols):
+      Row 0: Orientation estimates vs truth (roll/pitch | yaw)
+      Row 1: Orientation error with +/-2sigma  (roll/pitch | yaw)
+      Row 2: Position error with +/-2sigma (East/North | Up)
+      Row 3: Velocity error with +/-2sigma (East/North | Up)
+      Row 4: Accel bias estimates +/-1sigma (fwd/left | up)
+      Row 5: Gyro bias estimates +/-1sigma (roll/pitch rate | yaw rate)
+    """
+    A = gnss_outage_info.get('start_idx', 0)
+    B = gnss_outage_info.get('end_idx', 0)
+
+    fig, axes = plt.subplots(6, 2, figsize=(18, 22), sharex=True)
+
+    def shade_outage(ax):
+        if A != 0 or B != 0:
+            ax.axvspan(time[A], time[min(B, len(time)-1)],
+                       alpha=0.15, color='red', zorder=0)
+
+    def shade_gps(ax):
+        """Light green ticks at every GPS update."""
+        if gps_available is not None:
+            for k in range(len(gps_available)):
+                if gps_available[k]:
+                    ax.axvline(time[k], color='green', alpha=0.06, lw=0.5)
+
+    # ── colours ──────────────────────────────────────────────────────────
+    c_rp = ['#1f77b4', '#ff7f0e']         # roll, pitch
+    c_y  = '#d62728'                       # yaw
+    c_en = ['#1f77b4', '#ff7f0e']         # east, north
+    c_u  = '#2ca02c'                       # up
+    c_flu = ['#1f77b4', '#ff7f0e', '#2ca02c']  # fwd, left, up
+
+    # ═══════════════════════ ROW 0: Orientation est vs truth ═════════════
+    # Roll / Pitch
+    ax = axes[0, 0]
+    shade_outage(ax); shade_gps(ax)
+    for j, (c, lbl) in enumerate(zip(c_rp, ['Roll', 'Pitch'])):
+        ax.plot(time, np.degrees(r_est[:, j]), color=c, lw=1.2, label=f'{lbl} est')
+        ax.plot(time, np.degrees(r_gt[:, j]), '--', color=c, lw=1.0, alpha=0.6,
+                label=f'{lbl} truth')
+    ax.set_ylabel('Angle (deg)')
+    ax.set_title('Roll / Pitch Estimates vs Truth', fontsize=11)
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.25)
+
+    # Yaw
+    ax = axes[0, 1]
+    shade_outage(ax); shade_gps(ax)
+    ax.plot(time, np.degrees(r_est[:, 2]), color=c_y, lw=1.2, label='Yaw est')
+    ax.plot(time, np.degrees(r_gt[:, 2]), '--', color=c_y, lw=1.0, alpha=0.6,
+            label='Yaw truth')
+    ax.set_ylabel('Angle (deg)')
+    ax.set_title('Yaw Estimate vs Truth', fontsize=11)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.25)
+
+    # ═══════════════════════ ROW 1: Orientation error +/- 2sigma ═════════
+    orient_err = np.degrees(r_est - r_gt)
+    orient_std_deg = np.degrees(std_orient)
+
+    ax = axes[1, 0]
+    shade_outage(ax); shade_gps(ax)
+    for j, (c, lbl) in enumerate(zip(c_rp, ['Roll', 'Pitch'])):
+        ax.plot(time, orient_err[:, j], color=c, lw=1.0, label=f'{lbl} err')
+        ax.fill_between(time, -2*orient_std_deg[:, j], 2*orient_std_deg[:, j],
+                        color=c, alpha=0.12)
+    ax.axhline(0, color='k', lw=0.5, ls=':')
+    ax.set_ylabel('Error (deg)')
+    ax.set_title('Roll / Pitch Error  (shaded = ±2σ)', fontsize=11)
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.25)
+
+    ax = axes[1, 1]
+    shade_outage(ax); shade_gps(ax)
+    ax.plot(time, orient_err[:, 2], color=c_y, lw=1.0, label='Yaw err')
+    ax.fill_between(time, -2*orient_std_deg[:, 2], 2*orient_std_deg[:, 2],
+                    color=c_y, alpha=0.12)
+    ax.axhline(0, color='k', lw=0.5, ls=':')
+    ax.set_ylabel('Error (deg)')
+    ax.set_title('Yaw Error  (shaded = ±2σ)', fontsize=11)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.25)
+
+    # ═══════════════════════ ROW 2: Position error +/- 2sigma ════════════
+    pos_err = p_est - p_gt
+
+    ax = axes[2, 0]
+    shade_outage(ax); shade_gps(ax)
+    for j, (c, lbl) in enumerate(zip(c_en, ['East', 'North'])):
+        ax.plot(time, pos_err[:, j], color=c, lw=1.0, label=f'{lbl} err')
+        ax.fill_between(time, -2*std_pos[:, j], 2*std_pos[:, j],
+                        color=c, alpha=0.12)
+    ax.axhline(0, color='k', lw=0.5, ls=':')
+    ax.set_ylabel('Error (m)')
+    ax.set_title('Horizontal Position Error  (shaded = ±2σ)', fontsize=11)
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.25)
+
+    ax = axes[2, 1]
+    shade_outage(ax); shade_gps(ax)
+    ax.plot(time, pos_err[:, 2], color=c_u, lw=1.0, label='Up err')
+    ax.fill_between(time, -2*std_pos[:, 2], 2*std_pos[:, 2],
+                    color=c_u, alpha=0.12)
+    ax.axhline(0, color='k', lw=0.5, ls=':')
+    ax.set_ylabel('Error (m)')
+    ax.set_title('Vertical Position Error  (shaded = ±2σ)', fontsize=11)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.25)
+
+    # ═══════════════════════ ROW 3: Velocity error +/- 2sigma ════════════
+    vel_err = v_est - v_gt
+
+    ax = axes[3, 0]
+    shade_outage(ax); shade_gps(ax)
+    for j, (c, lbl) in enumerate(zip(c_en, ['East', 'North'])):
+        ax.plot(time, vel_err[:, j], color=c, lw=1.0, label=f'{lbl} err')
+        ax.fill_between(time, -2*std_vel[:, j], 2*std_vel[:, j],
+                        color=c, alpha=0.12)
+    ax.axhline(0, color='k', lw=0.5, ls=':')
+    ax.set_ylabel('Error (m/s)')
+    ax.set_title('Horizontal Velocity Error  (shaded = ±2σ)', fontsize=11)
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.25)
+
+    ax = axes[3, 1]
+    shade_outage(ax); shade_gps(ax)
+    ax.plot(time, vel_err[:, 2], color=c_u, lw=1.0, label='Up err')
+    ax.fill_between(time, -2*std_vel[:, 2], 2*std_vel[:, 2],
+                    color=c_u, alpha=0.12)
+    ax.axhline(0, color='k', lw=0.5, ls=':')
+    ax.set_ylabel('Error (m/s)')
+    ax.set_title('Vertical Velocity Error  (shaded = ±2σ)', fontsize=11)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.25)
+
+    # ═══════════════════════ ROW 4: Accel bias +/- 1sigma ════════════════
+    ax = axes[4, 0]
+    shade_outage(ax); shade_gps(ax)
+    for j, (c, lbl) in enumerate(zip(c_flu[:2], ['Fwd', 'Left'])):
+        ax.plot(time, bias_acc[:, j], color=c, lw=1.0, label=f'{lbl} bias')
+        ax.fill_between(time,
+                        bias_acc[:, j] - std_bias_acc[:, j],
+                        bias_acc[:, j] + std_bias_acc[:, j],
+                        color=c, alpha=0.15)
+    ax.set_ylabel('Bias (m/s²)')
+    ax.set_title('Accel Bias Fwd/Left  (shaded = ±1σ)', fontsize=11)
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.25)
+
+    ax = axes[4, 1]
+    shade_outage(ax); shade_gps(ax)
+    ax.plot(time, bias_acc[:, 2], color=c_flu[2], lw=1.0, label='Up bias')
+    ax.fill_between(time,
+                    bias_acc[:, 2] - std_bias_acc[:, 2],
+                    bias_acc[:, 2] + std_bias_acc[:, 2],
+                    color=c_flu[2], alpha=0.15)
+    ax.set_ylabel('Bias (m/s²)')
+    ax.set_title('Accel Bias Up  (shaded = ±1σ)', fontsize=11)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.25)
+
+    # ═══════════════════════ ROW 5: Gyro bias +/- 1sigma ═════════════════
+    ax = axes[5, 0]
+    shade_outage(ax); shade_gps(ax)
+    for j, (c, lbl) in enumerate(zip(c_rp, ['Roll rate', 'Pitch rate'])):
+        ax.plot(time, np.degrees(bias_gyr[:, j]), color=c, lw=1.0,
+                label=f'{lbl} bias')
+        ax.fill_between(time,
+                        np.degrees(bias_gyr[:, j] - std_bias_gyr[:, j]),
+                        np.degrees(bias_gyr[:, j] + std_bias_gyr[:, j]),
+                        color=c, alpha=0.15)
+    ax.set_ylabel('Bias (deg/s)')
+    ax.set_title('Gyro Bias Roll/Pitch Rate  (shaded = ±1σ)', fontsize=11)
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.25)
+    ax.set_xlabel('Time (s)', fontsize=10)
+
+    ax = axes[5, 1]
+    shade_outage(ax); shade_gps(ax)
+    ax.plot(time, np.degrees(bias_gyr[:, 2]), color=c_y, lw=1.0,
+            label='Yaw rate bias')
+    ax.fill_between(time,
+                    np.degrees(bias_gyr[:, 2] - std_bias_gyr[:, 2]),
+                    np.degrees(bias_gyr[:, 2] + std_bias_gyr[:, 2]),
+                    color=c_y, alpha=0.15)
+    ax.set_ylabel('Bias (deg/s)')
+    ax.set_title('Gyro Bias Yaw Rate  (shaded = ±1σ)', fontsize=11)
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.25)
+    ax.set_xlabel('Time (s)', fontsize=10)
+
+    # ── Overall title ────────────────────────────────────────────────────
+    fig.suptitle('EKF Convergence Dashboard', fontsize=14, fontweight='bold', y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+    return
