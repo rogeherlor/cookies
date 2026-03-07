@@ -40,9 +40,7 @@ B  = int(t2 * frecIMU)
 ekf_params = ekf_config.EKF_PARAMS
 if ekf_params is None:
     ekf_params = {}
-ekf_params.setdefault('enable_nhc', ekf_config.ENABLE_NHC)
-ekf_params.setdefault('enable_zupt', ekf_config.ENABLE_ZUPT)
-ekf_params.setdefault('enable_level', ekf_config.ENABLE_LEVEL)
+ 
 
 
 ################## RUN EKF #########################

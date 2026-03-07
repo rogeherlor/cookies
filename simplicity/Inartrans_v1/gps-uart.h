@@ -25,9 +25,9 @@ int busca2(void);
 extern USART_TypeDef * g_uart;
 extern int (* input_handler)(unsigned char c);
 
-#define PROBANDO 1
+#define PROBANDO 0
 
-#ifndef COM_USART1_ENABLE		// martes
+#ifndef COM_USART1_ENABLE
 #define COM_USART1_ENABLE
 #endif
 

@@ -31,12 +31,13 @@ NAV_DATA        = ekf_config.NAV_DATA
 OUTAGE_START    = ekf_config.OUTAGE_START
 OUTAGE_DURATION = ekf_config.OUTAGE_DURATION
 USE_3D_ROTATION = ekf_config.USE_3D_ROTATION
-ENABLE_NHC      = ekf_config.ENABLE_NHC
-ENABLE_ZUPT     = ekf_config.ENABLE_ZUPT
-ENABLE_LEVEL    = ekf_config.ENABLE_LEVEL
 
 # Parameter bounds for optimization (log scale)
-# Order: Qpos, Qvel, QorientXY, QorientZ, Qacc, QgyrXY, QgyrZ, Rpos, beta_acc, beta_gyr, P_pos, P_vel, P_orient, P_acc, P_gyr
+# Order:
+#   Qpos, Qvel, QorientXY, QorientZ, Qacc, QgyrXY, QgyrZ,
+#   Rpos, Rvel,
+#   beta_acc, beta_gyr,
+#   P_pos, P_vel, P_orient, P_acc, P_gyr
 BOUNDS = [
     (-2, 2),     # log10(Qpos): 0.01 to 100
     (-2, 2),     # log10(Qvel): 0.01 to 100
@@ -46,6 +47,7 @@ BOUNDS = [
     (-6, -2),    # log10(QgyrXY): 0.000001 to 0.01
     (-3, 0),     # log10(QgyrZ): 0.001 to 1
     (-1, 2),     # log10(Rpos): 0.1 to 100m
+    (-2, 1),     # log10(Rvel): 0.01 to 10 (m/s)^2
     (-8, -5),    # log10(abs(beta_acc)): very small negative
     (-2, 1),     # log10(abs(beta_gyr)): small negative
     (-1, 1.5),   # log10(P_pos_std): 0.1 to 30m
@@ -53,11 +55,6 @@ BOUNDS = [
     (-2, -0.5),  # log10(P_orient_std): 0.01 to 0.3 rad
     (-3, -1),    # log10(P_acc_std): 0.001 to 0.1 m/s²
     (-4, -2),    # log10(P_gyr_std): 0.0001 to 0.01 rad/s
-    (-3, 1),     # log10(Rnhc): 0.001 to 10 (m/s)²
-    (-4, 0),     # log10(Rzupt): 0.0001 to 1 (m/s)²
-    (-1.5, 0.5), # log10(zupt_accel_threshold): 0.03 to 3 m/s²
-    (-2.5, -0.5),# log10(zupt_gyro_threshold): 0.003 to 0.3 rad/s
-    (-5, 0),     # log10(Rlevel): 0.00001 to 1 (rad)^2
 ]
 
 ################### PARAMETER DECODING ###########################
@@ -73,21 +70,14 @@ def decode_params(x: np.ndarray) -> dict:
         'QgyrXY': 10**x[5],
         'QgyrZ': 10**x[6],
         'Rpos': 10**x[7],
-        'beta_acc': -10**x[8],  # Negative
-        'beta_gyr': -10**x[9],  # Negative
-        'P_pos_std': 10**x[10],
-        'P_vel_std': 10**x[11],
-        'P_orient_std': 10**x[12],
-        'P_acc_std': 10**x[13],
-        'P_gyr_std': 10**x[14],
-        'enable_nhc': ENABLE_NHC,
-        'Rnhc': 10**x[15],
-        'enable_zupt': ENABLE_ZUPT,
-        'Rzupt': 10**x[16],
-        'zupt_accel_threshold': 10**x[17],
-        'zupt_gyro_threshold': 10**x[18],
-        'enable_level': ENABLE_LEVEL,
-        'Rlevel': 10**x[19],
+        'Rvel': 10**x[8],
+        'beta_acc': -10**x[9],   # Negative
+        'beta_gyr': -10**x[10],  # Negative
+        'P_pos_std': 10**x[11],
+        'P_vel_std': 10**x[12],
+        'P_orient_std': 10**x[13],
+        'P_acc_std': 10**x[14],
+        'P_gyr_std': 10**x[15],
     }
 
 
@@ -259,6 +249,7 @@ def format_params_dict(params: dict) -> str:
         f"'QgyrXY': {params['QgyrXY']:.4e}, "
         f"'QgyrZ': {params['QgyrZ']:.4e}, "
         f"'Rpos': {params['Rpos']:.2f}, "
+        f"'Rvel': {params.get('Rvel', 0.0):.3e}, "
         f"'beta_acc': {params['beta_acc']:.3e}, "
         f"'beta_gyr': {params['beta_gyr']:.3e}, "
         f"'P_pos_std': {params['P_pos_std']:.2f}, "
@@ -266,11 +257,6 @@ def format_params_dict(params: dict) -> str:
         f"'P_orient_std': {params['P_orient_std']:.3f}, "
         f"'P_acc_std': {params['P_acc_std']:.3e}, "
         f"'P_gyr_std': {params['P_gyr_std']:.3e}, "
-        f"'Rnhc': {params['Rnhc']:.3e}, "
-        f"'Rzupt': {params['Rzupt']:.3e}, "
-        f"'zupt_accel_threshold': {params['zupt_accel_threshold']:.3e}, "
-        f"'zupt_gyro_threshold': {params['zupt_gyro_threshold']:.3e}, "
-        f"'Rlevel': {params['Rlevel']:.3e}"
         "}"
     )
 
@@ -328,7 +314,7 @@ if __name__ == "__main__":
         BOUNDS,
         args=(NAV_DATA, OUTAGE_START, OUTAGE_DURATION),
         strategy='best1bin',
-        maxiter=20,          # 20 generations
+        maxiter=40,          # 40 generations
         popsize=15,          # 15 * 15 params = 225 population (efficient)
         tol=0.01,
         mutation=(0.5, 1),

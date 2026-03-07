@@ -65,8 +65,10 @@ uint8_t flagStandby = 0;							// Oct22 0 manda datos, 1 no manda. No deshabilit
 //////////////   GNSS   /////////////////			//Feb23
 extern uint8_t PDOP[6];
 extern uint8_t vel_GNSS[6];
+extern uint8_t cog_GNSS[6];
 uint16_t PDOP_u = 0;
 uint16_t vel_GNSS_u = 0;
+uint16_t cog_GNSS_u = 0;
 uint8_t n_modes = 7;								//n_modes en set_GNSS_mode
 uint8_t GNSS_mode = 7;								//modo del GNSS
 uint16_t GNSS_mode_check;							//al recibir mensaje comprobar que el modo no supera n_modes
@@ -276,7 +278,8 @@ void reportHandler(void)
 				  latitud_s = atof(latitud);
 				  longitud_s = atof(longitud);
 				  altitud_s = atof(altitud);
-				  vel_GNSS_u = atof(vel_GNSS)*100/1.94384;			//Feb23 knots to m/s *100
+				  vel_GNSS_u = atof(vel_GNSS)*100/1.94384;			// knots to m/s *100
+				  cog_GNSS_u = atof(cog_GNSS)*100*PI/180;			// deg to rad * 100
 
 				  if(latitud_s==0.0f || longitud_s==0.0f){			//Ene 23. Comprobacion de valor valido. Se puede incluso restringir la zona de operacion a la del pais.
 					  flag_gps0=true; validez=0x41; latitud_s=0.0; longitud_s=0.0; altitud_s=0.0;
@@ -298,7 +301,7 @@ void reportHandler(void)
 					  if (ekf_initialized && Correct_GPS1) {
 						  EKF_Update(&myEKF, latitud_s/100.0f, longitud_s/100.0f, altitud_s);
 						  Correct_GPS1 = false;
-						  emberAfCorePrint("\nKUpd; lat_s: %ld; lon_s: %ld; alt_s: %ld;  vel_s: %ld", (int32_t)latitud_s, (int32_t)longitud_s, (int32_t)altitud_s, (int32_t)vel_GNSS_u);
+						  emberAfCorePrint("\nKUpd; lat_s: %ld; lon_s: %ld; alt_s: %ld;  vel_s: %ld; cog_s: %ld", (int32_t)latitud_s, (int32_t)longitud_s, (int32_t)altitud_s, (int32_t)vel_GNSS_u, (int32_t)cog_GNSS_u);
 					  }
 
 

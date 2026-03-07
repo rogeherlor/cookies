@@ -6,6 +6,13 @@ import numpy as np
 from math import sin, cos, tan, radians, sqrt
 import pymap3d as pm
 
+def skew(v):
+    """Return the skew-symmetric matrix of vector v."""
+    return np.array([
+        [0, -v[2], v[1]],
+        [v[2], 0, -v[0]],
+        [-v[1], v[0], 0]
+    ])
 
 # ─── Physical constants (WGS-84 ellipsoid) ────────────────────────────────────
 GRAVITY = np.array([0, 0, -9.81])        # gravity vector in ENU frame [m/s²]
@@ -310,9 +317,15 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
             # Inject error state into nominal state
             pIMU += x[0:3]
             vIMU += x[3:6]
-            rpy[0] += x[6]
-            rpy[1] += x[7]
-            rpy[2] += x[8]
+            
+            delta_theta = x[6:9]
+            if np.linalg.norm(delta_theta) > 1e-10:
+                Rbn = (np.eye(3) - skew(delta_theta)) @ Rbn
+                pitch = np.arcsin(np.clip(-Rbn[2, 0], -1.0, 1.0))
+                roll = np.arctan2(Rbn[2, 1], Rbn[2, 2])
+                yaw = np.arctan2(Rbn[1, 0], Rbn[0, 0])
+                rpy = np.array([roll, pitch, yaw])
+                
             # Reset injected states so downstream updates (NHC/ZUPT/Level)
             # start from a clean error state and don't double-count
             x[0:9] = 0
@@ -368,9 +381,15 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
 
             # Inject NHC corrections into nominal state
             vIMU += x[3:6]
-            rpy[0] += x[6]
-            rpy[1] += x[7]
-            rpy[2] += x[8]
+            
+            delta_theta = x[6:9]
+            if np.linalg.norm(delta_theta) > 1e-10:
+                Rbn = (np.eye(3) - skew(delta_theta)) @ Rbn
+                pitch = np.arcsin(np.clip(-Rbn[2, 0], -1.0, 1.0))
+                roll = np.arctan2(Rbn[2, 1], Rbn[2, 2])
+                yaw = np.arctan2(Rbn[1, 0], Rbn[0, 0])
+                rpy = np.array([roll, pitch, yaw])
+                
             x[3:9] = 0  # Reset corrected error states
 
         # ── Zero Velocity Update (ZUPT) ──────────────────────────────────
@@ -433,9 +452,15 @@ def run_ekf(nav_data, ekf_params=None, outage_config=None, use_3d_rotation=True)
             P = IKH_level @ P @ IKH_level.T + K_level @ R_level @ K_level.T
 
             # Inject leveling corrections
-            rpy[0] += x[6]
-            rpy[1] += x[7]
-            x[6:8] = 0  # Reset roll/pitch error states
+            delta_theta_level = x[6:9]
+            if np.linalg.norm(delta_theta_level) > 1e-10:
+                Rbn = (np.eye(3) - skew(delta_theta_level)) @ Rbn
+                pitch = np.arcsin(np.clip(-Rbn[2, 0], -1.0, 1.0))
+                roll = np.arctan2(Rbn[2, 1], Rbn[2, 2])
+                yaw = np.arctan2(Rbn[1, 0], Rbn[0, 0])
+                rpy = np.array([roll, pitch, yaw])
+                
+            x[6:9] = 0  # Reset orientation error states
 
         # Store current iteration results
         p[i + 1, :] = pIMU.T

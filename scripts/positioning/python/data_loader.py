@@ -30,11 +30,20 @@ class NavigationData:
     lla: np.ndarray            # Position in geodetic coordinates [lat, lon, alt] (deg, deg, m)
     orient: np.ndarray         # Orientation as Euler angles [roll, pitch, yaw] (rad)
     gps_available: np.ndarray  # Boolean array indicating which samples have actual GPS measurements (N,)
-    
+
     # Metadata
     sample_rate: float         # Sampling rate in Hz
     dataset_name: str          # Name/identifier of the dataset
     gps_rate: float            # GPS update rate in Hz
+    
+    # GNSS derived observables (aligned to IMU timeline)
+    # - gps_speed_mps: Speed over ground (m/s)
+    # - gps_cog_rad: Course over ground in navigation frame (rad), convention: atan2(E, N)
+    # These are always provided as arrays. When GNSS is not available at an epoch,
+    # entries may be NaN.
+    gps_speed_mps: np.ndarray = None
+    gps_cog_rad: np.ndarray = None
+    
     lla0: np.ndarray = None    # ENU origin coordinates [lat, lon, alt] (deg, deg, m)
     time: np.ndarray = None    # Time array in seconds from start (optional, for asynchronous data)
     
@@ -53,6 +62,11 @@ class NavigationData:
         assert self.orient.shape == (n_samples, 3), f"orient shape mismatch: {self.orient.shape}"
         assert self.gps_available.shape == (n_samples,), f"gps_available shape mismatch: {self.gps_available.shape}"
         assert self.gps_available.dtype == bool, f"gps_available must be boolean array"
+
+        assert self.gps_speed_mps is not None, "gps_speed_mps must be provided (use NaN when unavailable)"
+        assert self.gps_cog_rad is not None, "gps_cog_rad must be provided (use NaN when unavailable)"
+        assert self.gps_speed_mps.shape == (n_samples,), f"gps_speed_mps shape mismatch: {self.gps_speed_mps.shape}"
+        assert self.gps_cog_rad.shape == (n_samples,), f"gps_cog_rad shape mismatch: {self.gps_cog_rad.shape}"
         
         return True
 
@@ -109,6 +123,12 @@ def load_kitti_mat(filepath: str, sample_rate: float = 10.0) -> NavigationData:
         print(f"IMU samples between GPS updates: mean={mean_imu_between:.1f}, min={min_imu_between}, max={max_imu_between}")
     
     print(f"KITTI data: {n_samples} samples at {sample_rate} Hz, GPS updates at {gps_rate} Hz ({np.sum(gps_available)} updates)")
+
+    # Derive GNSS speed/course from provided ENU velocity (used as GNSS velocity observation)
+    vE = vel_enu[:, 0]
+    vN = vel_enu[:, 1]
+    gps_speed_mps = np.sqrt(vE**2 + vN**2)
+    gps_cog_rad = np.arctan2(vE, vN)  # atan2(E, N)
     
     # Create NavigationData object
     nav_data = NavigationData(
@@ -122,6 +142,8 @@ def load_kitti_mat(filepath: str, sample_rate: float = 10.0) -> NavigationData:
         dataset_name=dataset_name,
         gps_rate=gps_rate,
         lla0=lla[0].copy(),  # ENU origin = first GPS position
+        gps_speed_mps=gps_speed_mps,
+        gps_cog_rad=gps_cog_rad,
     )
     
     # Validate data consistency
@@ -171,12 +193,14 @@ def load_cookies_data(filepath: str, sample_rate: float = None, resample: bool =
     timestamps = []
     accel_raw = []  # Raw accelerometer in body frame
     gyro_raw = []   # Raw gyroscope in body frame
-    gps_data = []   # GPS measurements: [timestamp, lat, lon, alt, vel]
+    gps_data = []   # GPS measurements: [timestamp, lat, lon, alt, speed_raw, cog_rad_or_nan]
     
     # Regular expressions for parsing
     timestamp_pattern = r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\]'
     imu_pattern = r'A = (-?\d+), (-?\d+), (-?\d+);G = (-?\d+), (-?\d+), (-?\d+)'
-    gps_pattern = r'KUpd; lat_s: (\d+), lon_s: (\d+), alt_s: (\d+); vel_s: (\d+)'
+    # Firmware prints: "KUpd; lat_s: %ld; lon_s: %ld; alt_s: %ld;  vel_s: %ld; cog_s: %ld"
+    # Some older logs may omit cog_s, so make it optional.
+    gps_pattern = r'KUpd; lat_s:\s*(\d+)[,;]\s*lon_s:\s*(\d+)[,;]\s*alt_s:\s*(\d+)[,;]\s*vel_s:\s*(\d+)(?:[,;]\s*cog_s:\s*(\d+))?'
     
     # Track last GPS values to detect actual updates (GPS updates at 1Hz, but KUpd printed at ~8Hz)
     last_gps_values = None
@@ -233,10 +257,13 @@ def load_cookies_data(filepath: str, sample_rate: float = None, resample: bool =
             # Check for GPS data
             gps_match = re.search(gps_pattern, line)
             if gps_match:
-                lat_s, lon_s, alt_s, vel_s = map(int, gps_match.groups())
+                groups = gps_match.groups()
+                lat_s, lon_s, alt_s, vel_s = map(int, groups[0:4])
+                cog_s_raw = groups[4]
+                cog_s_int = int(cog_s_raw) if cog_s_raw is not None else None
                 
                 # Only add GPS data if values have changed (actual 1Hz update, not just re-printed value)
-                current_gps_values = (lat_s, lon_s, alt_s, vel_s)
+                current_gps_values = (lat_s, lon_s, alt_s, vel_s, cog_s_int)
                 if last_gps_values is None or current_gps_values != last_gps_values:
                     # Convert from NMEA format (DDMM.MMMM stored as integer without decimal)
                     # e.g., 40264184 = 4026.4184 = 40° 26.4184' = 40 + 26.4184/60 = 40.440306°
@@ -270,8 +297,25 @@ def load_cookies_data(filepath: str, sample_rate: float = None, resample: bool =
                         lon = -lon
                     
                     alt = alt_s / 100.0
-                    vel = vel_s / 100.0
-                    gps_data.append([ts, lat, lon, alt, vel])
+                    # Firmware scaling (see `simplicity/Inartrans_v1_imu/flex-callbacks.c`):
+                    #   vel_GNSS_u = knots * 100 / 1.94384    -> (m/s * 100)
+                    #   log prints vel_s = vel_GNSS_u * 100   -> (m/s * 10000)
+                    vel = float(vel_s) / 10000.0
+
+                    def _decode_cog_to_rad(cog_s: Optional[int]) -> float:
+                        """
+                        Decode course-over-ground from firmware integer.
+
+                        Firmware scaling (current decision):
+                          cog_GNSS_u = radians * 1
+                          log prints cog_s = cog_GNSS_u * 10000 -> (rad * 10000)
+                        """
+                        if cog_s is None:
+                            return float('nan')
+                        return float(cog_s) / 10000.0
+
+                    cog_rad = _decode_cog_to_rad(cog_s_int) if cog_s_int is not None else float('nan')
+                    gps_data.append([ts, lat, lon, alt, vel, cog_rad])
                     last_gps_values = current_gps_values
     
     if len(timestamps) == 0:
@@ -348,28 +392,62 @@ def load_cookies_data(filepath: str, sample_rate: float = None, resample: bool =
     lat_gps = gps_array[9:, 1].astype(float)
     lon_gps = gps_array[9:, 2].astype(float)
     alt_gps = gps_array[9:, 3].astype(float)
-    vel_gps = gps_array[9:, 4].astype(float)
+    speed_gps = gps_array[9:, 4].astype(float)
+    cog_gps = gps_array[9:, 5].astype(float)  # may contain NaN if not logged
+
+    # If COG wasn't logged, derive it from successive GNSS positions (course over ground).
+    # This keeps the interface consistent: we always provide speed + course when GNSS is available.
+    if not np.all(np.isfinite(cog_gps)):
+        enu_gps = np.array([pm.geodetic2enu(lat, lon, alt, lla0[0], lla0[1], lla0[2])
+                            for lat, lon, alt in zip(lat_gps, lon_gps, alt_gps)], dtype=float)
+        d = np.diff(enu_gps[:, 0:2], axis=0)
+        dt = np.diff(time_gps)
+        dt = np.maximum(dt, 1e-3)
+        # Heading from displacement; pad last with previous
+        cog_derived = np.arctan2(d[:, 0], d[:, 1])
+        if len(cog_derived) == 0:
+            cog_derived = np.array([0.0])
+        cog_gps_filled = np.empty_like(cog_gps, dtype=float)
+        cog_gps_filled[:] = np.nan
+        cog_gps_filled[0] = cog_derived[0]
+        cog_gps_filled[1:] = cog_derived
+        # Prefer logged values where finite
+        mask = np.isfinite(cog_gps)
+        cog_gps = np.where(mask, cog_gps, cog_gps_filled)
     
     # Interpolate GPS to IMU timestamps
     if len(time_gps) > 1:
         f_lat = interp1d(time_gps, lat_gps, kind='linear', fill_value='extrapolate')
         f_lon = interp1d(time_gps, lon_gps, kind='linear', fill_value='extrapolate')
         f_alt = interp1d(time_gps, alt_gps, kind='linear', fill_value='extrapolate')
+        f_speed = interp1d(time_gps, speed_gps, kind='linear', fill_value='extrapolate')
         
         lat_interp = f_lat(time_imu)
         lon_interp = f_lon(time_imu)
         alt_interp = f_alt(time_imu)
+        speed_interp = f_speed(time_imu)
+
+        # Circular interpolation for course: interpolate sin/cos then atan2
+        cog_sin = np.sin(cog_gps)
+        cog_cos = np.cos(cog_gps)
+        f_cog_sin = interp1d(time_gps, cog_sin, kind='linear', fill_value='extrapolate')
+        f_cog_cos = interp1d(time_gps, cog_cos, kind='linear', fill_value='extrapolate')
+        cog_interp = np.arctan2(f_cog_sin(time_imu), f_cog_cos(time_imu))
     else:
         # If only one GPS sample, use it for all
         lat_interp = np.full(len(time_imu), lat_gps[0])
         lon_interp = np.full(len(time_imu), lon_gps[0])
         alt_interp = np.full(len(time_imu), alt_gps[0])
+        speed_interp = np.full(len(time_imu), speed_gps[0])
+        cog_interp = np.full(len(time_imu), cog_gps[0])
     
     lla = np.column_stack([lat_interp, lon_interp, alt_interp])
     enu_positions = np.array([pm.geodetic2enu(lat, lon, alt, lla0[0], lla0[1], lla0[2]) 
                               for lat, lon, alt in zip(lat_interp, lon_interp, alt_interp)])
     
-    # Compute velocity from position differences
+    # Compute velocity from position differences (kept for backwards compatibility).
+    # Note: you also have GNSS-derived observables `gps_speed_mps` / `gps_cog_rad`
+    # which can be fused as measurements in the EKF.
     dt_imu = np.diff(time_imu)
     dt_imu = np.append(dt_imu, dt_imu[-1])  # Pad last value
     vel_enu = np.zeros((len(time_imu), 3))
@@ -467,7 +545,9 @@ def load_cookies_data(filepath: str, sample_rate: float = None, resample: bool =
         dataset_name=dataset_name,
         gps_rate=gps_rate,
         lla0=np.array(lla0),
-        time=time_array
+        time=time_array,
+        gps_speed_mps=speed_interp,
+        gps_cog_rad=cog_interp,
     )
     
     nav_data.validate()

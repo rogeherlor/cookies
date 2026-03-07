@@ -61,6 +61,7 @@ uint8_t tiempo_ultimo_valido[10] = "000000.000";
 uint8_t tiemponuevo[10] = {0};
 uint8_t fechanueva[6] = {0};
 uint8_t vel_GNSS[6] = {0}; 	//Feb23
+uint8_t cog_GNSS[6] = {0};
 uint8_t PDOP[6] = {0};		//Feb23
 uint8_t fecha[6] = {0};
 uint8_t tiempo2[10] = {0};
@@ -298,6 +299,8 @@ int busca2 (void){
 					if (flag_fecha==11){
 						memcpy(&vel_GNSS, "000000", 6);
 						memcpy(&vel_GNSS, &mi_buffer[comasfecha[6]+1], comasfecha[7] - comasfecha[6] - 1);
+						memcpy(&cog_GNSS, "000000", 6);
+						memcpy(&cog_GNSS, &mi_buffer[comasfecha[7]+1], comasfecha[8] - comasfecha[7] - 1);
 						memcpy(&fechanueva, &mi_buffer[comasfecha[8]+1], comasfecha[9] - comasfecha[8] - 1);
 						flag_fecha=0;
 						break;
