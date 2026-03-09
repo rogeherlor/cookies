@@ -10,6 +10,7 @@ import data_loader
 import visualize
 import visualize_state
 import ekf_core
+import eskf_core
 import ekf_config
 
 ################### LOAD DATA ###########################
@@ -45,7 +46,13 @@ if ekf_params is None:
 
 ################## RUN EKF #########################
 outage_config = {'start': t1, 'duration': d}
-ekf_result = ekf_core.run_ekf(nav_data, ekf_params, outage_config, use_3d_rotation)
+
+CORE_MODULES = {
+    "ekf": ekf_core,
+    "eskf": eskf_core,
+}
+core_module = CORE_MODULES.get(ekf_config.CORE_NAME, ekf_core)
+ekf_result = core_module.run_ekf(nav_data, ekf_params, outage_config, use_3d_rotation)
 
 # Extract results
 p = ekf_result['p']

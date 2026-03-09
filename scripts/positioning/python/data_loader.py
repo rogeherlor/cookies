@@ -127,7 +127,7 @@ def load_kitti_mat(filepath: str, sample_rate: float = 10.0) -> NavigationData:
     # Derive GNSS speed/course from provided ENU velocity (used as GNSS velocity observation)
     vE = vel_enu[:, 0]
     vN = vel_enu[:, 1]
-    gps_speed_mps = np.sqrt(vE**2 + vN**2)
+    gps_speed_mps = np.sqrt(vE**2 + vN**2) # m/s
     gps_cog_rad = np.arctan2(vE, vN)  # atan2(E, N)
     
     # Create NavigationData object
@@ -488,6 +488,13 @@ def load_cookies_data(filepath: str, sample_rate: float = None, resample: bool =
                                for i in range(3)]).T
         orient_interp = np.array([interp1d(time_imu, orient[:, i], kind='linear')(time_uniform) 
                                   for i in range(3)]).T
+        
+        speed_interp = interp1d(time_imu, speed_interp, kind='linear')(time_uniform)
+        
+        # Use sin/cos for course-over-ground to avoid 360-degree wrap-around artifacts
+        cog_sin_interp = interp1d(time_imu, np.sin(cog_interp), kind='linear')(time_uniform)
+        cog_cos_interp = interp1d(time_imu, np.cos(cog_interp), kind='linear')(time_uniform)
+        cog_interp = np.arctan2(cog_sin_interp, cog_cos_interp)
         
         # Mark GPS availability at resampled timestamps
         # GPS is available when resampled timestamp is close to an actual GPS timestamp

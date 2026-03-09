@@ -20,17 +20,24 @@ from datetime import datetime
 from scipy.optimize import differential_evolution
 import data_loader
 import ekf_core
+import eskf_core
 
 
 ################### OPTIMIZATION PARAMETERS ###########################
 
 # These are imported from ekf_config.py so the optimizer always runs on the same
-# dataset / outage / rotation mode that ekf.py is currently configured for.
+# dataset / outage / rotation mode / core that ekf.py is currently configured for.
 import ekf_config
 NAV_DATA        = ekf_config.NAV_DATA
 OUTAGE_START    = ekf_config.OUTAGE_START
 OUTAGE_DURATION = ekf_config.OUTAGE_DURATION
 USE_3D_ROTATION = ekf_config.USE_3D_ROTATION
+CORE_NAME       = ekf_config.CORE_NAME
+
+CORE_MODULES = {
+    "ekf": ekf_core,
+    "eskf": eskf_core,
+}
 
 # Parameter bounds for optimization (log scale)
 # Order:
@@ -113,10 +120,13 @@ def fitness_function(x: np.ndarray, nav_data, t1: float, d: float) -> float:
     
     params = decode_params(x)
     
+    # Select EKF core based on shared configuration
+    core_module = CORE_MODULES.get(CORE_NAME, ekf_core)
+    
     # Run EKF with these parameters
     try:
         outage_config = {'start': t1, 'duration': d}
-        ekf_result = ekf_core.run_ekf(nav_data, params, outage_config, USE_3D_ROTATION)
+        ekf_result = core_module.run_ekf(nav_data, params, outage_config, USE_3D_ROTATION)
         
         # Ground truth
         lla0 = nav_data.lla0
