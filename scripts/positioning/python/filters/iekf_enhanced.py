@@ -1,0 +1,316 @@
+# -*- coding: utf-8 -*-
+"""
+IEKF Enhanced — Left-Invariant EKF with Non-Holonomic Constraints (NHC) and
+Zero-Velocity Updates (ZUPT).
+
+GPS position update + NHC + ZUPT.
+
+References:
+    Barrau, A. & Bonnabel, S., "The Invariant Extended Kalman Filter as a
+    Stable Observer", IEEE Transactions on Automatic Control, vol. 62, no. 4,
+    pp. 1797-1812, April 2017.  DOI: 10.1109/TAC.2016.2594085
+
+    Dissanayake, G. et al., "The aiding of a low-cost strapdown inertial
+    measurement unit using vehicle model constraints for land vehicle
+    applications", IEEE Transactions on Vehicular Technology, 2001.
+    DOI: 10.1109/25.892572
+
+    Foxlin, E., "Pedestrian Tracking with Shoe-Mounted Inertial Sensors",
+    IEEE Computer Graphics & Applications, vol. 25, no. 6, 2005.
+    DOI: 10.1109/MCG.2005.140
+
+NHC / ZUPT in the left-invariant error frame:
+    The velocity error ξ_v is in the FLU body frame.  The body-frame
+    velocity measurement h = Rnb @ v_nav decomposes as:
+        δh = δ(Rnb @ v) = Rnb @ δv_nav + δRnb @ v_nav
+           ≈ ξ_v  +  skew(v_body) @ φ
+    so the H_nhc structure is the same as in the ESKF but now maps
+    columns [φ(0:3), ξ_v(3:6)] of the IEKF state.
+
+Conventions:
+    IMU       : FLU frame (Forward, Left, Up)
+    Navigation: ENU frame (East, North, Up)
+    Quaternion: Hamilton convention  q = [w, x, y, z]
+"""
+import numpy as np
+import pymap3d as pm
+
+GRAVITY = np.array([0.0, 0.0, -9.81])
+
+DEFAULT_PARAMS = {
+    'Qpos':      5.312e-06,
+    'Qvel':      4.702e-06,
+    'QorientXY': 0.0002,
+    'QorientZ':  0.2,
+    'Qacc':      0.1,
+    'QgyrXY':    0.0001,
+    'QgyrZ':     0.1,
+    'Rpos':      67.79,
+    'beta_acc':  -1.910e-06,
+    'beta_gyr':  -7.077e-02,
+    'P_pos_std':    0.23,
+    'P_vel_std':    0.17,
+    'P_orient_std': 0.239,
+    'P_acc_std':    0.01,
+    'P_gyr_std':    0.001,
+    'Rnhc':                 0.1,
+    'Rzupt':                0.01,
+    'zupt_accel_threshold': 0.3,
+    'zupt_gyro_threshold':  0.05,
+}
+
+
+def _skew(v):
+    return np.array([
+        [ 0.0,   -v[2],  v[1]],
+        [ v[2],   0.0,  -v[0]],
+        [-v[1],   v[0],  0.0 ],
+    ])
+
+
+def _qnorm(q):
+    n = np.linalg.norm(q)
+    return q / n if n > 0.0 else np.array([1.0, 0.0, 0.0, 0.0])
+
+
+def _qmul(q1, q2):
+    w1, x1, y1, z1 = q1;  w2, x2, y2, z2 = q2
+    return np.array([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ])
+
+
+def _qfrom_axis_angle(dtheta):
+    angle = np.linalg.norm(dtheta)
+    if angle < 1e-12:
+        return _qnorm(np.array([1.0, 0.5*dtheta[0], 0.5*dtheta[1], 0.5*dtheta[2]]))
+    axis = dtheta / angle;  s = np.sin(0.5 * angle)
+    return np.array([np.cos(0.5 * angle), axis[0]*s, axis[1]*s, axis[2]*s])
+
+
+def _qfrom_euler(roll, pitch, yaw):
+    cr, sr = np.cos(roll/2),  np.sin(roll/2)
+    cp, sp = np.cos(pitch/2), np.sin(pitch/2)
+    cy, sy = np.cos(yaw/2),   np.sin(yaw/2)
+    return _qnorm(np.array([
+        cr*cp*cy + sr*sp*sy,
+        sr*cp*cy - cr*sp*sy,
+        cr*sp*cy + sr*cp*sy,
+        cr*cp*sy - sr*sp*cy,
+    ]))
+
+
+def _qto_rpy(q):
+    w, x, y, z = q
+    roll  = np.arctan2(2.0*(w*x + y*z), 1.0 - 2.0*(x*x + y*y))
+    pitch = np.arcsin(np.clip(2.0*(w*y - z*x), -1.0, 1.0))
+    yaw   = np.arctan2(2.0*(w*z + x*y), 1.0 - 2.0*(y*y + z*z))
+    return np.array([roll, pitch, yaw])
+
+
+def _qto_Rbn(q):
+    w, x, y, z = q
+    return np.array([
+        [1 - 2*(y*y + z*z),   2*(x*y - z*w),       2*(x*z + y*w)    ],
+        [2*(x*y + z*w),       1 - 2*(x*x + z*z),   2*(y*z - x*w)    ],
+        [2*(x*z - y*w),       2*(y*z + x*w),       1 - 2*(x*x + y*y)],
+    ])
+
+
+def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
+    """
+    Run the IEKF with NHC + ZUPT enhancements.
+
+    Returns:
+        dict with keys: p, v, r, bias_acc, bias_gyr,
+                        std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr.
+    """
+    p_cfg = dict(DEFAULT_PARAMS)
+    if params:
+        p_cfg.update(params)
+
+    accel_flu = nav_data.accel_flu
+    gyro_flu  = nav_data.gyro_flu
+    lla       = nav_data.lla
+    orient    = nav_data.orient
+    vel_enu   = nav_data.vel_enu
+    frecIMU   = nav_data.sample_rate
+    lla0      = nav_data.lla0
+
+    g  = GRAVITY
+    Ts = 1.0 / frecIMU
+    NN = lla.shape[0]
+
+    if outage_config is None:
+        A, B = 0, 0
+    else:
+        A = int(outage_config['start'] * frecIMU)
+        B = int((outage_config['start'] + outage_config['duration']) * frecIMU)
+
+    pos        = np.zeros((NN, 3));  vel       = np.zeros((NN, 3))
+    rpy_out    = np.zeros((NN, 3));  b_acc_out = np.zeros((NN, 3))
+    b_gyr_out  = np.zeros((NN, 3))
+    std_pos    = np.zeros((NN, 3));  std_vel   = np.zeros((NN, 3))
+    std_orient = np.zeros((NN, 3))
+    std_b_acc  = np.zeros((NN, 3));  std_b_gyr = np.zeros((NN, 3))
+
+    pos[0, :]     = pm.geodetic2enu(lla[0,0], lla[0,1], lla[0,2], lla0[0], lla0[1], lla0[2])
+    vel[0, :]     = vel_enu[0, :]
+    rpy_out[0, :] = orient[0, :]
+
+    pIMU = pos[0, :].copy()
+    vIMU = vel[0, :].copy()
+    q    = _qfrom_euler(orient[0, 0], orient[0, 1], orient[0, 2])
+    b_a  = np.zeros(3)
+    b_g  = np.zeros(3)
+    xi   = np.zeros(15)
+
+    beta_acc = p_cfg['beta_acc']
+    beta_gyr = p_cfg['beta_gyr']
+
+    Q = np.zeros((15, 15))
+    Q[0:3,   0:3]   = np.diag([p_cfg['QorientXY'], p_cfg['QorientXY'], p_cfg['QorientZ']])
+    Q[3:6,   3:6]   = np.eye(3) * (p_cfg['Qvel'] * Ts**2)
+    Q[6:9,   6:9]   = np.eye(3) * (p_cfg['Qpos'] * Ts**2)
+    Q[9:12,  9:12]  = np.eye(3) * (p_cfg['Qacc'] * Ts)
+    Q[12:15, 12:15] = np.diag([p_cfg['QgyrXY'], p_cfg['QgyrXY'], p_cfg['QgyrZ']]) * Ts
+
+    P = np.diag([
+        p_cfg['P_orient_std'], p_cfg['P_orient_std'], p_cfg['P_orient_std'] * 2,
+        p_cfg['P_vel_std'],    p_cfg['P_vel_std'],    p_cfg['P_vel_std'],
+        p_cfg['P_pos_std'],    p_cfg['P_pos_std'],    p_cfg['P_pos_std'],
+        p_cfg['P_acc_std'],    p_cfg['P_acc_std'],    p_cfg['P_acc_std'],
+        p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],
+    ]) ** 2
+
+    R_pos  = np.eye(3) * p_cfg['Rpos']
+    R_nhc  = np.eye(2) * p_cfg['Rnhc']
+    R_zupt = np.eye(3) * p_cfg['Rzupt']
+
+    for i in range(NN - 1):
+
+        acc_b   = accel_flu[i, :] - b_a
+        omega_b = gyro_flu[i, :]  - b_g
+
+        if use_3d_rotation:
+            dtheta = omega_b * Ts
+        else:
+            dtheta = np.array([0.0, 0.0, omega_b[2] * Ts])
+
+        q   = _qnorm(_qmul(q, _qfrom_axis_angle(dtheta)))
+        Rbn = _qto_Rbn(q)
+        Rnb = Rbn.T
+
+        accENU = Rbn @ acc_b
+        pIMU   = pIMU + Ts * vIMU + 0.5 * Ts**2 * (accENU + g)
+        vIMU   = vIMU + Ts * (accENU + g)
+
+        # Left-invariant Jacobian (Barrau 2017 Eq. 26)
+        Ajac = np.zeros((15, 15))
+        Ajac[0:3,  0:3 ] = -_skew(b_g)
+        Ajac[0:3,  12:15] = -np.eye(3)
+        Ajac[3:6,  0:3 ] = -_skew(b_a)
+        Ajac[3:6,  3:6 ] = -_skew(b_g)
+        Ajac[3:6,  9:12] = -np.eye(3)
+        Ajac[6:9,  3:6 ] = np.eye(3)
+        Ajac[6:9,  6:9 ] = -_skew(b_g)
+        Ajac[9:12,  9:12]  = beta_acc * np.eye(3)
+        Ajac[12:15, 12:15] = beta_gyr * np.eye(3)
+
+        Fd = np.eye(15) + Ajac * Ts
+        P  = Fd @ P @ Fd.T + Q
+        update_occurred = False
+
+        # ── A. GPS Position Update ─────────────────────────────────────────────
+        gps_ok     = nav_data.gps_available[i]
+        not_outage = ((i + 1) < A) or ((i + 1) > B)
+
+        if gps_ok and not_outage:
+            p_gps  = np.array(pm.geodetic2enu(
+                lla[i, 0], lla[i, 1], lla[i, 2], lla0[0], lla0[1], lla0[2]))
+            z_body = Rnb @ (p_gps - pIMU)
+            innov  = z_body - xi[6:9]
+
+            S = P[6:9, 6:9] + R_pos
+            K = P[:, 6:9] @ np.linalg.inv(S)
+            xi = xi + K @ innov
+            P  = P - K @ S @ K.T
+            P  = 0.5 * (P + P.T)
+            update_occurred = True
+
+        # ── B. Non-Holonomic Constraints (NHC) ────────────────────────────────
+        # In IEKF body-frame error: δv_body = ξ_v + skew(v_body) @ φ
+        # H maps [φ(0:3), ξ_v(3:6)] to [lateral, vertical] body velocity.
+        v_body = Rnb @ vIMU
+        z_nhc  = -v_body[1:3]
+
+        H_phi_nhc = _skew(v_body)[1:3, :]   # 2×3 attitude block
+        H_v_nhc   = np.eye(3)[1:3, :]        # 2×3 velocity block (just picks rows)
+        H_nhc     = np.hstack((H_phi_nhc, H_v_nhc))  # 2×6
+
+        innov_nhc = z_nhc - H_nhc @ xi[0:6]
+        S_nhc     = H_nhc @ P[0:6, 0:6] @ H_nhc.T + R_nhc
+        K_nhc     = P[:, 0:6] @ H_nhc.T @ np.linalg.inv(S_nhc)
+        xi = xi + K_nhc @ innov_nhc
+        P  = P - K_nhc @ S_nhc @ K_nhc.T
+        P  = 0.5 * (P + P.T)
+        update_occurred = True
+
+        # ── C. Zero-Velocity Update (ZUPT) ────────────────────────────────────
+        # ZUPT measures v_body ≈ 0, same as NHC but all 3 axes.
+        # In IEKF frame: z_zupt = 0 − v_body = −Rnb @ vIMU (all 3 body axes).
+        accel_dev = abs(np.linalg.norm(acc_b) - 9.81)
+        gyro_mag  = np.linalg.norm(omega_b)
+        speed     = np.linalg.norm(vIMU)
+
+        if (accel_dev < p_cfg['zupt_accel_threshold'] and
+                gyro_mag  < p_cfg['zupt_gyro_threshold'] and
+                speed < 1.0):
+            z_zupt = -v_body   # all 3 body-frame velocity components
+            # H selects ξ_v (columns 3:6) — direct body-frame velocity observation
+            innov_zupt = z_zupt - xi[3:6]
+            S_zupt     = P[3:6, 3:6] + R_zupt
+            K_zupt     = P[:, 3:6] @ np.linalg.inv(S_zupt)
+            xi = xi + K_zupt @ innov_zupt
+            P  = P - K_zupt @ S_zupt @ K_zupt.T
+            P  = 0.5 * (P + P.T)
+            update_occurred = True
+
+        # ── Error injection ────────────────────────────────────────────────────
+        if update_occurred:
+            pIMU += Rbn @ xi[6:9]
+            vIMU += Rbn @ xi[3:6]
+            b_a  += xi[9:12]
+            b_g  += xi[12:15]
+
+            delta_theta = xi[0:3]
+            q   = _qnorm(_qmul(q, _qfrom_axis_angle(delta_theta)))
+            Rbn = _qto_Rbn(q)
+
+            G           = np.eye(15)
+            G[0:3, 0:3] = np.eye(3) - 0.5 * _skew(delta_theta)
+            P           = G @ P @ G.T
+            xi[:]       = 0.0
+
+        pos[i+1, :]       = pIMU
+        vel[i+1, :]       = vIMU
+        rpy_out[i+1, :]   = _qto_rpy(q)
+        b_acc_out[i+1, :] = b_a
+        b_gyr_out[i+1, :] = b_g
+        cov_p_nav   = Rbn @ P[6:9, 6:9] @ Rbn.T
+        cov_v_nav   = Rbn @ P[3:6, 3:6] @ Rbn.T
+        std_pos[i+1, :]      = np.sqrt(np.maximum(np.diag(cov_p_nav),      0.0))
+        std_vel[i+1, :]      = np.sqrt(np.maximum(np.diag(cov_v_nav),      0.0))
+        std_orient[i+1, :]   = np.sqrt(np.maximum(np.diag(P[0:3, 0:3]),    0.0))
+        std_b_acc[i+1, :]    = np.sqrt(np.maximum(np.diag(P[9:12, 9:12]),  0.0))
+        std_b_gyr[i+1, :]    = np.sqrt(np.maximum(np.diag(P[12:15,12:15]), 0.0))
+
+    return {
+        'p': pos, 'v': vel, 'r': rpy_out,
+        'bias_acc': b_acc_out, 'bias_gyr': b_gyr_out,
+        'std_pos': std_pos, 'std_vel': std_vel, 'std_orient': std_orient,
+        'std_bias_acc': std_b_acc, 'std_bias_gyr': std_b_gyr,
+    }
