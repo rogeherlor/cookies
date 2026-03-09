@@ -16,7 +16,7 @@ CORE_NAME = "eskf"
 
 
 # ── GNSS outage ───────────────────────────────────────────────────────────────
-OUTAGE_START    = 200   # seconds from start
+OUTAGE_START    = 270   # seconds from start
 OUTAGE_DURATION = 70   # seconds
 
 # ── Rotation mode ─────────────────────────────────────────────────────────────
@@ -33,8 +33,7 @@ if (True):
     # 2D 
     # EKF_PARAMS = {'Qpos': 1.080e+01, 'Qvel': 1.171e+00, 'QorientXY': 4.3530e-03, 'QorientZ': 1.0393e-02, 'Qacc': 4.4156e-01, 'QgyrXY': 3.9277e-06, 'QgyrZ': 9.2825e-03, 'Rpos': 2.11, 'Rvel': 6.832e-02, 'beta_acc': -5.101e-06, 'beta_gyr': -1.313e+00, 'P_pos_std': 24.38, 'P_vel_std': 0.32, 'P_orient_std': 0.017, 'P_acc_std': 6.960e-03, 'P_gyr_std': 2.744e-03, }
     # 3D
-    EKF_PARAMS = {'Qpos': 2.831e+01, 'Qvel': 1.304e+01, 'QorientXY': 1.1277e-02, 'QorientZ': 6.0520e-02, 'Qacc': 1.1967e-03, 'QgyrXY': 2.3574e-03, 'QgyrZ': 2.7707e-01, 'Rpos': 1.89, 'Rvel': 2.208e-01, 'beta_acc': -2.816e-06, 'beta_gyr': -6.023e-02, 'P_pos_std': 7.76, 'P_vel_std': 0.22, 'P_orient_std': 0.011, 'P_acc_std': 2.509e-02, 'P_gyr_std': 1.861e-03, }
-
+    EKF_PARAMS = {'Qpos': 2.978e+01, 'Qvel': 1.542e+01, 'QorientXY': 6.2359e-02, 'QorientZ': 1.2136e-02, 'Qacc': 4.3830e-02, 'QgyrXY': 1.5068e-05, 'QgyrZ': 2.0950e-03, 'Rpos': 10.30, 'Rvel': 5.749e-02, 'beta_acc': -5.388e-08, 'beta_gyr': -2.660e-01, 'P_pos_std': 0.32, 'P_vel_std': 2.72, 'P_orient_std': 0.156, 'P_acc_std': 1.051e-03, 'P_gyr_std': 7.642e-03, }
 
 else:
     # Cookies
