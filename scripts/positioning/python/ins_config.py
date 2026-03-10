@@ -39,7 +39,7 @@ MODE_3D = True
 
 
 # ── GNSS outage simulation ─────────────────────────────────────────────────────
-OUTAGE_START    = 270   # [s] — time from start when GPS signal is lost
+OUTAGE_START    = 200   # [s] — time from start when GPS signal is lost
 OUTAGE_DURATION = 70    # [s] — duration of GPS blackout
 
 

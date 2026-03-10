@@ -95,19 +95,35 @@ def _plot_position_error(filter_results, p_gt, gnss_outage_info,
     time = np.arange(N) / sample_rate
     labels = ['East error [m]', 'North error [m]', 'Up error [m]']
 
+    # Pass 1: collect all error arrays
+    all_err = {e['key']: e['p'] - p_gt for e in filter_results}
+
     fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
 
-    for entry in filter_results:
-        st  = _style(entry['key'])
-        err = entry['p'] - p_gt
-        for j, ax in enumerate(axes):
-            ax.plot(time, err[:, j],
+    for j, ax in enumerate(axes):
+        # Y-limit from non-IMU filters for this component
+        non_imu_comp = np.concatenate(
+            [all_err[k][:, j] for k in all_err if k != 'imu_only'])
+        ylim_top = float(np.percentile(np.abs(non_imu_comp), 98)) * 1.1
+        ylim_top = max(ylim_top, 0.1)
+
+        for entry in filter_results:
+            st  = _style(entry['key'])
+            comp = all_err[entry['key']][:, j]
+            ax.plot(time, comp,
                     color=st['color'], ls=st['ls'], lw=1.0,
                     label=st['label'], alpha=0.85)
+            if entry['key'] == 'imu_only':
+                peak = float(np.max(np.abs(comp)))
+                if peak > ylim_top:
+                    ax.text(0.98, 0.95, f'IMU peak: ±{peak:.0f} m',
+                            transform=ax.transAxes, ha='right', va='top',
+                            fontsize=7, color=st['color'],
+                            bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.7))
 
-    for j, ax in enumerate(axes):
         _add_outage_shade(ax, gnss_outage_info, time)
         ax.axhline(0, color='k', lw=0.6)
+        ax.set_ylim(-ylim_top, ylim_top)
         ax.set_ylabel(labels[j])
         ax.grid(True, alpha=0.3)
 
@@ -127,17 +143,35 @@ def _plot_error_magnitude(filter_results, p_gt, gnss_outage_info,
     N    = len(p_gt)
     time = np.arange(N) / sample_rate
 
+    # Pass 1: compute all magnitudes
+    all_mag = {}
+    for entry in filter_results:
+        err = entry['p'] - p_gt
+        all_mag[entry['key']] = np.sqrt(err[:, 0]**2 + err[:, 1]**2)
+
+    # Y-limit from non-IMU filters
+    non_imu_mags = np.concatenate([m for k, m in all_mag.items() if k != 'imu_only'])
+    ylim_top = float(np.percentile(non_imu_mags, 98)) * 1.1
+    ylim_top = max(ylim_top, 0.1)
+
     fig, ax = plt.subplots(figsize=(12, 5))
 
     for entry in filter_results:
         st  = _style(entry['key'])
-        err = entry['p'] - p_gt
-        mag = np.sqrt(err[:, 0]**2 + err[:, 1]**2)
+        mag = all_mag[entry['key']]
         ax.plot(time, mag,
                 color=st['color'], ls=st['ls'], lw=1.2,
                 label=st['label'], alpha=0.85)
+        if entry['key'] == 'imu_only':
+            peak = float(np.max(mag))
+            if peak > ylim_top:
+                ax.text(0.98, 0.95, f'IMU peak: {peak:.0f} m',
+                        transform=ax.transAxes, ha='right', va='top',
+                        fontsize=8, color=st['color'],
+                        bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.7))
 
     _add_outage_shade(ax, gnss_outage_info, time)
+    ax.set_ylim(0, ylim_top)
     ax.set_xlabel('Time [s]')
     ax.set_ylabel('2D Position Error [m]')
     ax.set_title('Horizontal Position Error Magnitude')
@@ -160,29 +194,54 @@ def _plot_metrics_bar(filter_results, output_dir) -> str:
 
     fig, ax = plt.subplots(figsize=(13, 6))
 
-    for idx, entry in enumerate(filter_results):
+    # Pass 1: collect values for all filters
+    all_vals = {}
+    for entry in filter_results:
         mets = entry['metrics']
-        vals = [
-            mets.get('ate',          {}).get('rmse_2d', float('nan')),
-            mets.get('ate',          {}).get('rmse_3d', float('nan')),
-            mets.get('rte_1s',       {}).get('rmse_2d', float('nan')),
-            mets.get('rte_5s',       {}).get('rmse_2d', float('nan')),
-            mets.get('position_rmse',{}).get('rmse_2d', float('nan')),
+        all_vals[entry['key']] = [
+            mets.get('ate',          {}).get('rmse_2D', float('nan')),
+            mets.get('ate',          {}).get('rmse_3D', float('nan')),
+            mets.get('rte_1s',       {}).get('rmse',    float('nan')),
+            mets.get('rte_5s',       {}).get('rmse',    float('nan')),
+            mets.get('position_rmse',{}).get('2D',      float('nan')),
         ]
-        st = _style(entry['key'])
+
+    # Y-limit from non-IMU filters only
+    non_imu_finite = [v for k, vals in all_vals.items()
+                      if k != 'imu_only' for v in vals if np.isfinite(v)]
+    ylim_top = (max(non_imu_finite) * 1.3) if non_imu_finite else 50.0
+
+    # Pass 2: draw bars
+    for idx, entry in enumerate(filter_results):
+        vals = all_vals[entry['key']]
+        st   = _style(entry['key'])
+        # Clip bar heights to ylim_top for drawing
+        draw_vals = [min(v, ylim_top) if np.isfinite(v) else 0.0 for v in vals]
         bars = ax.bar(
             x + idx * bar_w - 0.4 + bar_w / 2,
-            vals, width=bar_w * 0.9,
+            draw_vals, width=bar_w * 0.9,
             color=st['color'], label=st['label'], alpha=0.85,
         )
-        # Numeric labels on bars
         for bar, val in zip(bars, vals):
-            if not np.isnan(val) and val < 200:   # skip huge IMU-only bars
-                ax.text(bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + 0.02,
+            if not np.isfinite(val):
+                continue
+            bx = bar.get_x() + bar.get_width() / 2
+            if val > ylim_top * 0.98:
+                # Annotate clipped bar with arrow + actual value
+                ax.annotate(
+                    f'{val:.0f}',
+                    xy=(bx, ylim_top),
+                    xytext=(bx, ylim_top * 0.80),
+                    ha='center', fontsize=6,
+                    color=st['color'],
+                    arrowprops=dict(arrowstyle='->', color=st['color'], lw=0.8),
+                )
+            else:
+                ax.text(bx, bar.get_height() + ylim_top * 0.01,
                         f'{val:.1f}', ha='center', va='bottom',
                         fontsize=6, rotation=90)
 
+    ax.set_ylim(0, ylim_top)
     ax.set_xticks(x)
     ax.set_xticklabels(metric_keys)
     ax.set_ylabel('Error [m]')
@@ -300,12 +359,12 @@ def _plot_metrics_table(filter_results, output_dir) -> str:
     for entry in filter_results:
         mets = entry['metrics']
         data.append([
-            mets.get('ate',          {}).get('rmse_2d', float('nan')),
-            mets.get('ate',          {}).get('rmse_3d', float('nan')),
-            mets.get('rte_1s',       {}).get('rmse_2d', float('nan')),
-            mets.get('rte_5s',       {}).get('rmse_2d', float('nan')),
-            mets.get('position_rmse',{}).get('rmse_2d', float('nan')),
-            mets.get('outage_analysis', {}).get('max_2d', float('nan')),
+            mets.get('ate',          {}).get('rmse_2D', float('nan')),
+            mets.get('ate',          {}).get('rmse_3D', float('nan')),
+            mets.get('rte_1s',       {}).get('rmse',    float('nan')),
+            mets.get('rte_5s',       {}).get('rmse',    float('nan')),
+            mets.get('position_rmse',{}).get('2D',      float('nan')),
+            mets.get('outage_analysis', {}).get('max',  float('nan')),
         ])
 
     data_arr = np.array(data, dtype=float)

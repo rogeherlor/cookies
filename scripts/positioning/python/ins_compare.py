@@ -157,8 +157,8 @@ def main():
             sample_rate=frecIMU,
         )
 
-        ate_2d = mets.get('ate', {}).get('rmse_2d', float('nan'))
-        pos_rmse_2d = mets.get('position_rmse', {}).get('rmse_2d', float('nan'))
+        ate_2d = mets.get('ate', {}).get('rmse_2D', float('nan'))
+        pos_rmse_2d = mets.get('position_rmse', {}).get('2D', float('nan'))
         logger.info(f"  ATE 2D = {ate_2d:.2f} m  |  pos RMSE 2D = {pos_rmse_2d:.2f} m")
 
         entry = {
@@ -241,10 +241,10 @@ def main():
     print("-" * 80)
     for entry in all_results:
         mets   = entry['metrics']
-        ate2d  = mets.get('ate', {}).get('rmse_2d',          float('nan'))
-        ate3d  = mets.get('ate', {}).get('rmse_3d',          float('nan'))
-        prmse  = mets.get('position_rmse', {}).get('rmse_2d', float('nan'))
-        outagm = mets.get('outage_analysis', {}).get('max_2d', float('nan'))
+        ate2d  = mets.get('ate', {}).get('rmse_2D',          float('nan'))
+        ate3d  = mets.get('ate', {}).get('rmse_3D',          float('nan'))
+        prmse  = mets.get('position_rmse', {}).get('2D', float('nan'))
+        outagm = mets.get('outage_analysis', {}).get('max', float('nan'))
         print(f"{entry['name']:<20} {ate2d:>12.2f} {ate3d:>12.2f} {prmse:>13.2f} {outagm:>16.2f}")
     print("=" * 80)
     print("NOTE: Tune parameters with ins_genetic.py before drawing conclusions.\n")

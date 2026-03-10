@@ -1,0 +1,35 @@
+{
+  "ekf_params": {
+    "Qpos": 0.1439216630334788,
+    "Qvel": 17.50344402800328,
+    "QorientXY": 0.004096216681824645,
+    "QorientZ": 0.029529595066373412,
+    "Qacc": 0.03575335667347159,
+    "QgyrXY": 0.0010705282144301735,
+    "QgyrZ": 0.014144313286588734,
+    "Rpos": 11.599204616357243,
+    "Rvel": 2.0295198706981186,
+    "beta_acc": -5.829165890586277e-08,
+    "beta_gyr": -0.8205007378225846,
+    "P_pos_std": 6.640016443139231,
+    "P_vel_std": 0.29215088683527374,
+    "P_orient_std": 0.04564060110616206,
+    "P_acc_std": 0.0023281353267339787,
+    "P_gyr_std": 0.0031886016635224628
+  },
+  "metadata": {
+    "cost": 1000000.0,
+    "dataset": "10_03_0027",
+    "outage_config": {
+      "start": 200,
+      "duration": 70
+    },
+    "use_3d_rotation": true,
+    "optimization": {
+      "method": "differential_evolution",
+      "evaluations": 480,
+      "iterations": 1,
+      "success": true
+    }
+  }
+}
