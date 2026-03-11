@@ -35,7 +35,7 @@ FILTER = "eskf_enhanced"
 # ── Rotation mode ──────────────────────────────────────────────────────────────
 # True  → full 3D (roll, pitch, yaw), recommended for vehicles with pitch changes
 # False → 2D (yaw only, flat-earth assumption), simpler and faster
-MODE_3D = True
+MODE_3D = False
 
 
 # ── GNSS outage simulation ─────────────────────────────────────────────────────
@@ -60,4 +60,5 @@ NAV_DATA = data_loader.get_kitti_dataset('10_03_0027')
 #     'beta_gyr': -2.660e-01, 'P_pos_std': 0.32, 'P_vel_std': 2.72,
 #     'P_orient_std': 0.156, 'P_acc_std': 1.051e-03, 'P_gyr_std': 7.642e-03,
 # }
-FILTER_PARAMS = fp.get(FILTER, MODE_3D, NAV_DATA.dataset_name)
+# FILTER_PARAMS = fp.get(FILTER, MODE_3D, NAV_DATA.dataset_name)
+FILTER_PARAMS = fp.get(FILTER, MODE_3D, '__cv_kitti__')

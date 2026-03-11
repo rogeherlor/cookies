@@ -55,7 +55,7 @@ def _load_tuned_params(nav_data, mode_3d):
     result = {}
     for key in ['ekf_vanilla', 'ekf_enhanced', 'eskf_vanilla', 'eskf_enhanced',
                 'iekf_vanilla', 'iekf_enhanced']:
-        p = fp.get(key, mode_3d, nav_data.dataset_name)
+        p = fp.get(key, mode_3d, '__cv_kitti__') # edited: nav_data.dataset_name
         if p is not None:
             result[key] = p
     return result
@@ -227,6 +227,7 @@ def main():
         gnss_outage_info=gnss_outage_info,
         sample_rate=frecIMU,
         output_dir=str(compare_dir),
+        lla0=nav_data.lla0,
     )
 
     logger.info(f"Generated {len(generated)} comparison plots in: {compare_dir}")
