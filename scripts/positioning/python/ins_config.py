@@ -40,12 +40,20 @@ MODE_3D = False
 
 # ── GNSS outage simulation ─────────────────────────────────────────────────────
 OUTAGE_START    = 200   # [s] — time from start when GPS signal is lost
-OUTAGE_DURATION = 70    # [s] — duration of GPS blackout
+OUTAGE_DURATION = 200    # [s] — duration of GPS blackout
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
 # Only KITTI is used.  Change the sequence ID as needed.
 NAV_DATA = data_loader.get_kitti_dataset('10_03_0027')
+
+
+# ── Ground truth source ────────────────────────────────────────────────────────
+# True  → use the RTS smoother (best achievable from IMU+GPS, full-data pass)
+#          as ground truth for metrics and plots.
+# False → use the raw KITTI GPS reference as ground truth; RTS is shown as an
+#          additional purple overlay in trajectory/error plots.
+USE_RTS_AS_GT = True
 
 
 # ── Filter parameters ──────────────────────────────────────────────────────────

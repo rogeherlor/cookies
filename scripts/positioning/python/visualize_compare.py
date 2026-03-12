@@ -42,6 +42,7 @@ _FILTER_STYLE = {
     'iekf_vanilla':  {'color': '#2ca02c', 'ls': '--',  'marker': 'v', 'label': 'IEKF'},
     'iekf_enhanced': {'color': '#145214', 'ls': '-',   'marker': 'P', 'label': 'IEKF Enhanced'},
     'imu_only':      {'color': '#d62728', 'ls': ':',   'marker': 'x', 'label': 'IMU Only'},
+    'rts_smoother':  {'color': '#9467bd', 'ls': '-',   'marker': '*', 'label': 'Ground Truth (RTS)'},
 }
 
 
@@ -66,7 +67,8 @@ def _save(fig, path: str, dpi: int = 150) -> str:
 
 # ── 1. 2D Trajectory overlay ──────────────────────────────────────────────────
 
-def _plot_trajectory_2d(filter_results, p_gt, gnss_outage_info, output_dir, lla0=None) -> str:
+def _plot_trajectory_2d(filter_results, p_gt, gnss_outage_info, output_dir,
+                        lla0=None, p_rts=None, gt_label='Ground Truth') -> str:
     A = gnss_outage_info['start_idx']
     B = gnss_outage_info['end_idx']
     use_map = lla0 is not None and HAS_MAP_SUPPORT
@@ -77,10 +79,19 @@ def _plot_trajectory_2d(filter_results, p_gt, gnss_outage_info, output_dir, lla0
         lat_gt, lon_gt, _ = pm.enu2geodetic(p_gt[:, 0], p_gt[:, 1], p_gt[:, 2],
                                              lla0[0], lla0[1], lla0[2])
         x_gt, y_gt = _latlon_to_mercator(lat_gt, lon_gt)
-        # Lock view to ground truth extent BEFORE plotting or fetching tiles
-        pad = 50
-        ax.set_xlim(x_gt.min() - pad, x_gt.max() + pad)
-        ax.set_ylim(y_gt.min() - pad, y_gt.max() + pad)
+        # Per-axis limits: GT + all non-IMU filters, capped at 1× GT span beyond GT boundary
+        xs_fil, ys_fil = [], []
+        for entry in filter_results:
+            if entry['key'] == 'imu_only':
+                continue
+            lat_e, lon_e, _ = pm.enu2geodetic(entry['p'][:, 0], entry['p'][:, 1],
+                                               entry['p'][:, 2], lla0[0], lla0[1], lla0[2])
+            xe, ye = _latlon_to_mercator(lat_e, lon_e)
+            xs_fil.append(xe); ys_fil.append(ye)
+        x_fil = np.concatenate(xs_fil) if xs_fil else x_gt
+        y_fil = np.concatenate(ys_fil) if ys_fil else y_gt
+        ax.set_xlim(*_axis_limits(x_gt, x_fil))
+        ax.set_ylim(*_axis_limits(y_gt, y_fil))
         try:
             ctx.add_basemap(ax, crs='EPSG:3857', source=ctx.providers.OpenStreetMap.Mapnik,
                             zoom='auto', alpha=1.0)
@@ -96,9 +107,19 @@ def _plot_trajectory_2d(filter_results, p_gt, gnss_outage_info, output_dir, lla0
             x_e, y_e = _latlon_to_mercator(lat_e, lon_e)
             ax.plot(x_e, y_e, color=st['color'], ls=st['ls'], lw=2.0,
                     label=st['label'], alpha=1.0, zorder=5)
+        if p_rts is not None:
+            lat_r, lon_r, _ = pm.enu2geodetic(p_rts[:, 0], p_rts[:, 1], p_rts[:, 2],
+                                               lla0[0], lla0[1], lla0[2])
+            x_r, y_r = _latlon_to_mercator(lat_r, lon_r)
+            ax.plot(x_r, y_r, color='#9467bd', lw=2.5, ls='-',
+                    label='Ground Truth (RTS)', zorder=8)
+            if A > 0 and B > A:
+                ax.plot(x_r[A:B+1], y_r[A:B+1], color='#9467bd', lw=5.0,
+                        ls='-', zorder=9)   # highlight outage segment, no extra legend entry
         ax.plot(x_gt, y_gt, color='white', lw=3.5, zorder=9)   # white halo for readability
-        ax.plot(x_gt, y_gt, 'k--', lw=1.5, label='Ground Truth', zorder=10)
+        ax.plot(x_gt, y_gt, 'k--', lw=1.5, label=gt_label, zorder=10)
         if A > 0 and B > A:
+            ax.plot(x_gt[A:B+1], y_gt[A:B+1], 'k-', lw=3.5, zorder=11)  # highlight outage
             ax.plot(x_gt[A], y_gt[A], 'gv', ms=10, zorder=12, label='Outage start')
             ax.plot(x_gt[B], y_gt[B], 'r^', ms=10, zorder=12, label='Outage end')
         ax.set_aspect('equal')
@@ -107,21 +128,33 @@ def _plot_trajectory_2d(filter_results, p_gt, gnss_outage_info, output_dir, lla0
         ax.set_ylabel('Northing (Web Mercator)')
         ax.set_title('2D Trajectory Comparison (Map View)')
     else:
+        non_imu = [e for e in filter_results if e['key'] != 'imu_only']
         for entry in filter_results:
             st = _style(entry['key'])
             p  = entry['p']
             ax.plot(p[:, 0], p[:, 1], color=st['color'], ls=st['ls'], lw=2.0,
                     label=st['label'], alpha=1.0, zorder=5)
-        ax.plot(p_gt[:, 0], p_gt[:, 1], 'k--', lw=1.5, label='Ground Truth', zorder=10)
+        if p_rts is not None:
+            ax.plot(p_rts[:, 0], p_rts[:, 1], color='#9467bd', lw=2.5, ls='-',
+                    label='Ground Truth (RTS)', zorder=8)
+            if A > 0 and B > A:
+                ax.plot(p_rts[A:B+1, 0], p_rts[A:B+1, 1], color='#9467bd', lw=5.0,
+                        ls='-', zorder=9)   # highlight outage segment, no extra legend entry
+        ax.plot(p_gt[:, 0], p_gt[:, 1], 'k--', lw=1.5, label=gt_label, zorder=10)
         if A > 0 and B > A:
+            ax.plot(p_gt[A:B+1, 0], p_gt[A:B+1, 1], 'k-', lw=3.5, zorder=11)  # highlight
             ax.plot(p_gt[A, 0], p_gt[A, 1], 'gv', ms=10, zorder=12, label='Outage start')
             ax.plot(p_gt[B, 0], p_gt[B, 1], 'r^', ms=10, zorder=12, label='Outage end')
+        # Per-axis limits: GT + non-IMU filters, capped at 1× GT span beyond GT boundary
+        x_fil = np.concatenate([e['p'][:, 0] for e in non_imu]) if non_imu else p_gt[:, 0]
+        y_fil = np.concatenate([e['p'][:, 1] for e in non_imu]) if non_imu else p_gt[:, 1]
+        ax.set_xlim(*_axis_limits(p_gt[:, 0], x_fil))
+        ax.set_ylim(*_axis_limits(p_gt[:, 1], y_fil))
         ax.set_xlabel('East [m]')
         ax.set_ylabel('North [m]')
         ax.set_title('2D Trajectory Comparison')
-        ax.set_aspect('equal')
 
-    ax.legend(loc='best', fontsize=8)
+    ax.legend(loc='lower left', fontsize=8)
     ax.grid(True, alpha=0.3)
 
     path = os.path.join(output_dir, 'compare_trajectory_2d.png')
@@ -180,7 +213,7 @@ def _plot_position_error(filter_results, p_gt, gnss_outage_info,
 # ── 3. 2D horizontal error magnitude ─────────────────────────────────────────
 
 def _plot_error_magnitude(filter_results, p_gt, gnss_outage_info,
-                          sample_rate, output_dir) -> str:
+                          sample_rate, output_dir, p_rts=None) -> str:
     N    = len(p_gt)
     time = np.arange(N) / sample_rate
 
@@ -210,6 +243,12 @@ def _plot_error_magnitude(filter_results, p_gt, gnss_outage_info,
                         transform=ax.transAxes, ha='right', va='top',
                         fontsize=8, color=st['color'],
                         bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.7))
+
+    if p_rts is not None:
+        err_rts = p_rts - p_gt
+        mag_rts = np.sqrt(err_rts[:, 0]**2 + err_rts[:, 1]**2)
+        ax.plot(time, mag_rts, color='#9467bd', ls='-', lw=2.0,
+                label='Ground Truth (RTS)', alpha=0.9, zorder=10)
 
     _add_outage_shade(ax, gnss_outage_info, time)
     ax.set_ylim(0, ylim_top)
@@ -297,12 +336,46 @@ def _plot_metrics_bar(filter_results, output_dir) -> str:
 
 # ── 5. Outage period zoom ─────────────────────────────────────────────────────
 
-def _plot_outage_zoom(filter_results, p_gt, gnss_outage_info, output_dir, lla0=None) -> str:
+def _top_filters_outage(filter_results, p_gt, A, B, n=3):
+    """Return the top-n filter entries ranked by mean 2D error during [A:B]."""
+    ranked = []
+    for entry in filter_results:
+        if entry['key'] == 'imu_only':
+            continue
+        err = entry['p'][A:B, :2] - p_gt[A:B, :2]
+        ranked.append((float(np.sqrt((err**2).sum(axis=1)).mean()), entry))
+    ranked.sort(key=lambda x: x[0])
+    return [e for _, e in ranked[:n]]
+
+
+def _axis_limits(gt_vals, fil_vals, n=1.5):
+    """Return (lim_min, lim_max) for one axis.
+
+    Centre on GT midpoint.  Measure the GT half-extent in each direction
+    (positive / negative from centre).  Cap the filter extent in each
+    direction at n × that GT half-extent.  A 3 % pad is added after capping.
+    """
+    cx = (float(gt_vals.min()) + float(gt_vals.max())) / 2
+    gt_pos = float(gt_vals.max()) - cx          # GT half-extent toward +
+    gt_neg = cx - float(gt_vals.min())          # GT half-extent toward -
+    pad = max(gt_pos + gt_neg, 1.0) * 0.03
+    fil_pos = max(float(fil_vals.max()) - cx, 0.0)
+    fil_neg = max(cx - float(fil_vals.min()), 0.0)
+    lim_max = cx + min(fil_pos, n * gt_pos) + pad
+    lim_min = cx - min(fil_neg, n * gt_neg) - pad
+    return lim_min, lim_max
+
+
+def _plot_outage_zoom(filter_results, p_gt, gnss_outage_info, output_dir,
+                      lla0=None, p_rts=None, gt_label='Ground Truth') -> str:
     A = gnss_outage_info['start_idx']
     B = gnss_outage_info['end_idx']
 
     if A >= B:
         return None   # no outage configured
+
+    top3 = _top_filters_outage(filter_results, p_gt, A, B, n=3)
+    best_label = _style(top3[0]['key'])['label'] if top3 else ''
 
     use_map = lla0 is not None and HAS_MAP_SUPPORT
     fig, ax = plt.subplots(figsize=(9, 7))
@@ -311,10 +384,17 @@ def _plot_outage_zoom(filter_results, p_gt, gnss_outage_info, output_dir, lla0=N
         lat_gt, lon_gt, _ = pm.enu2geodetic(p_gt[A:B, 0], p_gt[A:B, 1], p_gt[A:B, 2],
                                              lla0[0], lla0[1], lla0[2])
         x_gt, y_gt = _latlon_to_mercator(lat_gt, lon_gt)
-        # Lock view to ground truth outage extent BEFORE fetching tiles
-        pad = 50
-        ax.set_xlim(x_gt.min() - pad, x_gt.max() + pad)
-        ax.set_ylim(y_gt.min() - pad, y_gt.max() + pad)
+        # Build bounding box from GT + all top-3 filters
+        xs_fil, ys_fil = [], []
+        for e in top3:
+            lat_e, lon_e, _ = pm.enu2geodetic(e['p'][A:B, 0], e['p'][A:B, 1], e['p'][A:B, 2],
+                                               lla0[0], lla0[1], lla0[2])
+            xe, ye = _latlon_to_mercator(lat_e, lon_e)
+            xs_fil.append(xe); ys_fil.append(ye)
+        x_fil = np.concatenate(xs_fil) if xs_fil else x_gt
+        y_fil = np.concatenate(ys_fil) if ys_fil else y_gt
+        ax.set_xlim(*_axis_limits(x_gt, x_fil))
+        ax.set_ylim(*_axis_limits(y_gt, y_fil))
         try:
             ctx.add_basemap(ax, crs='EPSG:3857', source=ctx.providers.OpenStreetMap.Mapnik,
                             zoom='auto', alpha=1.0)
@@ -330,15 +410,22 @@ def _plot_outage_zoom(filter_results, p_gt, gnss_outage_info, output_dir, lla0=N
             x_e, y_e = _latlon_to_mercator(lat_e, lon_e)
             ax.plot(x_e, y_e, color=st['color'], ls=st['ls'], lw=2.0,
                     label=st['label'], alpha=1.0, zorder=5)
-        ax.plot(x_gt, y_gt, color='white', lw=4.0, zorder=9)
-        ax.plot(x_gt, y_gt, 'k--', lw=1.5, label='Ground Truth', zorder=10)
-        ax.plot(x_gt[0],  y_gt[0],  'gv', ms=10, zorder=12, label='Outage start')
-        ax.plot(x_gt[-1], y_gt[-1], 'r^', ms=10, zorder=12, label='Outage end')
+        if p_rts is not None:
+            lat_r, lon_r, _ = pm.enu2geodetic(p_rts[A:B, 0], p_rts[A:B, 1], p_rts[A:B, 2],
+                                               lla0[0], lla0[1], lla0[2])
+            x_r, y_r = _latlon_to_mercator(lat_r, lon_r)
+            ax.plot(x_r, y_r, color='#9467bd', lw=3.5, ls='-',
+                    label='Ground Truth (RTS)', zorder=11)
+        ax.plot(x_gt, y_gt, color='white', lw=5.0, zorder=9)
+        ax.plot(x_gt, y_gt, 'k-', lw=3.0, label=gt_label, zorder=10)
+        ax.plot(x_gt[0],  y_gt[0],  'gv', ms=12, zorder=12, label='Outage start')
+        ax.plot(x_gt[-1], y_gt[-1], 'r^', ms=12, zorder=12, label='Outage end')
         ax.set_aspect('equal')
         _apply_mercator_tick_labels(ax)
         ax.set_xlabel('Easting (Web Mercator)')
         ax.set_ylabel('Northing (Web Mercator)')
-        ax.set_title(f'GNSS Outage Period: {gnss_outage_info["start"]}s – {gnss_outage_info["end"]}s  (Map View)')
+        ax.set_title(f'GNSS Outage Period: {gnss_outage_info["start"]}s – {gnss_outage_info["end"]}s'
+                     f'  |  zoom: {best_label}  (Map View)')
     else:
         for entry in filter_results:
             if entry['key'] == 'imu_only':
@@ -347,14 +434,22 @@ def _plot_outage_zoom(filter_results, p_gt, gnss_outage_info, output_dir, lla0=N
             p  = entry['p']
             ax.plot(p[A:B, 0], p[A:B, 1], color=st['color'], ls=st['ls'], lw=2.0,
                     label=st['label'], alpha=1.0, zorder=5)
-        ax.plot(p_gt[A:B, 0], p_gt[A:B, 1], 'k--', lw=1.5,
-                label='Ground Truth', zorder=10)
-        ax.plot(p_gt[A, 0],   p_gt[A, 1],   'gv', ms=10, zorder=12, label='Outage start')
-        ax.plot(p_gt[B-1, 0], p_gt[B-1, 1], 'r^', ms=10, zorder=12, label='Outage end')
+        if p_rts is not None:
+            ax.plot(p_rts[A:B, 0], p_rts[A:B, 1], color='#9467bd', lw=3.5, ls='-',
+                    label='Ground Truth (RTS)', zorder=11)
+        ax.plot(p_gt[A:B, 0], p_gt[A:B, 1], 'k-', lw=3.0,
+                label=gt_label, zorder=10)
+        ax.plot(p_gt[A, 0],   p_gt[A, 1],   'gv', ms=12, zorder=12, label='Outage start')
+        ax.plot(p_gt[B-1, 0], p_gt[B-1, 1], 'r^', ms=12, zorder=12, label='Outage end')
+        # Per-axis limits: GT outage + top-3 filters, capped at 1× GT span beyond GT boundary
+        x_fil = np.concatenate([e['p'][A:B, 0] for e in top3]) if top3 else p_gt[A:B, 0]
+        y_fil = np.concatenate([e['p'][A:B, 1] for e in top3]) if top3 else p_gt[A:B, 1]
+        ax.set_xlim(*_axis_limits(p_gt[A:B, 0], x_fil))
+        ax.set_ylim(*_axis_limits(p_gt[A:B, 1], y_fil))
         ax.set_xlabel('East [m]')
         ax.set_ylabel('North [m]')
-        ax.set_title(f'GNSS Outage Period: {gnss_outage_info["start"]}s – {gnss_outage_info["end"]}s')
-        ax.set_aspect('equal')
+        ax.set_title(f'GNSS Outage Period: {gnss_outage_info["start"]}s – {gnss_outage_info["end"]}s'
+                     f'  |  zoom: {best_label}')
 
     ax.legend(loc='best', fontsize=8)
     ax.grid(True, alpha=0.3)
@@ -492,6 +587,8 @@ def generate_comparison_plots(
     sample_rate: float,
     output_dir: str,
     lla0=None,
+    p_rts=None,
+    gt_label: str = 'Ground Truth',
 ) -> list:
     """
     Generate all comparison plots and save them to output_dir.
@@ -504,6 +601,10 @@ def generate_comparison_plots(
         sample_rate    : IMU sample rate [Hz]
         output_dir     : directory where PNGs are saved
         lla0           : optional [lat, lon, alt] origin; enables map background
+        p_rts          : optional Nx3 RTS smoother position [m]; drawn as a
+                         purple overlay when p_gt is the KITTI reference
+        gt_label       : legend label for the p_gt line (e.g. 'Ground Truth (RTS)'
+                         or 'KITTI GPS GT')
 
     Returns:
         List of file paths of generated plots.
@@ -513,15 +614,17 @@ def generate_comparison_plots(
 
     plots = [
         ('trajectory_2d',    lambda: _plot_trajectory_2d(
-            filter_results, p_gt, gnss_outage_info, output_dir, lla0=lla0)),
+            filter_results, p_gt, gnss_outage_info, output_dir,
+            lla0=lla0, p_rts=p_rts, gt_label=gt_label)),
         ('position_error',   lambda: _plot_position_error(
             filter_results, p_gt, gnss_outage_info, sample_rate, output_dir)),
         ('error_magnitude',  lambda: _plot_error_magnitude(
-            filter_results, p_gt, gnss_outage_info, sample_rate, output_dir)),
+            filter_results, p_gt, gnss_outage_info, sample_rate, output_dir, p_rts=p_rts)),
         ('metrics_bar',      lambda: _plot_metrics_bar(
             filter_results, output_dir)),
         ('outage_zoom',      lambda: _plot_outage_zoom(
-            filter_results, p_gt, gnss_outage_info, output_dir, lla0=lla0)),
+            filter_results, p_gt, gnss_outage_info, output_dir,
+            lla0=lla0, p_rts=p_rts, gt_label=gt_label)),
         ('uncertainty',      lambda: _plot_uncertainty(
             filter_results, p_gt, gnss_outage_info, sample_rate, output_dir)),
         ('metrics_table',    lambda: _plot_metrics_table(

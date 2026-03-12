@@ -44,6 +44,7 @@ from filters import (
     eskf_vanilla, eskf_enhanced,
     iekf_vanilla, iekf_enhanced,
     imu_only,
+    rts_smoother,
 )
 
 # ── Tuned parameters ───────────────────────────────────────────────────────────
@@ -55,7 +56,7 @@ def _load_tuned_params(nav_data, mode_3d):
     result = {}
     for key in ['ekf_vanilla', 'ekf_enhanced', 'eskf_vanilla', 'eskf_enhanced',
                 'iekf_vanilla', 'iekf_enhanced']:
-        p = fp.get(key, mode_3d, '__cv_kitti__') # edited: nav_data.dataset_name
+        p = fp.get(key, mode_3d, '__cv_kitti__') # TODO: go back to edited: nav_data.dataset_name
         if p is not None:
             result[key] = p
     return result
@@ -75,9 +76,10 @@ FILTER_CONFIGS = [
 
 def main():
     # ── Shared configuration ───────────────────────────────────────────────────
-    nav_data     = ins_config.NAV_DATA
-    use_3d       = ins_config.MODE_3D
-    TUNED_PARAMS = _load_tuned_params(nav_data, use_3d)
+    nav_data      = ins_config.NAV_DATA
+    use_3d        = ins_config.MODE_3D
+    use_rts_as_gt = ins_config.USE_RTS_AS_GT
+    TUNED_PARAMS  = _load_tuned_params(nav_data, use_3d)
     t1       = ins_config.OUTAGE_START
     d        = ins_config.OUTAGE_DURATION
 
@@ -85,8 +87,8 @@ def main():
     lla0     = nav_data.lla0
     frecIMU  = nav_data.sample_rate
 
-    f     = pm.geodetic2enu(lla[:,0], lla[:,1], lla[:,2], lla0[0], lla0[1], lla0[2])
-    p_gt  = np.column_stack([f[0], f[1], f[2]])
+    f        = pm.geodetic2enu(lla[:,0], lla[:,1], lla[:,2], lla0[0], lla0[1], lla0[2])
+    p_kitti  = np.column_stack([f[0], f[1], f[2]])
 
     outage_config = {'start': t1, 'duration': d}
     gnss_outage_info = {
@@ -127,6 +129,32 @@ def main():
     logger.info("NOTE: Results use default parameters unless TUNED_PARAMS is set.")
     logger.info("      Run ins_genetic.py for each filter before comparing.")
     logger.info("=" * 65)
+
+    # ── RTS Smoother (best-achievable reference, always full GPS) ──────────────
+    logger.info("Running RTS smoother (best-achievable reference, no outage)…")
+    rts_params = TUNED_PARAMS.get('ekf_enhanced', None)
+    rts_result = rts_smoother.run(
+        nav_data=nav_data,
+        params=rts_params,
+        use_3d_rotation=use_3d,
+    )
+    p_rts = rts_result['p']
+    logger.info("  RTS smoother done.")
+
+    # ── Select ground truth source ─────────────────────────────────────────────
+    # p_gt        : array used for metric evaluation and as the GT line in plots
+    # p_rts_vis   : optional second reference overlaid in plots (purple); None
+    #               when RTS is already the primary GT
+    if use_rts_as_gt:
+        p_gt       = p_rts
+        p_rts_vis  = None
+        gt_label   = 'Ground Truth (RTS)'
+        logger.info("Ground truth: RTS smoother")
+    else:
+        p_gt       = p_kitti
+        p_rts_vis  = p_rts
+        gt_label   = 'KITTI GPS GT'
+        logger.info("Ground truth: KITTI GPS")
 
     # ── Run all filters ────────────────────────────────────────────────────────
     all_results = []
@@ -224,6 +252,8 @@ def main():
     generated = visualize_compare.generate_comparison_plots(
         filter_results=all_results,
         p_gt=p_gt,
+        p_rts=p_rts_vis,
+        gt_label=gt_label,
         gnss_outage_info=gnss_outage_info,
         sample_rate=frecIMU,
         output_dir=str(compare_dir),
