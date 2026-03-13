@@ -2,7 +2,7 @@
 """
 ins_compare.py — Run all filter variants and generate comparison plots.
 
-Runs all 7 cases with the same dataset and GNSS outage window:
+Runs all 8 cases with the same dataset and GNSS outage window:
     1. EKF Vanilla    (Groves 2013, GPS only)
     2. EKF Enhanced   (EKF + NHC + ZUPT)
     3. ESKF Vanilla   (Solà 2017, GPS only)
@@ -10,6 +10,7 @@ Runs all 7 cases with the same dataset and GNSS outage window:
     5. IEKF Vanilla   (Barrau & Bonnabel 2017, GPS only)
     6. IEKF Enhanced  (IEKF + NHC + ZUPT)
     7. IMU Only       (pure dead reckoning — baseline)
+    8. IEKF AI-IMU    (Brossard et al. 2020, IMU dead-reckoning + CNN covariance adapter)
 
 Per-filter outputs are saved to outputs/<filter_name>/<dataset>_outage_*/
 Comparison plots are saved to outputs/comparison/<dataset>_outage_*/
@@ -46,6 +47,7 @@ from filters import (
     imu_only,
     rts_smoother,
 )
+from dl_filters.deep_iekf import iekf_ai_imu
 
 # ── Tuned parameters ───────────────────────────────────────────────────────────
 # Auto-loaded from filter_params.json (written by ins_genetic.py / ins_genetic_fast.py).
@@ -71,6 +73,9 @@ FILTER_CONFIGS = [
     {'name': 'IEKF Vanilla',   'key': 'iekf_vanilla',  'module': iekf_vanilla},
     {'name': 'IEKF Enhanced',  'key': 'iekf_enhanced', 'module': iekf_enhanced},
     {'name': 'IMU Only',       'key': 'imu_only',      'module': imu_only},
+    # Deep learning filter — GPS-free IMU dead-reckoning (Brossard et al. 2020)
+    # outage_config is ignored; no tunable genetic parameters.
+    {'name': 'IEKF AI-IMU',   'key': 'iekf_ai_imu',  'module': iekf_ai_imu},
 ]
 
 
@@ -189,15 +194,24 @@ def main():
         pos_rmse_2d = mets.get('position_rmse', {}).get('2D', float('nan'))
         logger.info(f"  ATE 2D = {ate_2d:.2f} m  |  pos RMSE 2D = {pos_rmse_2d:.2f} m")
 
+        # KITTI t_rel / r_rel — always vs raw KITTI GPS, full sequence (no outage)
+        kitti_mets = metrics.compute_kitti_metrics(
+            p_est=p, r_est=r,
+            p_gt=p_kitti, r_gt=nav_data.orient,
+        )
+        logger.info(f"  t_rel = {kitti_mets['t_rel']:.2f} %  |  r_rel = {kitti_mets['r_rel']:.2f} deg/km"
+                    f"  (n_seg={kitti_mets['n_segments']})")
+
         entry = {
-            'name':    fname,
-            'key':     fkey,
-            'p':       p,
-            'v':       v,
-            'r':       r,
-            'std_pos': result['std_pos'],
-            'metrics': mets,
-            'result':  result,
+            'name':        fname,
+            'key':         fkey,
+            'p':           p,
+            'v':           v,
+            'r':           r,
+            'std_pos':     result['std_pos'],
+            'metrics':     mets,
+            'kitti_mets':  kitti_mets,
+            'result':      result,
         }
         all_results.append(entry)
 
@@ -226,6 +240,7 @@ def main():
             'ate':  {k: val for k, val in mets['ate'].items()  if k != 'errors'},
             'rte_1s': {k: val for k, val in mets['rte_1s'].items() if k != 'errors'},
             'outage_analysis': mets['outage_analysis'],
+            'kitti_metrics': kitti_mets,
         }
         with open(ind_dir / f'{run_id}_results.json', 'w') as fh:
             json.dump(mets_serial, fh, indent=2)
@@ -264,21 +279,27 @@ def main():
     logger.info(f"Log: {log_file}")
 
     # ── Summary table to console ───────────────────────────────────────────────
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 100)
     print(f"COMPARISON SUMMARY — {nav_data.dataset_name}  |  "
           f"Outage {t1}s+{d}s  |  {'3D' if use_3d else '2D'}")
-    print("=" * 80)
-    print(f"{'Filter':<20} {'ATE 2D [m]':>12} {'ATE 3D [m]':>12} {'Pos RMSE 2D':>13} {'Outage max [m]':>16}")
-    print("-" * 80)
+    print("=" * 100)
+    print(f"{'Filter':<20} {'ATE 2D [m]':>12} {'ATE 3D [m]':>12} {'Pos RMSE 2D':>13} "
+          f"{'Outage max [m]':>16} {'t_rel [%]':>11} {'r_rel [°/km]':>13}")
+    print("-" * 100)
     for entry in all_results:
         mets   = entry['metrics']
-        ate2d  = mets.get('ate', {}).get('rmse_2D',          float('nan'))
-        ate3d  = mets.get('ate', {}).get('rmse_3D',          float('nan'))
+        km     = entry['kitti_mets']
+        ate2d  = mets.get('ate', {}).get('rmse_2D',      float('nan'))
+        ate3d  = mets.get('ate', {}).get('rmse_3D',      float('nan'))
         prmse  = mets.get('position_rmse', {}).get('2D', float('nan'))
         outagm = mets.get('outage_analysis', {}).get('max', float('nan'))
-        print(f"{entry['name']:<20} {ate2d:>12.2f} {ate3d:>12.2f} {prmse:>13.2f} {outagm:>16.2f}")
-    print("=" * 80)
-    print("NOTE: Tune parameters with ins_genetic.py before drawing conclusions.\n")
+        trel   = km.get('t_rel', float('nan'))
+        rrel   = km.get('r_rel', float('nan'))
+        print(f"{entry['name']:<20} {ate2d:>12.2f} {ate3d:>12.2f} {prmse:>13.2f} "
+              f"{outagm:>16.2f} {trel:>11.2f} {rrel:>13.2f}")
+    print("=" * 100)
+    print("NOTE: Tune parameters with ins_genetic.py before drawing conclusions.\n"
+          "      t_rel / r_rel are KITTI odometry metrics (full sequence, vs raw GPS).\n")
 
 
 if __name__ == '__main__':

@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//mnt/c/Github/**)",
-      "Bash(find c:/Github/cookies/scripts/positioning/python -type f -name *.py)"
-    ]
-  }
-}

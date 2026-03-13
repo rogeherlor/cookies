@@ -320,8 +320,118 @@ def log_evaluation_results(logger, results, log_file):
     logger.info(f'Log saved to: {log_file}')
 
 
-def evaluate_navigation_performance(p_est, v_est, r_est, p_gt, v_gt, r_gt, 
-                                    dataset_name, gnss_outage_info, 
+def compute_kitti_metrics(p_est, r_est, p_gt, r_gt, lengths=None):
+    """
+    Compute KITTI odometry benchmark metrics t_rel and r_rel.
+
+    Matches the evaluation protocol in Brossard et al. (IEEE TIV 2020) and the
+    official KITTI odometry benchmark (Geiger et al. 2013).
+
+    Metrics are computed over all possible sub-sequences whose traveled distance
+    (along the GT trajectory) equals each entry in `lengths`:
+
+      t_rel  — averaged relative translational error, in **percent** of traveled distance.
+      r_rel  — averaged relative rotational error, in **degrees per kilometer**.
+
+    Args:
+        p_est   : Estimated positions  (N×3) in ENU [m]
+        r_est   : Estimated orientations (N×3) as [roll, pitch, yaw] [rad]
+        p_gt    : Ground-truth positions (N×3) in ENU [m]
+        r_gt    : Ground-truth orientations (N×3) as [roll, pitch, yaw] [rad]
+        lengths : Subsequence lengths in meters (default: 100, 200, …, 800 m)
+
+    Returns:
+        dict with keys:
+          't_rel'           — scalar [%]
+          'r_rel'           — scalar [deg/km]
+          't_rel_by_length' — {L: mean_t_rel} per length
+          'r_rel_by_length' — {L: mean_r_rel} per length
+          'n_segments'      — total number of evaluated (i, L) pairs
+    """
+    if lengths is None:
+        lengths = [100, 200, 300, 400, 500, 600, 700, 800]
+
+    N = len(p_gt)
+
+    # Build rotation matrices from ZYX Euler angles
+    def _euler_to_rot(rpy):
+        """[roll, pitch, yaw] → 3×3 rotation matrix (body → nav)."""
+        cr, sr = np.cos(rpy[0]), np.sin(rpy[0])
+        cp, sp = np.cos(rpy[1]), np.sin(rpy[1])
+        cy, sy = np.cos(rpy[2]), np.sin(rpy[2])
+        return np.array([
+            [cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
+            [sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
+            [-sp,    cp*sr,             cp*cr            ],
+        ])
+
+    # Pre-build all rotation matrices (avoids repeated trig inside inner loop)
+    Rot_gt  = np.array([_euler_to_rot(r_gt[i])  for i in range(N)])
+    Rot_est = np.array([_euler_to_rot(r_est[i]) for i in range(N)])
+
+    # Cumulative distance along GT trajectory
+    step_dist = np.linalg.norm(np.diff(p_gt, axis=0), axis=1)  # (N-1,)
+    cum_dist  = np.concatenate([[0.0], np.cumsum(step_dist)])   # (N,)
+    total_dist = cum_dist[-1]
+
+    t_errors_all = []
+    r_errors_all = []
+    t_by_length  = {L: [] for L in lengths}
+    r_by_length  = {L: [] for L in lengths}
+
+    for i in range(N):
+        for L in lengths:
+            target = cum_dist[i] + L
+            if target > total_dist:
+                continue
+            # First j with cum_dist[j] >= cum_dist[i] + L
+            j = int(np.searchsorted(cum_dist, target))
+            if j >= N:
+                continue
+
+            # Translational error — norm is rotation-invariant, so no need to rotate
+            t_err = np.linalg.norm(
+                (p_est[j] - p_est[i]) - (p_gt[j] - p_gt[i])
+            )
+
+            # Rotational error: angle of relative-pose error rotation
+            # R_ij_gt = R_i_gt^T @ R_j_gt,  R_ij_est = R_i_est^T @ R_j_est
+            # R_err = R_ij_gt^T @ R_ij_est
+            R_ij_gt  = Rot_gt[i].T  @ Rot_gt[j]
+            R_ij_est = Rot_est[i].T @ Rot_est[j]
+            R_err    = R_ij_gt.T @ R_ij_est
+            trace_val = float(np.clip((np.trace(R_err) - 1.0) / 2.0, -1.0, 1.0))
+            r_err = np.arccos(trace_val)   # [rad]
+
+            t_pct         = t_err / L * 100.0                       # [%]
+            r_deg_per_km  = r_err / L * (180.0 / np.pi) * 1000.0   # [deg/km]
+
+            t_errors_all.append(t_pct)
+            r_errors_all.append(r_deg_per_km)
+            t_by_length[L].append(t_pct)
+            r_by_length[L].append(r_deg_per_km)
+
+    if not t_errors_all:
+        return {
+            't_rel': float('nan'), 'r_rel': float('nan'),
+            't_rel_by_length': {L: float('nan') for L in lengths},
+            'r_rel_by_length': {L: float('nan') for L in lengths},
+            'n_segments': 0,
+        }
+
+    return {
+        't_rel':           float(np.mean(t_errors_all)),
+        'r_rel':           float(np.mean(r_errors_all)),
+        't_rel_by_length': {L: float(np.mean(v)) if v else float('nan')
+                            for L, v in t_by_length.items()},
+        'r_rel_by_length': {L: float(np.mean(v)) if v else float('nan')
+                            for L, v in r_by_length.items()},
+        'n_segments':      len(t_errors_all),
+    }
+
+
+def evaluate_navigation_performance(p_est, v_est, r_est, p_gt, v_gt, r_gt,
+                                    dataset_name, gnss_outage_info,
                                     sample_rate=10):
     """
     Complete evaluation of navigation system performance.
