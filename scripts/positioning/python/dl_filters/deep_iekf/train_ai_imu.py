@@ -62,41 +62,86 @@ def _add_paths():
 
 # ── KITTI mode ─────────────────────────────────────────────────────────────────
 
-def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training):
+def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training,
+                held_out=None):
     """
     Train using the AI-IMU's own KITTIDataset on raw 100 Hz KITTI data.
     This matches the paper's training setup exactly.
+
+    held_out : drive name to exclude from training (LOO protocol).
+               Format: '2011_09_30_drive_0033_extract' (with or without _extract).
+               When set, weights are saved as iekfnets_held_<drive>.p.
     """
     _add_paths()
-    from main_kitti import KITTIParameters, KITTIDataset, launch
+    from main_kitti import KITTIParameters, KITTIDataset
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build args namespace compatible with AI-IMU's launch()
     import types
     args = types.SimpleNamespace()
-    args.path_data_base  = str(kitti_raw_dir)
-    args.path_temp       = str(output_dir)
-    args.dataset_class   = KITTIDataset
-    args.parameter_class = KITTIParameters
-    args.epochs          = epochs
-    args.seq_dim         = 60 * 100       # 60 s batches at 100 Hz
+    args.path_data_base    = str(kitti_raw_dir)
+    args.path_temp         = str(output_dir)
+    args.dataset_class     = KITTIDataset
+    args.parameter_class   = KITTIParameters
+    args.epochs            = epochs
+    args.seq_dim           = 60 * 100       # 60 s batches at 100 Hz
     args.continue_training = continue_training
-    args.read_data       = True           # parse raw KITTI on first run
-    args.train_filter    = True
-    args.test_filter     = False
-    args.results_filter  = False
+    args.read_data         = True
+    args.train_filter      = True
+    args.test_filter       = False
+    args.results_filter    = False
 
     print(f"Starting KITTI training: {epochs} epochs")
     print(f"  Raw data dir : {kitti_raw_dir}")
     print(f"  Output dir   : {output_dir}")
-    launch(args)
+    if held_out:
+        print(f"  LOO held-out : {held_out}")
+
+    if held_out is None:
+        # Standard full training via launch()
+        from main_kitti import launch
+        launch(args)
+    else:
+        # LOO: create dataset, remove held-out sequence, train manually
+        from train_torch_filter import (prepare_filter, prepare_loss_data,
+                                        set_optimizer, train_loop, save_iekf)
+        dataset = KITTIDataset(args)
+
+        # Drive names in KITTIDataset may omit the _extract suffix
+        held_variants = {held_out, held_out.replace('_extract', '')}
+        removed = False
+        for key in list(dataset.datasets_train_filter.keys()):
+            if any(v in key for v in held_variants):
+                del dataset.datasets_train_filter[key]
+                print(f"  Removed '{key}' from training sequences.")
+                removed = True
+        if not removed:
+            print(f"  WARNING: held-out '{held_out}' not found in "
+                  f"datasets_train_filter keys: "
+                  f"{list(dataset.datasets_train_filter.keys())}")
+
+        iekf      = prepare_filter(args, dataset)
+        prepare_loss_data(args, dataset)
+        optimizer = set_optimizer(iekf)
+        for epoch in range(1, epochs + 1):
+            train_loop(args, dataset, epoch, iekf, optimizer, args.seq_dim)
+            save_iekf(args, iekf)
+            if epoch % 50 == 0 or epoch == epochs:
+                print(f"  Epoch {epoch}/{epochs} done")
+
+        # Copy default iekfnets.p → fold-specific filename
+        import shutil
+        src  = output_dir / 'iekfnets.p'
+        dst  = output_dir / f'iekfnets_held_{held_out}.p'
+        if src.exists():
+            shutil.copy2(src, dst)
+            print(f"  Fold weights saved to {dst}")
 
     # Save normalization factors alongside the weights
     _save_norm_factors(output_dir, args)
 
-    # Export to ONNX
+    # Export to ONNX (standard weights only)
     _export_onnx(output_dir)
 
 
@@ -226,6 +271,11 @@ def main():
                         '(default: artifacts/deep_iekf/ at repo root)')
     p.add_argument('--continue', dest='continue_training', action='store_true',
                    help='[kitti mode] Resume from existing iekfnets.p in output dir')
+    p.add_argument('--held-out', dest='held_out', default=None,
+                   help='[kitti mode] LOO: drive name to exclude from training '
+                        '(e.g. 2011_09_30_drive_0033_extract). Weights saved as '
+                        'iekfnets_held_<drive>.p. Use run_loo_evaluation.py to '
+                        'run all 7 folds automatically.')
     args = p.parse_args()
 
     if args.mode == 'kitti':
@@ -236,6 +286,7 @@ def main():
             output_dir=args.output,
             epochs=args.epochs,
             continue_training=args.continue_training,
+            held_out=args.held_out,
         )
     else:
         train_single(

@@ -9,7 +9,7 @@ pairs per fitness call (deterministic, full-quality, parallel via workers=-1).
 
 After optimisation, the best parameters are validated on the held-out
 datasets and saved to filter_params.json under a sentinel dataset key
-"__cv_<type>__" so they coexist with per-dataset results.
+"__cv_<type>__" (or "__loo_held_<drive>__" when --held-out is used).
 
 Typical usage:
     python ins_genetic_cv.py                            # kitti, all filters, both modes
@@ -23,6 +23,12 @@ Typical usage:
     python ins_genetic_cv.py --seed 42                  # random seed
     python ins_genetic_cv.py --maxiter 40 --popsize 15  # DE quality (defaults)
     python ins_genetic_cv.py --workers 8                # parallel workers (-1 = all CPUs)
+
+Leave-one-out (LOO) protocol for paper-comparable results:
+    python ins_genetic_cv.py --held-out 2011_10_03_drive_0042_extract  # seq 01
+    # Trains on the 6 other clean KITTI sequences; test seq 01 is never seen.
+    # Results stored under key "__loo_held_2011_10_03_drive_0042_extract__".
+    # Use run_loo_evaluation.py to run all 7 folds automatically.
 """
 import sys
 import json
@@ -49,6 +55,19 @@ from filters import (
 # Full quality (same as ins_genetic.py): ~9 000 evals × N_train_pairs filter runs
 MAXITER  = 40
 POPSIZE  = 15
+
+# ── KITTI LOO protocol ────────────────────────────────────────────────────────
+# Clean sequences for leave-one-out: no data gaps, raw OXTS available.
+# Sequences 00, 02, 05 have ~2-second data gaps; 03 has no raw data.
+KITTI_CLEAN_DRIVES = [
+    '2011_10_03_drive_0042_extract',  # seq 01 — highway
+    '2011_09_30_drive_0016_extract',  # seq 04 — country
+    '2011_09_30_drive_0020_extract',  # seq 06 — urban
+    '2011_09_30_drive_0027_extract',  # seq 07 — urban
+    '2011_09_30_drive_0028_extract',  # seq 08 — urban/country
+    '2011_09_30_drive_0033_extract',  # seq 09 — urban/country
+    '2011_09_30_drive_0034_extract',  # seq 10 — urban/country
+]
 
 # ── Filters ───────────────────────────────────────────────────────────────────
 ALL_FILTERS = [
@@ -109,14 +128,26 @@ def decode_params(x: np.ndarray) -> dict:
 
 # ── Dataset discovery ─────────────────────────────────────────────────────────
 
-def list_kitti_datasets(base_dir: Path = None) -> list:
-    """Return sorted list of KITTI dataset IDs (mat file stems)."""
+def list_kitti_datasets(base_dir: Path = None, held_out: str = None) -> list:
+    """
+    Return sorted list of KITTI dataset drive names (pickle file stems).
+
+    When held_out is given (LOO mode): restricts to KITTI_CLEAN_DRIVES and
+    removes the held-out sequence so it is never seen during optimisation.
+    Without held_out: returns all available .p file stems (backward compat).
+    """
     if base_dir is None:
         base_dir = _HERE / '../../../datasets/raw_kitti'
     base_dir = Path(base_dir)
     if not base_dir.exists():
         raise FileNotFoundError(f"KITTI dataset directory not found: {base_dir}")
-    return sorted(p.stem for p in base_dir.glob('*.mat'))
+    if held_out is not None:
+        # LOO mode: use only clean drives, exclude the held-out one
+        available = {p.stem for p in base_dir.glob('*.p')}
+        drives = [d for d in KITTI_CLEAN_DRIVES
+                  if d in available and d != held_out]
+        return drives
+    return sorted(p.stem for p in base_dir.glob('*.p'))
 
 
 def list_cookies_datasets(base_dir: Path = None) -> list:
@@ -455,6 +486,10 @@ def main():
     parser.add_argument('--popsize', type=int, default=POPSIZE)
     parser.add_argument('--workers', type=int, default=-1,
                         help='Parallel workers for DE (-1 = all CPUs, default: -1)')
+    parser.add_argument('--held-out', dest='held_out', default=None,
+                        help='LOO: drive name to hold out as test set (e.g. '
+                             '2011_10_03_drive_0042_extract). Restricts training '
+                             'to KITTI_CLEAN_DRIVES minus this sequence.')
     args = parser.parse_args()
 
     MAXITER = args.maxiter
@@ -487,7 +522,7 @@ def main():
 
     # ── Dataset discovery & loading ───────────────────────────────────────────
     if args.type == 'kitti':
-        all_ids = list_kitti_datasets()
+        all_ids = list_kitti_datasets(held_out=args.held_out)
     else:
         all_ids = list_cookies_datasets()
 
@@ -527,7 +562,9 @@ def main():
     logger.info("=" * 65)
     logger.info("INS GENETIC CV — CROSS-VALIDATION PARAMETER OPTIMISER")
     logger.info("=" * 65)
-    logger.info(f"Dataset type : {args.type}  ({len(all_ids)} total)")
+    logger.info(f"Dataset type : {args.type}  ({len(all_ids)} available)")
+    if args.held_out:
+        logger.info(f"LOO held-out : {args.held_out}  (excluded from training)")
     logger.info(f"Train ({split_pct}%) : {train_ids}")
     logger.info(f"Val   ({100-split_pct}%) : {val_ids}")
     logger.info(f"Outages/ds   : {args.outages}")
@@ -583,7 +620,11 @@ def main():
     logger.info(f"Estimated DE evals: {MAXITER * POPSIZE * len(BOUNDS)}")
 
     # ── CV sentinel dataset key ───────────────────────────────────────────────
-    cv_dataset_key = f"__cv_{args.type}__"
+    # LOO mode: tag key with the held-out drive so each fold is stored separately.
+    if args.held_out:
+        cv_dataset_key = f"__loo_held_{args.held_out}__"
+    else:
+        cv_dataset_key = f"__cv_{args.type}__"
 
     # ── Output directory for audit JSONs ──────────────────────────────────────
     out_dir = _HERE / '../../../outputs/genetic_cv'
@@ -685,7 +726,12 @@ def main():
 
     print("\n")
     fp.print_summary()
-    print(f"\nCV results stored under dataset key: '{cv_dataset_key}'")
+    if args.held_out:
+        print(f"\nLOO fold results stored under dataset key: '{cv_dataset_key}'")
+        print(f"Held-out test sequence: {args.held_out}")
+        print("  → Evaluate on this sequence with ins_compare.py")
+    else:
+        print(f"\nCV results stored under dataset key: '{cv_dataset_key}'")
     print(f"Audit JSONs: {out_dir}")
     print(f"Log:         {log_file}")
     print("\nNext steps:")

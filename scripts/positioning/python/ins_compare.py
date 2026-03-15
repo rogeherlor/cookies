@@ -26,6 +26,7 @@ import os
 import sys
 import json
 import logging
+import argparse
 import numpy as np
 import pymap3d as pm
 from pathlib import Path
@@ -35,6 +36,7 @@ _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE))
 
 import ins_config
+import data_loader
 import filter_params as fp
 import metrics
 import visualize
@@ -50,15 +52,26 @@ from filters import (
 from dl_filters.deep_iekf import iekf_ai_imu
 
 # ── Tuned parameters ───────────────────────────────────────────────────────────
-# Auto-loaded from filter_params.json (written by ins_genetic.py / ins_genetic_fast.py).
+# Auto-loaded from filter_params.json (written by ins_genetic.py / ins_genetic_cv.py).
 # Any filter without stored params will fall back to its built-in DEFAULT_PARAMS.
-# To override a specific filter manually, add its key here:
-#   TUNED_PARAMS['ekf_vanilla'] = {'Qpos': ..., ...}
 def _load_tuned_params(nav_data, mode_3d):
+    """
+    Load tuned params for the current dataset.
+
+    Priority:
+    1. LOO key "__loo_held_<dataset_name>__" — from ins_genetic_cv.py --held-out
+    2. Per-dataset key "<dataset_name>" — from ins_genetic.py
+    3. CV aggregate key "__cv_kitti__" — from ins_genetic_cv.py without --held-out
+    """
     result = {}
+    loo_key = f'__loo_held_{nav_data.dataset_name}__'
+    cv_key  = '__cv_kitti__'
+
     for key in ['ekf_vanilla', 'ekf_enhanced', 'eskf_vanilla', 'eskf_enhanced',
                 'iekf_vanilla', 'iekf_enhanced']:
-        p = fp.get(key, mode_3d, '__cv_kitti__') # TODO: go back to edited: nav_data.dataset_name
+        p = (fp.get(key, mode_3d, loo_key)
+             or fp.get(key, mode_3d, nav_data.dataset_name)
+             or fp.get(key, mode_3d, cv_key))
         if p is not None:
             result[key] = p
     return result
@@ -80,10 +93,28 @@ FILTER_CONFIGS = [
 
 
 def main():
+    # ── CLI arguments ──────────────────────────────────────────────────────────
+    parser = argparse.ArgumentParser(
+        description='Run all filter variants and generate comparison plots.')
+    parser.add_argument('--test-seq', type=str, default=None,
+                        help='Override dataset: KITTI seq ID ("01"–"10") or full drive name')
+    parser.add_argument('--dr-mode', action='store_true', default=False,
+                        help='Dead-reckoning mode: disable GPS for all filters '
+                             '(trel/rrel comparable to Brossard et al. 2020 Table I)')
+    parser.add_argument('--ai-imu-weights', type=str, default=None,
+                        help='Path to fold-specific AI-IMU weights (iekfnets_held_*.p). '
+                             'Auto-detected from --test-seq when not provided.')
+    args = parser.parse_args()
+
     # ── Shared configuration ───────────────────────────────────────────────────
-    nav_data      = ins_config.NAV_DATA
+    if args.test_seq is not None:
+        nav_data = data_loader.get_kitti_dataset(args.test_seq)
+    else:
+        nav_data = ins_config.NAV_DATA
+
     use_3d        = ins_config.MODE_3D
-    use_rts_as_gt = ins_config.USE_RTS_AS_GT
+    dr_mode       = args.dr_mode or getattr(ins_config, 'DR_MODE', False)
+    use_rts_as_gt = ins_config.USE_RTS_AS_GT and not dr_mode
     TUNED_PARAMS  = _load_tuned_params(nav_data, use_3d)
     t1       = ins_config.OUTAGE_START
     d        = ins_config.OUTAGE_DURATION
@@ -95,16 +126,41 @@ def main():
     f        = pm.geodetic2enu(lla[:,0], lla[:,1], lla[:,2], lla0[0], lla0[1], lla0[2])
     p_kitti  = np.column_stack([f[0], f[1], f[2]])
 
-    outage_config = {'start': t1, 'duration': d}
-    gnss_outage_info = {
-        'start':     t1, 'end': t1 + d, 'duration': d,
-        'start_idx': int(t1 * frecIMU),
-        'end_idx':   int((t1 + d) * frecIMU),
-    }
+    # In DR_MODE: disable GPS for all filters; outage simulation is irrelevant
+    if dr_mode:
+        import dataclasses
+        nav_data = dataclasses.replace(
+            nav_data,
+            gps_available=np.zeros(len(nav_data.lla), dtype=bool),
+        )
+        outage_config    = None
+        gnss_outage_info = {'start': 0, 'end': 0, 'duration': 0,
+                            'start_idx': 0, 'end_idx': 0}
+    else:
+        outage_config = {'start': t1, 'duration': d}
+        gnss_outage_info = {
+            'start':     t1, 'end': t1 + d, 'duration': d,
+            'start_idx': int(t1 * frecIMU),
+            'end_idx':   int((t1 + d) * frecIMU),
+        }
+
+    # ── AI-IEKF weights path (LOO fold-specific) ───────────────────────────────
+    _repo_root = _HERE / '../../../..'
+    if args.ai_imu_weights:
+        _ai_weights = Path(args.ai_imu_weights)
+    else:
+        _drive = data_loader.KITTI_SEQ_TO_DRIVE.get(
+            nav_data.dataset_name, nav_data.dataset_name)
+        _candidate = _repo_root / f'artifacts/deep_iekf/iekfnets_held_{_drive}.p'
+        _ai_weights = _candidate if _candidate.exists() else None
 
     # ── Output directories ─────────────────────────────────────────────────────
-    traj_subdir   = (f"{nav_data.dataset_name}_outage_{t1}s_{d}s"
-                     if (t1 > 0 or d > 0) else f"{nav_data.dataset_name}_no_outage")
+    if dr_mode:
+        traj_subdir = f"{nav_data.dataset_name}_dr_mode"
+    elif t1 > 0 or d > 0:
+        traj_subdir = f"{nav_data.dataset_name}_outage_{t1}s_{d}s"
+    else:
+        traj_subdir = f"{nav_data.dataset_name}_no_outage"
     compare_dir   = _HERE / f'../../../outputs/comparison/{traj_subdir}'
     logs_dir      = _HERE / '../../../logs'
     compare_dir.mkdir(parents=True, exist_ok=True)
@@ -127,39 +183,49 @@ def main():
     logger.info("INS FILTER COMPARISON")
     logger.info("=" * 65)
     logger.info(f"Dataset    : {nav_data.dataset_name}")
-    logger.info(f"GNSS outage: {t1}s – {t1+d}s  ({d}s)")
+    logger.info(f"Mode       : {'DEAD-RECKONING (DR_MODE)' if dr_mode else f'GPS-aided, outage {t1}s–{t1+d}s ({d}s)'}")
     logger.info(f"Rotation   : {'3D' if use_3d else '2D'}")
     logger.info(f"Filters    : {len(FILTER_CONFIGS)}")
+    if _ai_weights:
+        logger.info(f"AI weights : {_ai_weights}")
     logger.info("")
     logger.info("NOTE: Results use default parameters unless TUNED_PARAMS is set.")
     logger.info("      Run ins_genetic.py for each filter before comparing.")
     logger.info("=" * 65)
 
-    # ── RTS Smoother (best-achievable reference, always full GPS) ──────────────
-    logger.info("Running RTS smoother (best-achievable reference, no outage)…")
-    rts_params = TUNED_PARAMS.get('ekf_enhanced', None)
-    rts_result = rts_smoother.run(
-        nav_data=nav_data,
-        params=rts_params,
-        use_3d_rotation=use_3d,
-    )
-    p_rts = rts_result['p']
-    logger.info("  RTS smoother done.")
-
-    # ── Select ground truth source ─────────────────────────────────────────────
-    # p_gt        : array used for metric evaluation and as the GT line in plots
-    # p_rts_vis   : optional second reference overlaid in plots (purple); None
-    #               when RTS is already the primary GT
-    if use_rts_as_gt:
-        p_gt       = p_rts
-        p_rts_vis  = None
-        gt_label   = 'Ground Truth (RTS)'
-        logger.info("Ground truth: RTS smoother")
+    # ── RTS Smoother — skipped in DR_MODE (no GPS available) ──────────────────
+    if dr_mode:
+        p_rts     = None
+        p_rts_vis = None
+        p_gt      = p_kitti
+        gt_label  = 'KITTI GPS GT'
+        logger.info("DR_MODE: skipping RTS smoother; ground truth = KITTI GPS")
     else:
-        p_gt       = p_kitti
-        p_rts_vis  = p_rts
-        gt_label   = 'KITTI GPS GT'
-        logger.info("Ground truth: KITTI GPS")
+        # ── RTS Smoother (best-achievable reference, always full GPS) ──────────
+        logger.info("Running RTS smoother (best-achievable reference, no outage)…")
+        rts_params = TUNED_PARAMS.get('ekf_enhanced', None)
+        rts_result = rts_smoother.run(
+            nav_data=nav_data,
+            params=rts_params,
+            use_3d_rotation=use_3d,
+        )
+        p_rts = rts_result['p']
+        logger.info("  RTS smoother done.")
+
+        # ── Select ground truth source ─────────────────────────────────────────
+        # p_gt        : array used for metric evaluation and as the GT line in plots
+        # p_rts_vis   : optional second reference overlaid in plots (purple); None
+        #               when RTS is already the primary GT
+        if use_rts_as_gt:
+            p_gt       = p_rts
+            p_rts_vis  = None
+            gt_label   = 'Ground Truth (RTS)'
+            logger.info("Ground truth: RTS smoother")
+        else:
+            p_gt       = p_kitti
+            p_rts_vis  = p_rts
+            gt_label   = 'KITTI GPS GT'
+            logger.info("Ground truth: KITTI GPS")
 
     # ── Run all filters ────────────────────────────────────────────────────────
     all_results = []
@@ -171,6 +237,12 @@ def main():
         params = TUNED_PARAMS.get(fkey, None)
 
         logger.info(f"\nRunning {fname}  ({'tuned' if params else 'default params'})…")
+
+        # For AI-IEKF: inject fold-specific weights via env var if available
+        if fkey == 'iekf_ai_imu' and _ai_weights is not None:
+            os.environ['AI_IMU_WEIGHTS'] = str(_ai_weights)
+        elif fkey == 'iekf_ai_imu':
+            os.environ.pop('AI_IMU_WEIGHTS', None)
 
         result = fmod.run(
             nav_data=nav_data,
@@ -279,9 +351,10 @@ def main():
     logger.info(f"Log: {log_file}")
 
     # ── Summary table to console ───────────────────────────────────────────────
+    _mode_str = 'DR mode (no GPS)' if dr_mode else f'Outage {t1}s+{d}s'
     print("\n" + "=" * 100)
     print(f"COMPARISON SUMMARY — {nav_data.dataset_name}  |  "
-          f"Outage {t1}s+{d}s  |  {'3D' if use_3d else '2D'}")
+          f"{_mode_str}  |  {'3D' if use_3d else '2D'}")
     print("=" * 100)
     print(f"{'Filter':<20} {'ATE 2D [m]':>12} {'ATE 3D [m]':>12} {'Pos RMSE 2D':>13} "
           f"{'Outage max [m]':>16} {'t_rel [%]':>11} {'r_rel [°/km]':>13}")

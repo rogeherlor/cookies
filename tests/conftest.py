@@ -29,7 +29,7 @@ from data_loader import NavigationData  # noqa: E402  (must come after sys.path)
 # ---------------------------------------------------------------------------
 LLA0_DEFAULT = np.array([48.0, 11.0, 515.0])   # Munich — KITTI-like reference
 KITTI_PATH   = str(Path(__file__).resolve().parent.parent /
-                   "datasets" / "raw_kitti" / "10_03_0027.mat")
+                   "datasets" / "raw_kitti" / "2011_10_03_drive_0027_extract.p")
 
 # ---------------------------------------------------------------------------
 # make_nav_data — core synthetic builder
@@ -155,5 +155,5 @@ def kitti_data():
     """Load the KITTI test dataset; skip if file is not present."""
     if not os.path.exists(KITTI_PATH):
         pytest.skip(f"KITTI dataset not available at: {KITTI_PATH}")
-    from data_loader import load_kitti_mat
-    return load_kitti_mat(KITTI_PATH, sample_rate=10.0)
+    from data_loader import load_kitti_pickle
+    return load_kitti_pickle(KITTI_PATH, sample_rate=100.0)

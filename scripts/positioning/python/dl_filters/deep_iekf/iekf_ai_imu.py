@@ -32,8 +32,11 @@ The car-to-IMU calibration (Rc, pc) is estimated online, starting at identity/ze
 
 GPS / GNSS
 ----------
-This filter does NOT use GPS.  outage_config is accepted for interface compatibility
-but is silently ignored.  This is purely IMU dead-reckoning.
+When nav_data.gps_available is True at a given timestep, the filter applies a
+standard position measurement update (H selects ξ_p at state indices 6:9).
+The CNN adapter continues to regulate NHC covariances independently.
+During GPS outages (gps_available=False), the filter runs pure CNN dead-reckoning.
+Set DR_MODE=True in ins_config.py to disable GPS for all filters (paper comparison).
 
 10 Hz vs 100 Hz
 ---------------
@@ -123,6 +126,51 @@ def _find_norm_factors(weights_path):
         return None
 
 
+def _skew(v):
+    """Skew-symmetric matrix for cross product."""
+    return np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+
+
+def _so3_exp(phi):
+    """SO(3) exponential map (Rodrigues formula)."""
+    theta = np.linalg.norm(phi)
+    if theta < 1e-10:
+        return np.eye(3) + _skew(phi)
+    K = _skew(phi / theta)
+    return np.eye(3) + np.sin(theta) * K + (1.0 - np.cos(theta)) * (K @ K)
+
+
+def _gps_update_step(Rot, v, p, b_omega, b_acc, Rot_c_i, t_c_i, P,
+                     z_gps, R_gps):
+    """
+    GPS position measurement update for the right-invariant IEKF.
+
+    z_gps = p_gps - p_est  (3D ENU innovation)
+    H     = [0₃, 0₃, I₃, 0₁₂]  — selects ξ_p (state indices 6:9)
+    R_gps = 3×3 position measurement covariance [m²]
+
+    Returns updated state variables and covariance P.
+    """
+    H = np.zeros((3, 21))
+    H[:, 6:9] = np.eye(3)
+
+    S = H @ P @ H.T + R_gps                              # (3,3)
+    K = P @ H.T @ np.linalg.solve(S.T, np.eye(3)).T      # (21,3)
+    delta = K @ z_gps                                     # (21,) error state
+
+    # Apply correction to each state component
+    p_new       = p       + delta[6:9]
+    v_new       = v       + delta[3:6]
+    b_omega_new = b_omega + delta[9:12]
+    b_acc_new   = b_acc   + delta[12:15]
+    t_c_i_new   = t_c_i  + delta[18:21]
+    Rot_new     = _so3_exp(delta[0:3])   @ Rot
+    Rot_c_i_new = _so3_exp(delta[15:18]) @ Rot_c_i
+
+    P_new = (np.eye(21) - K @ H) @ P
+    return Rot_new, v_new, p_new, b_omega_new, b_acc_new, Rot_c_i_new, t_c_i_new, P_new
+
+
 def _build_rotation_matrix(roll, pitch, yaw):
     """ZYX Euler angles → 3×3 rotation matrix (body→nav)."""
     cr, sr = np.cos(roll),  np.sin(roll)
@@ -135,18 +183,22 @@ def _build_rotation_matrix(roll, pitch, yaw):
     ])
 
 
-def _run_filter_loop(iekf, t, u, measurements_covs_np, v0, ang0):
+def _run_filter_loop(iekf, t, u, measurements_covs_np, v0, ang0,
+                     p_gps=None, gps_available=None, R_gps=None):
     """
     Run NUMPYIEKF propagate/update loop, tracking covariance P at each step.
 
     Parameters
     ----------
-    iekf              : NUMPYIEKF instance (with learned or default covariances)
-    t                 : (N,) timestamps [s]
-    u                 : (N,6) IMU data [gyro_flu(3), accel_flu(3)]
+    iekf                 : NUMPYIEKF instance (with learned or default covariances)
+    t                    : (N,) timestamps [s]
+    u                    : (N,6) IMU data [gyro_flu(3), accel_flu(3)]
     measurements_covs_np : (N,2) measurement covariances [cov_lat, cov_up]
-    v0                : (3,) initial ENU velocity
-    ang0              : (3,) initial [roll, pitch, yaw] [rad]
+    v0                   : (3,) initial ENU velocity
+    ang0                 : (3,) initial [roll, pitch, yaw] [rad]
+    p_gps                : (N,3) GPS ENU positions [m], origin-relative, or None
+    gps_available        : (N,) bool mask — True where GPS update should be applied
+    R_gps                : (3,3) GPS position measurement covariance [m²], or None
 
     Returns
     -------
@@ -158,6 +210,11 @@ def _run_filter_loop(iekf, t, u, measurements_covs_np, v0, ang0):
 
     N = t.shape[0]
     dt = t[1:] - t[:-1]
+
+    use_gps = (p_gps is not None and gps_available is not None
+               and gps_available.any())
+    if R_gps is None:
+        R_gps = np.eye(3) * 4.0   # default: 2 m position std
 
     # Allocate state arrays
     Rot     = np.zeros((N, 3, 3))
@@ -183,9 +240,18 @@ def _run_filter_loop(iekf, t, u, measurements_covs_np, v0, ang0):
             iekf.propagate(Rot[i-1], v[i-1], p[i-1], b_omega[i-1], b_acc[i-1],
                            Rot_c_i[i-1], t_c_i[i-1], P, u[i], dt[i-1])
 
+        # NHC pseudo-measurement update (CNN-adapted covariance)
         Rot[i], v[i], p[i], b_omega[i], b_acc[i], Rot_c_i[i], t_c_i[i], P = \
             iekf.update(Rot[i], v[i], p[i], b_omega[i], b_acc[i], Rot_c_i[i],
                         t_c_i[i], P, u[i], i, measurements_covs_np[i])
+
+        # GPS position update (independent of NHC; runs when GPS is available)
+        if use_gps and gps_available[i]:
+            z_gps = p_gps[i] - p[i]
+            (Rot[i], v[i], p[i], b_omega[i], b_acc[i],
+             Rot_c_i[i], t_c_i[i], P) = _gps_update_step(
+                Rot[i], v[i], p[i], b_omega[i], b_acc[i],
+                Rot_c_i[i], t_c_i[i], P, z_gps, R_gps)
 
         # Periodic SO(3) normalisation to prevent numerical drift
         if i % iekf.n_normalize_rot == 0:
@@ -213,14 +279,18 @@ def _run_filter_loop(iekf, t, u, measurements_covs_np, v0, ang0):
 
 def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     """
-    Run the AI-IMU IEKF dead-reckoning filter.
+    Run the AI-IMU IEKF filter with optional GPS-aided updates.
 
     Parameters
     ----------
     nav_data        : NavigationData — IMU + GNSS data
-    params          : ignored (filter has no tunable genetic parameters)
-    outage_config   : ignored (filter uses no GPS)
+    params          : optional dict — supports 'Rpos' (GPS noise std [m], default 2.0)
+    outage_config   : optional {'start': float, 'duration': float} — GPS blackout window
     use_3d_rotation : ignored (filter always runs in full 3D)
+
+    GPS is used whenever nav_data.gps_available is True AND the current timestep
+    is not inside the outage window.  Set ins_config.DR_MODE=True to disable GPS
+    globally (produces pure dead-reckoning comparable to Brossard et al. 2020).
 
     Returns
     -------
@@ -333,9 +403,48 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         print(f"AI-IMU: using fixed covariances [cov_lat={cov_lat}, cov_up={cov_up}] "
               f"(no CNN adapter).")
 
+    # ── GPS data preparation ───────────────────────────────────────────────────
+    # Compute ENU positions from geodetic (round-trip exact for same lla0).
+    # Apply outage mask: GPS blackout window from outage_config.
+    p_gps_for_loop   = None
+    gps_avail_masked = None
+    R_gps            = None
+
+    try:
+        import ins_config as _ic
+        dr_mode = getattr(_ic, 'DR_MODE', False)
+    except Exception:
+        dr_mode = False
+
+    if not dr_mode and hasattr(nav_data, 'gps_available') and nav_data.gps_available.any():
+        import pymap3d as pm
+        e, n, u_enu = pm.geodetic2enu(
+            nav_data.lla[:, 0], nav_data.lla[:, 1], nav_data.lla[:, 2],
+            nav_data.lla0[0], nav_data.lla0[1], nav_data.lla0[2])
+        p_gps_for_loop = np.column_stack([e, n, u_enu])
+
+        gps_avail_masked = nav_data.gps_available.copy()
+        if outage_config is not None:
+            t1 = outage_config.get('start', 0.0)
+            d  = outage_config.get('duration', 0.0)
+            A  = int(t1 * nav_data.sample_rate)
+            B  = int((t1 + d) * nav_data.sample_rate)
+            gps_avail_masked[A:B] = False
+
+        rpos = float((params or {}).get('Rpos', 4.0))
+        R_gps = np.eye(3) * rpos
+
+        n_gps = int(gps_avail_masked.sum())
+        print(f"AI-IMU: GPS-aided mode — {n_gps} GPS updates "
+              f"({'outage applied' if outage_config else 'no outage'}).")
+    elif dr_mode:
+        print("AI-IMU: DR_MODE=True — pure dead-reckoning (no GPS).")
+
     # ── Run filter loop ────────────────────────────────────────────────────────
     p, v, r, b_omega, b_acc, std_pos, std_vel, std_orient, std_bias_gyr, std_bias_acc = \
-        _run_filter_loop(iekf, t, u_np, measurements_covs_np, v0, ang0)
+        _run_filter_loop(iekf, t, u_np, measurements_covs_np, v0, ang0,
+                         p_gps=p_gps_for_loop, gps_available=gps_avail_masked,
+                         R_gps=R_gps)
 
     return {
         'p':           p,

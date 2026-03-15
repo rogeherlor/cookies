@@ -28,11 +28,12 @@ Herath et al. (RoNIN)
 
 Zhao et al., "Tartan IMU: A Light Foundation Model for Inertial Positioning in Robotics" (CVPR 2025)
 
-## Smoother
-
-Use it as ground truth instead of the actual one
-
 # Pending Improve Cookies Sensor Data
 
 # Pending benchmark metrics
-Maybe the same as in AI-IMU Dead-Reckoning, KITTI scenaro.
+Same as in AI-IMU Dead-Reckoning, KITTI scenaro.
+Replicate their results and include ours.
+
+# Check the only imu track equations
+
+# Pending conversion from the sensor to the vehicle frame

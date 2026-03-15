@@ -2,16 +2,16 @@
 Data Loader for Navigation Systems
 
 This module provides standardized data loading from various sources:
-- KITTI dataset (.mat files)
+- KITTI dataset (.p pickle files, ai-imu-dr format, 100 Hz)
 - COOKIES dataset
-- Other custom formats
 
 All loaders return data in a standardized format for use with navigation algorithms.
 """
 
 import os
+import pickle
 import numpy as np
-from scipy.io import loadmat
+import pymap3d as pm
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Tuple, Optional
@@ -71,66 +71,77 @@ class NavigationData:
         return True
 
 
-def load_kitti_mat(filepath: str, sample_rate: float = 10.0) -> NavigationData:
+def load_kitti_pickle(filepath: str, sample_rate: float = 100.0,
+                      gps_rate: float = 1.0) -> NavigationData:
     """
-    Load KITTI dataset from .mat file.
-    
-    Args:
-        filepath: Path to the .mat file
-        sample_rate: Sampling rate in Hz (default: 10 Hz)
-    
-    Returns:
-        NavigationData object with standardized format
-    
-    Expected .mat structure:
-        - accel_flu: Nx3 array (accelerometer in FLU frame)
-        - gyro_flu: Nx3 array (gyroscope in FLU frame)
-        - vel_enu: Nx3 array (velocity in ENU frame)
-        - lla: Nx3 array (latitude, longitude, altitude)
-        - rpy: Nx3 array (roll, pitch, yaw)
+    Load KITTI data from ai-imu-dr pickle (.p) format at 100 Hz.
+
+    Source: https://github.com/mbrossar/ai-imu-dr
+
+    Coordinate frames (no conversion needed):
+        Body frame  : FLU (Forward, Left, Up)  — u[:, :3] = gyro, u[:, 3:6] = accel
+        Nav frame   : ENU (East, North, Up)    — v_gt = [ve, vn, vu]
+        Orientation : ZYX Euler [roll, pitch, yaw] in radians
+
+    Pickle keys:
+        t        (N,)   timestamps relative to sequence start [s]
+        u        (N,6)  [gyro_flu(3), accel_flu(3)] float32
+        ang_gt   (N,3)  [roll, pitch, yaw] float32
+        p_gt     (N,3)  ENU position relative to first GPS fix [m] float32
+        v_gt     (N,3)  [ve, vn, vu] velocity [m/s] float32
     """
     if not os.path.exists(filepath):
-        raise FileNotFoundError(f"KITTI file not found: {filepath}")
-    
-    # Load MATLAB file
-    data = loadmat(filepath)
-    
-    # Extract data arrays
-    accel_flu = np.array(data['accel_flu'], dtype=np.float64)
-    gyro_flu = np.array(data['gyro_flu'], dtype=np.float64)
-    vel_enu = np.array(data['vel_enu'], dtype=np.float64)
-    lla = np.array(data['lla'], dtype=np.float64)
-    orient = np.array(data['rpy'], dtype=np.float64)
-    
-    # Get dataset name from filename
-    dataset_name = Path(filepath).stem
-    
-    # Create GPS availability mask (1 Hz updates)
-    # Assume GPS arrives at 1 Hz, so mark every (sample_rate) samples
-    n_samples = len(lla)
-    gps_rate = 1.0  # Hz
-    gps_interval = int(sample_rate / gps_rate)
-    gps_available = np.zeros(n_samples, dtype=bool)
-    gps_available[::gps_interval] = True  # Mark GPS updates at 1 Hz
-    
-    # Compute IMU samples between GPS updates statistics
+        raise FileNotFoundError(f"KITTI pickle not found: {filepath}")
+
+    with open(filepath, 'rb') as f:
+        data = pickle.load(f)
+
+    def _to_numpy(x):
+        return x.numpy() if hasattr(x, 'numpy') else np.array(x)
+
+    t       = _to_numpy(data['t']).astype(np.float64)
+    u       = _to_numpy(data['u']).astype(np.float64)
+    ang_gt  = _to_numpy(data['ang_gt']).astype(np.float64)
+    p_gt    = _to_numpy(data['p_gt']).astype(np.float64)
+    v_gt    = _to_numpy(data['v_gt']).astype(np.float64)
+
+    t -= t[0]  # ensure timestamps start at 0
+
+    gyro_flu  = u[:, :3]   # [wx, wy, wz] in FLU body frame
+    accel_flu = u[:, 3:6]  # [ax, ay, az] in FLU body frame
+    vel_enu   = v_gt        # [East, North, Up]
+    orient    = ang_gt      # [roll, pitch, yaw]
+
+    # Back-convert relative ENU positions to approximate geodetic coordinates.
+    # Using Karlsruhe, Germany as reference (KITTI recording area).
+    # The round-trip enu2geodetic → geodetic2enu is exact for the same lla0,
+    # so all filters receive consistent relative positions.
+    lla0 = np.array([49.0, 8.4, 110.0])
+    lat, lon, alt = pm.enu2geodetic(p_gt[:, 0], p_gt[:, 1], p_gt[:, 2],
+                                    lla0[0], lla0[1], lla0[2])
+    lla = np.column_stack([lat, lon, alt])
+
+    N = len(t)
+    gps_interval = max(1, int(round(sample_rate / gps_rate)))
+    gps_available = np.zeros(N, dtype=bool)
+    gps_available[::gps_interval] = True
+
     gps_indices = np.where(gps_available)[0]
     if len(gps_indices) > 1:
-        imu_between_gps = np.diff(gps_indices)
-        mean_imu_between = np.mean(imu_between_gps)
-        min_imu_between = np.min(imu_between_gps)
-        max_imu_between = np.max(imu_between_gps)
-        print(f"IMU samples between GPS updates: mean={mean_imu_between:.1f}, min={min_imu_between}, max={max_imu_between}")
-    
-    print(f"KITTI data: {n_samples} samples at {sample_rate} Hz, GPS updates at {gps_rate} Hz ({np.sum(gps_available)} updates)")
+        imu_between = np.diff(gps_indices)
+        print(f"IMU samples between GPS updates: mean={imu_between.mean():.1f}, "
+              f"min={imu_between.min()}, max={imu_between.max()}")
 
-    # Derive GNSS speed/course from provided ENU velocity (used as GNSS velocity observation)
     vE = vel_enu[:, 0]
     vN = vel_enu[:, 1]
-    gps_speed_mps = np.sqrt(vE**2 + vN**2) # m/s
-    gps_cog_rad = np.arctan2(vE, vN)  # atan2(E, N)
-    
-    # Create NavigationData object
+    gps_speed_mps = np.sqrt(vE**2 + vN**2)
+    gps_cog_rad   = np.arctan2(vE, vN)
+
+    dataset_name = Path(filepath).stem
+    print(f"KITTI pickle '{dataset_name}': {N} samples at {sample_rate} Hz, "
+          f"GPS at {gps_rate} Hz ({gps_available.sum()} updates), "
+          f"duration={t[-1]:.1f}s")
+
     nav_data = NavigationData(
         accel_flu=accel_flu,
         gyro_flu=gyro_flu,
@@ -141,14 +152,12 @@ def load_kitti_mat(filepath: str, sample_rate: float = 10.0) -> NavigationData:
         sample_rate=sample_rate,
         dataset_name=dataset_name,
         gps_rate=gps_rate,
-        lla0=lla[0].copy(),  # ENU origin = first GPS position
+        lla0=lla0,
+        time=t,
         gps_speed_mps=gps_speed_mps,
         gps_cog_rad=gps_cog_rad,
     )
-    
-    # Validate data consistency
     nav_data.validate()
-    
     return nav_data
 
 
@@ -563,63 +572,80 @@ def load_cookies_data(filepath: str, sample_rate: float = None, resample: bool =
 
 
 
-def get_data_loader(filepath: str, sample_rate: float = 10.0) -> NavigationData:
+def get_data_loader(filepath: str, sample_rate: float = None) -> NavigationData:
     """
     Automatically detect file type and load with appropriate loader.
-    
+
     Args:
         filepath: Path to the data file
-        sample_rate: Sampling rate in Hz
-    
+        sample_rate: Sampling rate in Hz (auto-detected per format if None:
+                     100 Hz for KITTI pickle, 10 Hz target for COOKIES)
+
     Returns:
         NavigationData object with standardized format
     """
     filepath = Path(filepath)
-    
+
     if not filepath.exists():
         raise FileNotFoundError(f"Data file not found: {filepath}")
-    
-    # Detect file type by extension
-    if filepath.suffix == '.mat':
-        # Check if it's in KITTI directory
-        if 'kitti' in str(filepath).lower():
-            return load_kitti_mat(str(filepath), sample_rate)
-        else:
-            # Try KITTI format by default for .mat files
-            return load_kitti_mat(str(filepath), sample_rate)
-    
+
+    if filepath.suffix == '.p':
+        sr = sample_rate if sample_rate is not None else 100.0
+        return load_kitti_pickle(str(filepath), sample_rate=sr)
+
     elif filepath.suffix == '.log':
-        # COOKIES log file
-        return load_cookies_data(str(filepath), sample_rate=None, resample=True, target_rate=sample_rate)
-    
+        sr = sample_rate if sample_rate is not None else 10.0
+        return load_cookies_data(str(filepath), sample_rate=None, resample=True, target_rate=sr)
+
     else:
         raise ValueError(f"Unsupported file format: {filepath.suffix}")
 
 
-def get_kitti_dataset(dataset_id: str, base_dir: Optional[Path] = None, 
-                     sample_rate: float = 10.0) -> NavigationData:
+# KITTI odometry sequence number → raw drive name mapping.
+# Seq 03 is absent: no raw OXTS data was available (discarded in the ai-imu-dr paper).
+# Seqs 00, 02, 05 have 2-second data gaps but are still usable.
+# Best test sequences (clean data): 01, 04, 06, 07, 08, 09, 10.
+KITTI_SEQ_TO_DRIVE = {
+    '00': '2011_10_03_drive_0027_extract',
+    '01': '2011_10_03_drive_0042_extract',
+    '02': '2011_10_03_drive_0034_extract',
+    # '03': not available — no raw data
+    '04': '2011_09_30_drive_0016_extract',
+    '05': '2011_09_30_drive_0018_extract',
+    '06': '2011_09_30_drive_0020_extract',
+    '07': '2011_09_30_drive_0027_extract',
+    '08': '2011_09_30_drive_0028_extract',
+    '09': '2011_09_30_drive_0033_extract',
+    '10': '2011_09_30_drive_0034_extract',
+}
+
+
+def get_kitti_dataset(dataset_id: str, base_dir: Optional[Path] = None,
+                      sample_rate: float = 100.0) -> NavigationData:
     """
-    Convenience function to load KITTI dataset by ID.
-    
+    Load a KITTI sequence by odometry sequence number or full drive name.
+
     Args:
-        dataset_id: KITTI dataset identifier (e.g., '10_03_0034')
-        base_dir: Base directory for datasets (default: auto-detect from script location)
-        sample_rate: Sampling rate in Hz
-    
+        dataset_id: Two-digit sequence number ('00'–'10', seq 03 absent) OR
+                    full drive name ('2011_10_03_drive_0027_extract')
+        base_dir: Override for datasets/raw_kitti/ directory
+        sample_rate: Sampling rate in Hz (default: 100 Hz)
+
     Returns:
         NavigationData object
-    
+
     Example:
-        data = get_kitti_dataset('10_03_0034')
+        data = get_kitti_dataset('00')   # seq 00 — drive 2011_10_03_drive_0027
+        data = get_kitti_dataset('08')   # seq 08 — best long urban sequence
     """
     if base_dir is None:
-        # Auto-detect base directory relative to this script
         script_dir = Path(__file__).parent
         base_dir = script_dir / '../../../datasets/raw_kitti'
-    
-    filepath = base_dir / f'{dataset_id}.mat'
-    
-    return load_kitti_mat(str(filepath), sample_rate)
+
+    # Accept both '00' and full drive name
+    drive_name = KITTI_SEQ_TO_DRIVE.get(dataset_id, dataset_id)
+    filepath = Path(base_dir) / f'{drive_name}.p'
+    return load_kitti_pickle(str(filepath), sample_rate=sample_rate)
 
 
 def get_cookies_dataset(dataset_id: str, base_dir: Optional[Path] = None, 

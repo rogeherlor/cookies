@@ -45,7 +45,16 @@ OUTAGE_DURATION = 200    # [s] — duration of GPS blackout
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
 # Only KITTI is used.  Change the sequence ID as needed.
-NAV_DATA = data_loader.get_kitti_dataset('10_03_0027')
+NAV_DATA = data_loader.get_kitti_dataset('02')  # seq 00 = 2011_10_03_drive_0027
+# clean test sequences are 01, 04, 06, 07, 08, 09, 10. Sequences 00, 02, 05 have a ~2-second data gap (logging problem) and 03 has no raw data at all.
+# train on all except for the one being validated
+
+# ── Dead-reckoning evaluation mode ────────────────────────────────────────────
+# True  → disable GPS for ALL filters; initialize from ground-truth state.
+#          Produces trel/rrel directly comparable to Brossard et al. 2020 Table I.
+#          ins_compare.py and iekf_ai_imu.py both honour this flag.
+# False → normal GPS-aided INS with outage simulation (default, main use case)
+DR_MODE = False
 
 
 # ── Ground truth source ────────────────────────────────────────────────────────
@@ -68,5 +77,4 @@ USE_RTS_AS_GT = True
 #     'beta_gyr': -2.660e-01, 'P_pos_std': 0.32, 'P_vel_std': 2.72,
 #     'P_orient_std': 0.156, 'P_acc_std': 1.051e-03, 'P_gyr_std': 7.642e-03,
 # }
-# FILTER_PARAMS = fp.get(FILTER, MODE_3D, NAV_DATA.dataset_name)
-FILTER_PARAMS = fp.get(FILTER, MODE_3D, '__cv_kitti__')
+FILTER_PARAMS = fp.get(FILTER, MODE_3D, NAV_DATA.dataset_name)

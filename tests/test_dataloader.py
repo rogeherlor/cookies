@@ -3,11 +3,11 @@ Tests for data_loader.py.
 
 Covers:
   - NavigationData.validate() contract (shapes, dtypes, required fields)
-  - GPS mask generation (1 Hz from 10 Hz → every 10th sample)
+  - GPS mask generation (1 Hz from 100 Hz → every 100th sample)
   - FLU frame convention (stationary accel = [0,0,+9.81])
   - GRAVITY constant = [0,0,-9.81] in ENU
-  - lla0 equals first LLA position
-  - load_kitti_mat (requires KITTI .mat file, skipped otherwise)
+  - lla0 set to Karlsruhe reference
+  - load_kitti_pickle (requires KITTI .p file, skipped otherwise)
 """
 import numpy as np
 import pytest
@@ -75,17 +75,17 @@ class TestNavigationDataValidation:
 
 class TestGpsMaskGeneration:
 
-    def test_kitti_1hz_from_10hz(self):
-        """At 10 Hz, 1 Hz GPS → True every 10 samples, False in between."""
-        N = 100
+    def test_kitti_1hz_from_100hz(self):
+        """At 100 Hz, 1 Hz GPS → True every 100 samples, False in between."""
+        N = 1000
         gps_avail = np.zeros(N, dtype=bool)
-        gps_avail[::10] = True          # pattern used by load_kitti_mat
+        gps_avail[::100] = True         # pattern used by load_kitti_pickle
 
-        assert gps_avail[0]  == True
-        assert gps_avail[10] == True
-        assert gps_avail[5]  == False
-        assert gps_avail[9]  == False
-        assert np.sum(gps_avail) == 10  # 10 GPS updates in 100 samples
+        assert gps_avail[0]   == True
+        assert gps_avail[100] == True
+        assert gps_avail[50]  == False
+        assert gps_avail[99]  == False
+        assert np.sum(gps_avail) == 10  # 10 GPS updates in 1000 samples
 
     def test_gps_mask_dtype_is_bool(self):
         nd = _base_nav(50)
@@ -167,25 +167,25 @@ class TestLla0Convention:
 
 
 # ---------------------------------------------------------------------------
-# load_kitti_mat (skipped if KITTI file absent)
+# load_kitti_pickle (skipped if KITTI .p file absent)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.requires_data
-class TestLoadKittiMat:
+class TestLoadKittiPickle:
 
     def test_returns_navigation_data(self, kitti_data):
         kitti_data.validate()   # must not raise
 
-    def test_sample_rate_is_10hz(self, kitti_data):
-        assert kitti_data.sample_rate == 10.0
+    def test_sample_rate_is_100hz(self, kitti_data):
+        assert kitti_data.sample_rate == 100.0
 
     def test_gps_rate_is_1hz(self, kitti_data):
         assert kitti_data.gps_rate == 1.0
 
     def test_kitti_gps_update_count(self, kitti_data):
-        """4544 samples at 10 Hz, 1 Hz GPS → ~454 GPS updates."""
+        """45700 samples at 100 Hz, 1 Hz GPS → ~457 GPS updates."""
         n_gps = np.sum(kitti_data.gps_available)
-        assert 400 < n_gps < 500, f"Expected ~454 GPS updates, got {n_gps}"
+        assert 400 < n_gps < 500, f"Expected ~457 GPS updates, got {n_gps}"
 
     def test_kitti_accel_shape(self, kitti_data):
         N = len(kitti_data.accel_flu)
