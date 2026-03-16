@@ -40,6 +40,10 @@ from filters import (
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
+from dl_filters.deep_iekf  import iekf_ai_imu
+from dl_filters.tlio       import tlio_runner
+from dl_filters.deep_kf    import deep_kf_runner
+from dl_filters.tartan_imu import tartan_runner
 
 # ── Filter dispatch table ──────────────────────────────────────────────────────
 FILTERS = {
@@ -50,6 +54,11 @@ FILTERS = {
     "iekf_vanilla":  iekf_vanilla,
     "iekf_enhanced": iekf_enhanced,
     "imu_only":      imu_only,
+    # Deep learning filters
+    "iekf_ai_imu":   iekf_ai_imu,
+    "tlio":          tlio_runner,
+    "deep_kf":       deep_kf_runner,
+    "tartan_imu":    tartan_runner,
 }
 
 

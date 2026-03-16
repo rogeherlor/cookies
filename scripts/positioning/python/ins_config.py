@@ -21,7 +21,7 @@ import filter_params as fp
 
 
 # ── Filter selection ───────────────────────────────────────────────────────────
-# Available filters:
+# Classical filters:
 #   "ekf_vanilla"    — Euler-angle EKF, GPS-only  (Groves 2013)
 #   "ekf_enhanced"   — Euler-angle EKF + NHC + ZUPT
 #   "eskf_vanilla"   — Quaternion ESKF, GPS-only  (Solà 2017)
@@ -29,6 +29,11 @@ import filter_params as fp
 #   "iekf_vanilla"   — Left-invariant EKF, GPS-only  (Barrau & Bonnabel 2017)
 #   "iekf_enhanced"  — Left-invariant EKF + NHC + ZUPT
 #   "imu_only"       — Pure dead reckoning (no GNSS, no filter)
+# Deep learning filters (require trained weights in artifacts/ — see dl_filters/):
+#   "iekf_ai_imu"    — AI-IMU Dead-Reckoning (Brossard et al. IEEE TIV 2020)
+#   "tlio"           — Tight Learned Inertial Odometry (Liu et al. IEEE RA-L 2020)
+#   "deep_kf"        — Deep Kalman Filter GNSS+IMU (Hosseinyalamdary MDPI Sensors 2018)
+#   "tartan_imu"     — Tartan IMU foundation model (Zhao et al. CVPR 2025)
 FILTER = "eskf_enhanced"
 
 

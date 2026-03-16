@@ -49,7 +49,10 @@ from filters import (
     imu_only,
     rts_smoother,
 )
-from dl_filters.deep_iekf import iekf_ai_imu
+from dl_filters.deep_iekf  import iekf_ai_imu
+from dl_filters.tlio       import tlio_runner
+from dl_filters.deep_kf    import deep_kf_runner
+from dl_filters.tartan_imu import tartan_runner
 
 # ── Tuned parameters ───────────────────────────────────────────────────────────
 # Auto-loaded from filter_params.json (written by ins_genetic.py / ins_genetic_cv.py).
@@ -86,9 +89,11 @@ FILTER_CONFIGS = [
     {'name': 'IEKF Vanilla',   'key': 'iekf_vanilla',  'module': iekf_vanilla},
     {'name': 'IEKF Enhanced',  'key': 'iekf_enhanced', 'module': iekf_enhanced},
     {'name': 'IMU Only',       'key': 'imu_only',      'module': imu_only},
-    # Deep learning filter — GPS-free IMU dead-reckoning (Brossard et al. 2020)
-    # outage_config is ignored; no tunable genetic parameters.
-    {'name': 'IEKF AI-IMU',   'key': 'iekf_ai_imu',  'module': iekf_ai_imu},
+    # Deep learning filters
+    {'name': 'IEKF AI-IMU',  'key': 'iekf_ai_imu', 'module': iekf_ai_imu},
+    {'name': 'TLIO',         'key': 'tlio',         'module': tlio_runner},
+    {'name': 'Deep KF',      'key': 'deep_kf',      'module': deep_kf_runner},
+    {'name': 'Tartan IMU',   'key': 'tartan_imu',   'module': tartan_runner},
 ]
 
 
