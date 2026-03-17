@@ -121,9 +121,24 @@ def propagate_step(q, pIMU, vIMU, acc_b, omega_b, Ts, use_3d=True):
 # ── Training ──────────────────────────────────────────────────────────────────
 
 def run_sequence_tbptt(nav, model, optimizer, device, tbptt_len,
-                       lambda_vel, gps_interval, use_3d=True):
+                       lambda_vel, gps_interval=100, use_3d=True,
+                       training=True):
     """
     Run one epoch pass on a single sequence with TBPTT.
+
+    Position and velocity are kept as differentiable torch tensors so that
+    gradients flow: LSTM → db_acc_t → acc_corr_t → pIMU_t → loss_pos.
+    Orientation (quaternion) is updated in numpy since we do not backprop
+    through rotation.  At each GPS update the strapdown is hard-reset to the
+    GPS position/velocity (detached), which caps the graph depth at ~100 IMU
+    steps between GPS fixes.
+
+    Parameters
+    ----------
+    training : bool
+        If True, call backward() and optimizer.step().
+        If False (validation), only accumulate loss values.
+
     Returns cumulative loss value (float).
     """
     import pymap3d as pm
@@ -134,92 +149,108 @@ def run_sequence_tbptt(nav, model, optimizer, device, tbptt_len,
     vel_enu   = nav.vel_enu
     lla       = nav.lla
     lla0      = nav.lla0
-    N = accel_flu.shape[0]
+    N  = accel_flu.shape[0]
     Ts = 1.0 / nav.sample_rate
-    T_win = int(1.0 * nav.sample_rate)   # 1-second window for LSTM
+    T_win = int(1.0 * nav.sample_rate)   # 1-second rolling buffer for LSTM
 
-    e, n, u = pm.geodetic2enu(lla[:,0], lla[:,1], lla[:,2], lla0[0], lla0[1], lla0[2])
+    e, n, u = pm.geodetic2enu(lla[:,0], lla[:,1], lla[:,2],
+                               lla0[0], lla0[1], lla0[2])
     p_gps = np.column_stack([e, n, u])
 
-    # Initialise nominal state
-    pIMU = p_gps[0].copy()
-    vIMU = vel_enu[0].copy()
-    q    = _qfrom_euler(orient[0,0], orient[0,1], orient[0,2])
+    GRAVITY_T   = torch.tensor([0., 0., -9.81], device=device)
+    accel_flu_t = torch.from_numpy(accel_flu).float().to(device)  # (N, 3)
+
+    # Nominal state as torch tensors (grad flows through these)
+    pIMU_t = torch.tensor(p_gps[0],   dtype=torch.float32, device=device)
+    vIMU_t = torch.tensor(vel_enu[0], dtype=torch.float32, device=device)
+    q      = _qfrom_euler(orient[0, 0], orient[0, 1], orient[0, 2])
 
     hidden = model.init_hidden(batch_size=1, device=device)
-    # Detach hidden so TBPTT boundaries work
     hidden = tuple(h.detach() for h in hidden)
 
     imu_buf_acc = np.zeros((T_win, 3))
     imu_buf_gyr = np.zeros((T_win, 3))
-    db_acc_np   = np.zeros(3)
-    db_gyr_np   = np.zeros(3)
 
     total_loss  = 0.
     tbptt_count = 0
-    loss_seg    = torch.tensor(0., device=device, requires_grad=False)
-    loss_seg    = torch.zeros(1, device=device)
+    loss_seg    = None          # None until we accumulate a GPS step with grad
 
     for i in range(N - 1):
-        acc_raw = torch.from_numpy(accel_flu[i]).float().to(device)
-        gyr_raw = torch.from_numpy(gyro_flu[i]).float().to(device)
-
-        # LSTM modelling step (differentiable)
-        rpy_now   = _qto_rpy(q)
-        x_post_np = np.concatenate([pIMU, vIMU, rpy_now, np.zeros(3), np.zeros(3)])
+        # ── LSTM modelling step (produces differentiable bias corrections) ──
+        rpy_now = _qto_rpy(q)
+        x_post_np = np.concatenate([
+            pIMU_t.detach().cpu().numpy(),
+            vIMU_t.detach().cpu().numpy(),
+            rpy_now, np.zeros(3), np.zeros(3),
+        ])
         imu_mean_np = np.concatenate([imu_buf_acc.mean(0), imu_buf_gyr.mean(0)])
 
         x_post_t   = torch.from_numpy(x_post_np).float().unsqueeze(0).to(device)
         imu_mean_t = torch.from_numpy(imu_mean_np).float().unsqueeze(0).to(device)
 
         bias_t, hidden = model(x_post_t, imu_mean_t, hidden)
-        db_acc_t = bias_t[0, 0:3]   # (3,)
+        db_acc_t = bias_t[0, 0:3]   # (3,) — has grad_fn via LSTM
         db_gyr_t = bias_t[0, 3:6]   # (3,)
 
-        # numpy copies for propagation
-        db_acc_np  = db_acc_t.detach().cpu().numpy()
-        db_gyr_np  = db_gyr_t.detach().cpu().numpy()
+        # Gyro correction in numpy (orientation, no backprop needed)
+        db_gyr_np = db_gyr_t.detach().cpu().numpy()
+        gyr_corr  = gyro_flu[i] - db_gyr_np
 
-        acc_corr = accel_flu[i] - db_acc_np
-        gyr_corr = gyro_flu[i]  - db_gyr_np
-
+        # Update rolling IMU buffer
         buf_idx = i % T_win
         imu_buf_acc[buf_idx] = accel_flu[i]
         imu_buf_gyr[buf_idx] = gyro_flu[i]
 
-        q, pIMU, vIMU, _ = propagate_step(q, pIMU, vIMU, acc_corr, gyr_corr, Ts, use_3d)
+        # Quaternion / orientation update (numpy)
+        dtheta = (gyr_corr * Ts if use_3d
+                  else np.array([0., 0., gyr_corr[2] * Ts]))
+        q     = _qnorm(_qmul(q, _qfrom_axis_angle(dtheta)))
+        Rbn_t = torch.from_numpy(_qto_Rbn(q)).float().to(device)   # (3, 3)
 
-        # GPS supervision at 1-Hz boundaries
+        # ── Strapdown integration in torch — grad flows from db_acc_t ──────
+        acc_corr_t = accel_flu_t[i] - db_acc_t          # (3,) — keeps grad_fn
+        acc_enu_t  = Rbn_t @ acc_corr_t + GRAVITY_T     # (3,)
+        pIMU_t = pIMU_t + Ts * vIMU_t + 0.5 * Ts ** 2 * acc_enu_t
+        vIMU_t = vIMU_t + Ts * acc_enu_t
+
+        # ── GPS supervision ─────────────────────────────────────────────────
         if nav.gps_available[i + 1]:
-            p_gps_i  = p_gps[i + 1]
-            p_pred_t = torch.from_numpy(pIMU).float().to(device)
-            p_gps_t  = torch.from_numpy(p_gps_i).float().to(device)
-            loss_pos = ((p_pred_t - p_gps_t) ** 2).mean()
+            p_gps_t = torch.tensor(p_gps[i + 1],
+                                   dtype=torch.float32, device=device)
+            v_gps_t = torch.tensor(vel_enu[i + 1],
+                                   dtype=torch.float32, device=device)
 
-            v_gps_t  = torch.from_numpy(vel_enu[i + 1]).float().to(device)
-            v_pred_t = torch.from_numpy(vIMU).float().to(device)
-            loss_vel = ((v_pred_t - v_gps_t) ** 2).mean()
+            loss_pos  = ((pIMU_t - p_gps_t) ** 2).mean()
+            loss_vel  = ((vIMU_t - v_gps_t) ** 2).mean()
+            step_loss = loss_pos + lambda_vel * loss_vel
 
-            loss_seg = loss_seg + loss_pos + lambda_vel * loss_vel
+            loss_seg = step_loss if loss_seg is None else loss_seg + step_loss
             tbptt_count += 1
 
-        # TBPTT: backprop every tbptt_len GPS updates
-        if tbptt_count >= tbptt_len:
+            # Hard GPS reset: detach so the graph does not grow unboundedly.
+            # Gradient of this step's loss has already been attached to loss_seg.
+            pIMU_t = p_gps_t.detach().clone()
+            vIMU_t = v_gps_t.detach().clone()
+
+        # ── TBPTT boundary ──────────────────────────────────────────────────
+        if tbptt_count >= tbptt_len and loss_seg is not None:
+            if training:
+                optimizer.zero_grad()
+                loss_seg.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.)
+                optimizer.step()
+                hidden = tuple(h.detach() for h in hidden)
+            total_loss  += loss_seg.item()
+            loss_seg     = None
+            tbptt_count  = 0
+
+    # ── Final partial segment ────────────────────────────────────────────────
+    if loss_seg is not None:
+        if training:
             optimizer.zero_grad()
             loss_seg.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.)
             optimizer.step()
-            total_loss  += loss_seg.item()
-            loss_seg     = torch.zeros(1, device=device)
-            tbptt_count  = 0
-            hidden       = tuple(h.detach() for h in hidden)
-
-    # Final segment
-    if tbptt_count > 0:
-        optimizer.zero_grad()
-        loss_seg.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.)
-        optimizer.step()
         total_loss += loss_seg.item()
 
     return total_loss
@@ -286,21 +317,19 @@ def train(args):
             train_loss += run_sequence_tbptt(
                 nav, model, optimizer, device,
                 tbptt_len=args.tbptt_len, lambda_vel=args.lambda_vel,
-                gps_interval=int(nav.sample_rate / nav.gps_rate)
-                if hasattr(nav, 'gps_rate') else 100,
+                training=True,
             )
         scheduler.step()
 
         if val_navs:
             model.eval()
             val_loss = 0.
-            with torch.no_grad():
-                for nav in val_navs:
-                    val_loss += run_sequence_tbptt(
-                        nav, model, optimizer, device,
-                        tbptt_len=args.tbptt_len, lambda_vel=args.lambda_vel,
-                        gps_interval=100,
-                    )
+            for nav in val_navs:
+                val_loss += run_sequence_tbptt(
+                    nav, model, optimizer, device,
+                    tbptt_len=args.tbptt_len, lambda_vel=args.lambda_vel,
+                    training=False,
+                )
             print(f"Epoch {epoch+1:4d}/{args.epochs}  "
                   f"train={train_loss:.4f}  val={val_loss:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")

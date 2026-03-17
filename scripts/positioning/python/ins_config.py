@@ -20,7 +20,7 @@ import data_loader
 import filter_params as fp
 
 
-# ── Filter selection ───────────────────────────────────────────────────────────
+# ── Filter / smoother selection ────────────────────────────────────────────────
 # Classical filters:
 #   "ekf_vanilla"    — Euler-angle EKF, GPS-only  (Groves 2013)
 #   "ekf_enhanced"   — Euler-angle EKF + NHC + ZUPT
@@ -29,6 +29,10 @@ import filter_params as fp
 #   "iekf_vanilla"   — Left-invariant EKF, GPS-only  (Barrau & Bonnabel 2017)
 #   "iekf_enhanced"  — Left-invariant EKF + NHC + ZUPT
 #   "imu_only"       — Pure dead reckoning (no GNSS, no filter)
+# Smoothers (see smoothers/):
+#   "rts_smoother"   — Rauch-Tung-Striebel batch smoother (uses all GPS — not causal)
+#   "isam2"          — iSAM2 online/causal smoother (Kaess et al. IJRR 2012)
+#                      Requires: conda install -c conda-forge gtsam
 # Deep learning filters (require trained weights in artifacts/ — see dl_filters/):
 #   "iekf_ai_imu"    — AI-IMU Dead-Reckoning (Brossard et al. IEEE TIV 2020)
 #   "tlio"           — Tight Learned Inertial Odometry (Liu et al. IEEE RA-L 2020)

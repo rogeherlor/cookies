@@ -47,8 +47,8 @@ from filters import (
     eskf_vanilla, eskf_enhanced,
     iekf_vanilla, iekf_enhanced,
     imu_only,
-    rts_smoother,
 )
+from smoothers import rts_smoother, isam2_runner
 from dl_filters.deep_iekf  import iekf_ai_imu
 from dl_filters.tlio       import tlio_runner
 from dl_filters.deep_kf    import deep_kf_runner
@@ -94,6 +94,8 @@ FILTER_CONFIGS = [
     {'name': 'TLIO',         'key': 'tlio',         'module': tlio_runner},
     {'name': 'Deep KF',      'key': 'deep_kf',      'module': deep_kf_runner},
     {'name': 'Tartan IMU',   'key': 'tartan_imu',   'module': tartan_runner},
+    # Online smoothers
+    {'name': 'iSAM2',        'key': 'isam2',        'module': isam2_runner},
 ]
 
 

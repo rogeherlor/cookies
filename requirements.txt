@@ -10,12 +10,16 @@ fonttools==4.60.1
 gast==0.6.0
 google-pasta==0.2.0
 grpcio==1.75.1
+# gtsam: install via conda, NOT pip — pip wheel segfaults with numpy>=2.0
+#   conda install -c conda-forge gtsam
 h5py==3.15.1
+huggingface_hub==1.7.1
 idna==3.11
 joblib==1.5.2
 keras==3.11.3
 kiwisolver==1.4.9
 libclang==18.1.1
+liegroups @ git+https://github.com/utiasSTARS/liegroups.git
 Markdown==3.9
 markdown-it-py==4.0.0
 MarkupSafe==3.0.3
@@ -23,6 +27,7 @@ matplotlib==3.10.7
 mdurl==0.1.2
 ml_dtypes==0.5.3
 namex==0.1.0
+numba==0.64.0
 numpy==2.3.4
 onnx==1.20.1
 opt_einsum==3.4.0
@@ -48,6 +53,7 @@ tensorflow==2.20.0
 termcolor==3.1.0
 threadpoolctl==3.6.0
 torch==2.10.0
+tqdm==4.67.3
 typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0

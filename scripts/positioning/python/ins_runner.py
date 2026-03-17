@@ -40,12 +40,13 @@ from filters import (
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
+from smoothers import rts_smoother, isam2_runner
 from dl_filters.deep_iekf  import iekf_ai_imu
 from dl_filters.tlio       import tlio_runner
 from dl_filters.deep_kf    import deep_kf_runner
 from dl_filters.tartan_imu import tartan_runner
 
-# ── Filter dispatch table ──────────────────────────────────────────────────────
+# ── Filter / smoother dispatch table ──────────────────────────────────────────
 FILTERS = {
     "ekf_vanilla":   ekf_vanilla,
     "ekf_enhanced":  ekf_enhanced,
@@ -54,6 +55,9 @@ FILTERS = {
     "iekf_vanilla":  iekf_vanilla,
     "iekf_enhanced": iekf_enhanced,
     "imu_only":      imu_only,
+    # Smoothers
+    "rts_smoother":  rts_smoother,
+    "isam2":         isam2_runner,
     # Deep learning filters
     "iekf_ai_imu":   iekf_ai_imu,
     "tlio":          tlio_runner,

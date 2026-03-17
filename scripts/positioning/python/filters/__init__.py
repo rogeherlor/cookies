@@ -3,5 +3,4 @@ from . import (
     eskf_vanilla, eskf_enhanced,
     iekf_vanilla, iekf_enhanced,
     imu_only,
-    rts_smoother,
 )

@@ -38,6 +38,8 @@ Weights search order (base model):
   1. TARTAN_IMU_WEIGHTS env var
   2. external/tartan_imu/tartan_imu_base.pt
   3. artifacts/tartan_imu/tartan_imu_base.pt
+  4. external/tartan_imu/checkpoints/foundation_model/checkpoint_<N>.pt
+     (HuggingFace snapshot_download layout — highest N wins)
 
 LoRA adapter search (optional, applied after base model):
   1. artifacts/tartan_imu/lora_fold_<seq_id>.pt
@@ -115,13 +117,32 @@ class _TartanImuStub(nn.Module):
 # ── Weight discovery ──────────────────────────────────────────────────────────
 
 def _find_tartan_weights() -> Path:
-    """Raise RuntimeError if no pretrained weights found (never trains from scratch)."""
+    """
+    Locate the pretrained Tartan IMU base checkpoint.  Search order:
+      1. TARTAN_IMU_WEIGHTS env var
+      2. external/tartan_imu/tartan_imu_base.pt  (legacy name)
+      3. artifacts/tartan_imu/tartan_imu_base.pt (legacy name)
+      4. external/tartan_imu/checkpoints/foundation_model/checkpoint_<N>.pt
+         (HuggingFace snapshot layout — highest N wins)
+    Raises RuntimeError if nothing found (never trains from scratch).
+    """
     env = os.environ.get('TARTAN_IMU_WEIGHTS')
     if env and Path(env).exists():
         return Path(env)
+
+    # Legacy flat-file names
     for c in [_EXTERNAL / 'tartan_imu_base.pt', _ARTIFACTS / 'tartan_imu_base.pt']:
         if c.exists():
             return c
+
+    # HuggingFace snapshot layout: checkpoints/foundation_model/checkpoint_<N>.pt
+    ckpt_dir = _EXTERNAL / 'checkpoints' / 'foundation_model'
+    if ckpt_dir.is_dir():
+        candidates = sorted(ckpt_dir.glob('checkpoint_*.pt'),
+                            key=lambda p: int(p.stem.split('_')[-1]))
+        if candidates:
+            return candidates[-1]   # highest checkpoint number
+
     raise RuntimeError(
         "Tartan IMU pretrained weights not found — NEVER train from scratch!\n"
         "Download from HuggingFace:\n"
