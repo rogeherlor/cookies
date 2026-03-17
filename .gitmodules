@@ -1,0 +1,9 @@
+[submodule "external/ai-imu-dr"]
+	path = external/ai-imu-dr
+	url = https://github.com/rogeherlor/ai-imu-dr.git
+[submodule "external/tlio"]
+	path = external/tlio
+	url = https://github.com/CathIAS/TLIO.git
+[submodule "external/tartan_imu"]
+	path = external/tartan_imu
+	url = https://huggingface.co/datasets/raphael-blanchard/TartanIMU
