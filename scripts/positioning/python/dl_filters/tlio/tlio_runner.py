@@ -119,8 +119,16 @@ def _find_weights(seq_id: str = None) -> Path:
 def _load_model(weights_path: Path, window_size: int, device: str = 'cpu'):
     """Load TLIO ResNet1D model and return it in eval mode."""
     import torch
-    _add_tlio_src()
-    from network.model_factory import get_model
+    import importlib.util
+
+    # Load model_factory directly from our local network/ package to avoid
+    # external/tlio/src/network/__init__.py which imports the full TLIO stack
+    # (utils.logging etc.) that conflicts with other packages on sys.path.
+    _mf_path = _HERE / 'network/model_factory.py'
+    _spec = importlib.util.spec_from_file_location('_tlio_model_factory', _mf_path)
+    _mf = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mf)
+    get_model = _mf.get_model
 
     # in_dim formula from imu_tracker.py line 118
     in_dim = window_size // 32 + 1
@@ -240,10 +248,15 @@ def _predict_displacement(model, imu_window: np.ndarray, device: str = 'cpu'):
     x = torch.from_numpy(imu_window[None]).float().to(device)  # (1, 6, W)
     with torch.no_grad():
         mean, logstd = model(x)   # each (1, 3)
-    dp_ga    = mean[0].cpu().numpy().astype(np.float64)
-    log_std  = logstd[0].cpu().numpy().astype(np.float64)
+    dp_ga   = mean[0].cpu().numpy().astype(np.float64)
+    log_std = logstd[0].cpu().numpy().astype(np.float64)
     # Eq. 3 of the paper: Σ = diag(exp(2·û_i))
-    std2     = np.exp(2. * log_std)
+    # Clamp logstd to [-10, 10] to avoid exp overflow/underflow, then
+    # apply a minimum variance floor (0.01 m² ≈ 10 cm std) for filter stability.
+    log_std  = np.clip(log_std, -10.0, 10.0)
+    std2     = np.maximum(np.exp(2.0 * log_std), 1e-4)
+    if not np.all(np.isfinite(std2)):
+        std2 = np.full(3, 1.0)   # safe fallback: 1 m std
     Sigma_ga = np.diag(std2)
     return dp_ga, Sigma_ga
 
@@ -361,6 +374,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         p_cfg['P_acc_std'],    p_cfg['P_acc_std'],    p_cfg['P_acc_std'],
         p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],
     ]) ** 2
+    P_init = P.copy()  # keep reference for resets
 
     R_pos  = np.eye(3) * p_cfg['Rpos']
 
@@ -368,10 +382,9 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     beta_gyr = p_cfg['beta_gyr']
 
     # ── Displacement update book-keeping ──────────────────────────────────
-    # anchor_pos : ENU position saved at each stride boundary
-    # anchor_idx : IMU index of the last anchor
-    anchor_pos = pIMU.copy()
-    anchor_idx = 0
+    # The network predicts displacement over the full window [ws, ws+W].
+    # dp_estimated must span the same W samples: pIMU[now] - pos[ws].
+    # (Using a stride-boundary anchor only covers S samples — 4× too short.)
     next_update_idx = W   # first network update happens when the window is full
 
     # Pre-build gravity-aligned windows for every stride boundary
@@ -410,6 +423,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         Fd[6:9, 6:9] = _qto_Rbn(_qfrom_axis_angle(omega_b * Ts)).T
 
         P  = Fd @ P @ Fd.T + Q
+        P  = 0.5 * (P + P.T)   # keep symmetric after propagation
+        np.clip(P, -1e8, 1e8, out=P)   # prevent floating-point overflow
+        # Guard against overflow/NaN (can happen during long outages with
+        # first-order Euler discretization; reset to a safe diagonal if needed)
+        if not np.all(np.isfinite(P)):
+            P = P_init.copy()
         update_occurred = False
 
         # ── C. TLIO displacement update (at stride boundaries) ─────────
@@ -436,32 +455,43 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             dp_enu    = Rz @ dp_ga
             Sigma_enu = Rz @ Sigma_ga @ Rz.T
 
-            # Innovation: measured displacement - estimated displacement
-            dp_estimated = pIMU - anchor_pos    # estimated ENU displacement since anchor
+            # Innovation: network predicts displacement over window [ws, ws+W].
+            # dp_estimated must span the same W samples using the stored
+            # corrected position at ws (pos[ws] set in step F at that time).
+            dp_estimated = pIMU - pos[ws]
             z = dp_enu - dp_estimated
 
-            # H selects position error state (indices 0:3)
-            S = P[0:3, 0:3] + Sigma_enu
-            K = P[:, 0:3] @ np.linalg.inv(S)
-            dx    = dx + K @ (z - dx[0:3])
-            P     = P - K @ S @ K.T
-            P     = 0.5 * (P + P.T)
+            # Outlier gate: skip if innovation is implausibly large
+            # (max plausible W-sample displacement at 30m/s = 30*W/fs ≈ 60m)
+            if np.linalg.norm(z) > 60.0:
+                next_update_idx = i + 1 + S
+                continue
+
+            # Joseph form: P = (I-KH)P(I-KH)^T + K*R*K^T  (numerically stable)
+            # Add min-eigenvalue regularisation so S_innov stays invertible even
+            # when the network gives near-zero covariances after many updates.
+            S_innov = P[0:3, 0:3] + Sigma_enu + 1e-6 * np.eye(3)
+            K    = np.linalg.lstsq(S_innov.T, P[0:3, :], rcond=None)[0].T  # (15, 3)
+            dx   = dx + K @ (z - dx[0:3])
+            IKH  = np.eye(15); IKH[:, 0:3] -= K
+            P    = IKH @ P @ IKH.T + K @ Sigma_enu @ K.T
+            P    = 0.5 * (P + P.T)
+            np.fill_diagonal(P, np.maximum(np.diag(P), 1e-12))
             update_occurred = True
 
-            # Advance anchor and next update
-            anchor_pos = pIMU.copy()
-            anchor_idx = i + 1
             next_update_idx = i + 1 + S
 
         # ── D. GPS position update ─────────────────────────────────────
         if gps_avail[i + 1]:
             z_pos = p_gps_enu[i + 1] - pIMU
             innov = z_pos - dx[0:3]
-            S_gps = P[0:3, 0:3] + R_pos
-            K_gps = P[:, 0:3] @ np.linalg.inv(S_gps)
+            S_gps = P[0:3, 0:3] + R_pos + 1e-6 * np.eye(3)
+            K_gps = np.linalg.lstsq(S_gps.T, P[0:3, :], rcond=None)[0].T  # (15, 3)
             dx    = dx + K_gps @ innov
-            P     = P - K_gps @ S_gps @ K_gps.T
+            IKH   = np.eye(15); IKH[:, 0:3] -= K_gps
+            P     = IKH @ P @ IKH.T + K_gps @ R_pos @ K_gps.T
             P     = 0.5 * (P + P.T)
+            np.fill_diagonal(P, np.maximum(np.diag(P), 1e-12))
             update_occurred = True
 
         # ── E. Error injection (Solà §7.3) ────────────────────────────
@@ -477,6 +507,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             G           = np.eye(15)
             G[6:9, 6:9] = np.eye(3) - 0.5 * _skew(delta_theta)
             P           = G @ P @ G.T
+            np.clip(P, -1e8, 1e8, out=P)
+            if not np.all(np.isfinite(P)):
+                P = P_init.copy()
+            # Recover state if update produced NaN/Inf
+            if not (np.all(np.isfinite(pIMU)) and np.all(np.isfinite(vIMU))):
+                pIMU = pos[i].copy() if np.all(np.isfinite(pos[i])) else pos[0].copy()
+                vIMU = vel[i].copy() if np.all(np.isfinite(vel[i])) else vel[0].copy()
+                P = P_init.copy()
             dx[:]       = 0.
 
         # ── F. Store outputs ──────────────────────────────────────────

@@ -65,6 +65,11 @@ def _load_tuned_params(nav_data, mode_3d):
     1. LOO key "__loo_held_<dataset_name>__" — from ins_genetic_cv.py --held-out
     2. Per-dataset key "<dataset_name>" — from ins_genetic.py
     3. CV aggregate key "__cv_kitti__" — from ins_genetic_cv.py without --held-out
+
+    DL filters (tlio, deep_kf, tartan_imu) share the same classical-filter
+    parameter names (Qpos, Qvel, Rpos, P_pos_std, …) as the ESKF/EKF.  When
+    no DL-specific tuned params exist, derive them from the best available
+    classical filter (eskf_enhanced → eskf_vanilla → ekf_enhanced → ekf_vanilla).
     """
     result = {}
     loo_key = f'__loo_held_{nav_data.dataset_name}__'
@@ -77,6 +82,39 @@ def _load_tuned_params(nav_data, mode_3d):
              or fp.get(key, mode_3d, cv_key))
         if p is not None:
             result[key] = p
+
+    # ── Derive DL-filter classical params from best tuned classical filter ────
+    # TLIO / Deep-KF / Tartan-IMU all have a traditional KF layer whose
+    # parameters (Qpos, Qvel, Rpos, P_pos_std …) are identical in name to
+    # the ESKF/EKF tuned set.  Use the best available tuned classical filter
+    # so DL filters benefit from genetic optimisation without a separate run.
+    _best_classical = (result.get('eskf_enhanced')
+                       or result.get('eskf_vanilla')
+                       or result.get('ekf_enhanced')
+                       or result.get('ekf_vanilla'))
+
+    if _best_classical is not None:
+        # Keys shared directly between classical filters and DL filter params
+        _shared = ['Qpos', 'Qvel', 'Qacc', 'Rpos',
+                   'beta_acc', 'beta_gyr',
+                   'P_pos_std', 'P_vel_std', 'P_orient_std',
+                   'P_acc_std', 'P_gyr_std']
+        _dl_base = {k: _best_classical[k] for k in _shared if k in _best_classical}
+
+        # Anisotropic orient / gyro noise: average X/Y and Z components
+        if 'QorientXY' in _best_classical:
+            _dl_base['Qorient'] = (
+                _best_classical.get('QorientXY', 1e-5) +
+                _best_classical.get('QorientZ', 1e-5)) / 2.0
+        if 'QgyrXY' in _best_classical:
+            _dl_base['Qgyr'] = (
+                _best_classical.get('QgyrXY', 1e-7) +
+                _best_classical.get('QgyrZ', 1e-7)) / 2.0
+
+        for dl_key in ['tlio', 'deep_kf', 'tartan_imu']:
+            if dl_key not in result:   # don't overwrite if already tuned directly
+                result[dl_key] = _dl_base.copy()
+
     return result
 
 

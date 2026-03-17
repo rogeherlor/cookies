@@ -353,13 +353,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 import torch
                 from utils_torch_filter import TORCHIEKF
 
-                torch_iekf = TORCHIEKF()
                 try:
                     from main_kitti import KITTIParameters as _KP
-                    torch_iekf.filter_parameters = _KP()
-                    torch_iekf.set_param_attr()
+                    torch_iekf = TORCHIEKF(_KP)
                 except Exception:
-                    pass
+                    torch_iekf = TORCHIEKF()
+                if torch_iekf.cov0_measurement is None:
+                    # Fallback baseline: KITTIParameters defaults
+                    torch_iekf.cov0_measurement = torch.tensor([0.2, 300.0]).double()
                 if isinstance(torch_iekf.g, np.ndarray):
                     torch_iekf.g = torch.from_numpy(torch_iekf.g).double()
 

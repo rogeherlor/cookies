@@ -148,7 +148,12 @@ def build_dataset(train_seqs: list, val_seq: str = None, sample_rate: float = 10
 # ── Training loop ─────────────────────────────────────────────────────────────
 
 def train(args):
-    from network.model_factory import get_model
+    import importlib.util
+    _mf_path = _HERE / 'network/model_factory.py'
+    _spec = importlib.util.spec_from_file_location('_tlio_model_factory', _mf_path)
+    _mf = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mf)
+    get_model = _mf.get_model
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on device: {device}")
