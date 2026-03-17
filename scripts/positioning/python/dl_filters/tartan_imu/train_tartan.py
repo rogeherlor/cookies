@@ -49,7 +49,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from scipy.interpolate import interp1d
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-_HERE      = Path(__file__).parent
+_HERE      = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent.parent.parent.parent
 _SCRIPTS   = _REPO_ROOT / 'scripts/positioning/python'
 _ARTIFACTS = _REPO_ROOT / 'artifacts/tartan_imu'

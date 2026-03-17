@@ -50,7 +50,7 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-_HERE      = Path(__file__).parent
+_HERE      = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent.parent.parent.parent
 _SCRIPTS   = _REPO_ROOT / 'scripts/positioning/python'
 

@@ -62,7 +62,7 @@ import numpy as np
 from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-_HERE        = Path(__file__).parent
+_HERE        = Path(__file__).resolve().parent
 _REPO_ROOT   = _HERE.parent.parent.parent.parent.parent   # c:/Github/cookies
 _AI_IMU_SRC  = _REPO_ROOT / 'external/ai-imu-dr/src'
 _ARTIFACTS   = _REPO_ROOT / 'artifacts/deep_iekf'

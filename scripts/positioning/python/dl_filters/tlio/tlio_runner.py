@@ -51,7 +51,7 @@ import numpy as np
 from pathlib import Path
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-_HERE      = Path(__file__).parent
+_HERE      = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent.parent.parent.parent   # cookies/
 _TLIO_SRC  = _REPO_ROOT / 'external/tlio/src'
 _ARTIFACTS = _REPO_ROOT / 'artifacts/tlio'

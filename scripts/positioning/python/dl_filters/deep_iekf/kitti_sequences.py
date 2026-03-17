@@ -35,7 +35,7 @@ import torch
 from pathlib import Path
 
 # Path to AI-IMU source
-_AI_IMU_SRC = Path(__file__).parent.parent.parent.parent.parent.parent / 'external/ai-imu-dr/src'
+_AI_IMU_SRC = Path(__file__).resolve().parent.parent.parent.parent.parent.parent / 'external/ai-imu-dr/src'
 
 
 def _add_aimu_path():

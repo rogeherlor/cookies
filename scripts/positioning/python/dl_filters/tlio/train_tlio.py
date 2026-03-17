@@ -54,7 +54,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, TensorDataset
 
 # ── Path setup ───────────────────────────────────────────────────────────────
-_HERE      = Path(__file__).parent
+_HERE      = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent.parent.parent.parent
 _TLIO_SRC  = _REPO_ROOT / 'external/tlio/src'
 _SCRIPTS   = _REPO_ROOT / 'scripts/positioning/python'
