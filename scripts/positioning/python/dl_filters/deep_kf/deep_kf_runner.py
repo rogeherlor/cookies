@@ -9,32 +9,38 @@ Paper : Hosseinyalamdary, "Deep Kalman Filter: Simultaneous Multi-Sensor
 Code  : https://github.com/siavashha/DeepKF — incomplete Jupyter notebook,
         no neural network code.  Full implementation from scratch in this file.
 
-Differences from the original paper:
---------------------------------------
+Architecture (Eqs. 18-21, Figure 3)
+------------------------------------
+The LSTM receives the posterior state x_{t-1}^+ (15D) and predicts the next
+state x_t^{+-} (15D) via residual prediction:
+
+    x_t^{+-} = decoder(LSTM(x_{t-1}^+)) + x_{t-1}^+
+
+This prediction replaces the strapdown-propagated prior x_t^- when GPS is
+not available.  When GPS IS available, the standard ESKF update produces
+x_t^+ which is more trustworthy than the DNN prediction.
+
+Differences from the original paper
+------------------------------------
 1. F matrix: Solà 2017 ESKF linearized F matrix (same as eskf_enhanced.py)
    is used for error-state covariance propagation.  The original paper learns
-   a generic W_xx matrix via gradient descent (Eqs. 24–32).  Solà's F is
+   a generic W_xx matrix via gradient descent (Eqs. 24-32).  Solà's F is
    more numerically stable and leverages the established kinematic model.
 
 2. State space: 15-state ESKF [δp, δv, δφ, δb_a, δb_g] in navigation space,
    identical to eskf_enhanced.py.  The original paper uses a generic latent
    vector state.
 
-3. LSTM role: learns [δb_acc(3), δb_gyr(3)] additive IMU bias corrections in
-   the FLU body frame.  These replace/augment the Gauss-Markov bias model used
-   in classical ESKF filters.  The original paper has the LSTM learn the full
-   system model.
-
-4. GPS update: standard ESKF position update (H = [I_3 | 0_3×12]) applied
+3. GPS update: standard ESKF position update (H = [I_3 | 0_3×12]) applied
    when gps_available[i] is True.  Paper also uses GPS; update structure same.
 
-5. Training: LOO CV on KITTI clean sequences (01,04,06,07,08,09,10).
+4. Training: LOO CV on KITTI clean sequences (01,04,06,07,08,09,10).
    Original paper: single urban driving dataset.
 
-6. Coordinate frames: FLU body / ENU navigation.  Original paper unspecified
+5. Coordinate frames: FLU body / ENU navigation.  Original paper unspecified
    (likely ECEF-derived).
 
-7. Outage simulation and DR_MODE: added for project compatibility, not in paper.
+6. Outage simulation and DR_MODE: added for project compatibility, not in paper.
 
 Weights search order:
   1. DEEP_KF_WEIGHTS env var
@@ -59,7 +65,6 @@ DEFAULT_PARAMS = {
     # LSTM architecture
     'latent_dim': 128,
     'num_layers':  2,
-    'imu_window_seconds': 1.0,   # rate-agnostic (= 100 samples at 100 Hz)
     # Process noise — same structure as eskf_enhanced.py
     'Qpos':      1e-4,
     'Qvel':      1e-3,
@@ -74,7 +79,7 @@ DEFAULT_PARAMS = {
     'P_orient_std': 0.1,
     'P_acc_std':    0.05,
     'P_gyr_std':    0.01,
-    # Classical Gauss-Markov decay (kept for bias fallback when LSTM not available)
+    # Classical Gauss-Markov decay (for covariance propagation)
     'beta_acc': -1e-6,
     'beta_gyr': -1e-4,
 }
@@ -135,13 +140,12 @@ def _find_weights(seq_id: str = None) -> Path:
 def _load_model(weights_path: Path, latent_dim: int, num_layers: int,
                 device: str = 'cpu'):
     import torch
-    # Local import to avoid circular dependency
     _dkf_dir = str(_HERE)
     if _dkf_dir not in sys.path:
         sys.path.insert(0, _dkf_dir)
     from model import DeepKFNet
 
-    model = DeepKFNet(nav_state_dim=15, imu_dim=6,
+    model = DeepKFNet(nav_state_dim=15,
                       hidden_dim=latent_dim, num_layers=num_layers)
     ckpt = torch.load(weights_path, map_location=device)
     if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
@@ -220,12 +224,16 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     """
     Run the Deep KF filter on nav_data.
 
+    The LSTM predicts the full 15D state x_t^{+-} at each step, replacing the
+    strapdown-propagated prior x_t^-.  Covariance propagation still uses the
+    linearized Solà F matrix.
+
     Parameters
     ----------
     nav_data       : NavigationData (data_loader.py)
     params         : Optional dict overriding DEFAULT_PARAMS.
     outage_config  : Optional {'start': t1_s, 'duration': d_s}.
-    use_3d_rotation: True → full 3D strapdown; False → yaw-only (2D).
+    use_3d_rotation: True -> full 3D strapdown; False -> yaw-only (2D).
 
     Returns
     -------
@@ -253,9 +261,6 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     import pymap3d as pm
     N  = accel_flu.shape[0]
     Ts = 1.0 / sample_rate
-
-    # IMU window size for LSTM (one step per window_seconds)
-    T_win = int(p_cfg['imu_window_seconds'] * sample_rate)   # 100 @ 100 Hz
 
     # ── Load model ────────────────────────────────────────────────────────
     seq_id = getattr(nav_data, 'dataset_name', None)
@@ -334,42 +339,24 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
     # ── LSTM state ─────────────────────────────────────────────────────────
     hidden = model.init_hidden(batch_size=1, device=device)
-    # LSTM bias corrections (FLU body frame)
-    db_acc = np.zeros(3)
-    db_gyr = np.zeros(3)
-
-    # IMU window buffer for LSTM modelling step
-    imu_buf_acc = np.zeros((T_win, 3))  # rolling buffer
-    imu_buf_gyr = np.zeros((T_win, 3))
 
     print(f"Deep KF: running filter on {N} samples ...")
 
     for i in range(N - 1):
 
-        # ── A. Correct IMU with LSTM bias estimate ─────────────────────
-        acc_b_raw = accel_flu[i]
-        gyr_b_raw = gyro_flu[i]
-        acc_b   = acc_b_raw - db_acc      # corrected acceleration (FLU)
-        omega_b = gyr_b_raw - db_gyr      # corrected angular rate (FLU)
+        # ── A. Correct IMU with current bias estimate ─────────────────
+        acc_b   = accel_flu[i] - b_a      # corrected acceleration (FLU)
+        omega_b = gyro_flu[i]  - b_g      # corrected angular rate (FLU)
 
-        # Update rolling IMU buffer
-        buf_idx = i % T_win
-        imu_buf_acc[buf_idx] = acc_b_raw
-        imu_buf_gyr[buf_idx] = gyr_b_raw
-
-        # ── B. Strapdown propagation (Solà 2017) ──────────────────────
+        # ── B. Covariance propagation (Solà F matrix) ─────────────────
+        # Strapdown quantities needed for F (Rbn, acc_b, omega_b)
         if use_3d_rotation:
             dtheta = omega_b * Ts
         else:
             dtheta = np.array([0., 0., omega_b[2] * Ts])
 
-        q    = _qnorm(_qmul(q, _qfrom_axis_angle(dtheta)))
-        Rbn  = _qto_Rbn(q)
-        accENU = Rbn @ acc_b
-        pIMU   = pIMU + Ts * vIMU + 0.5 * Ts**2 * (accENU + GRAVITY)
-        vIMU   = vIMU + Ts * (accENU + GRAVITY)
+        Rbn = _qto_Rbn(q)
 
-        # ── C. Covariance propagation (Solà F matrix) ─────────────────
         F = np.zeros((15, 15))
         F[0:3,   3:6]   = np.eye(3)
         F[3:6,   6:9]   = -Rbn @ _skew(acc_b)
@@ -382,10 +369,31 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         Fd           = np.eye(15) + F * Ts
         Fd[6:9, 6:9] = _qto_Rbn(_qfrom_axis_angle(omega_b * Ts)).T
 
-        P  = Fd @ P @ Fd.T + Q
+        P = Fd @ P @ Fd.T + Q
+
+        # ── C. DNN modelling step (Eqs. 20-21, Figure 3) ─────────────
+        # Build x_{t-1}^+ = current posterior nominal state (15D)
+        rpy_now = _qto_rpy(q)
+        x_post_np = np.concatenate([pIMU, vIMU, rpy_now, b_a, b_g])  # (15,)
+
+        with torch.no_grad():
+            x_post_t = torch.from_numpy(x_post_np).float().unsqueeze(0).to(device)
+            state_pred_t, hidden = model(x_post_t, hidden)
+            state_pred = state_pred_t[0].cpu().numpy()  # (15,)
+
+        # ── D. Apply DNN prediction or strapdown ─────────────────────
+        # DNN replaces the prior x_t^- (strapdown would normally update
+        # pIMU/vIMU/q here, but DNN provides a better prediction).
+        # Unpack the 15D predicted state.
+        pIMU  = state_pred[0:3].copy()
+        vIMU  = state_pred[3:6].copy()
+        q     = _qfrom_euler(state_pred[6], state_pred[7], state_pred[8])
+        b_a   = state_pred[9:12].copy()
+        b_g   = state_pred[12:15].copy()
+
         update_occurred = False
 
-        # ── D. GPS position update ─────────────────────────────────────
+        # ── E. GPS position update ────────────────────────────────────
         if gps_avail[i + 1]:
             z_pos = p_gps_enu[i + 1] - pIMU
             innov = z_pos - dx[0:3]
@@ -399,7 +407,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             P         = 0.5 * (P + P.T)
             update_occurred = True
 
-        # ── E. Error injection ──────────────────────────────────────────
+        # ── F. Error injection ────────────────────────────────────────
         if update_occurred:
             pIMU += dx[0:3]
             vIMU += dx[3:6]
@@ -414,34 +422,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             P           = G @ P @ G.T
             dx[:]       = 0.
 
-        # ── F. LSTM modelling step (paper Figure 3 bottom block) ───────
-        # Run at each IMU step after the classical update.
-        # Build nav-state vector (post-update nominal state packed as dx-like)
-        # We use the nominal state values directly (not error state).
-        rpy_now = _qto_rpy(q)
-        x_post_np = np.concatenate([pIMU, vIMU, rpy_now, b_a, b_g])  # (15,)
-
-        # IMU window mean (mean of the rolling buffer)
-        imu_mean_np = np.concatenate([
-            imu_buf_acc.mean(axis=0),   # (3,)
-            imu_buf_gyr.mean(axis=0),   # (3,)
-        ])  # (6,)
-
-        with torch.no_grad():
-            x_post_t  = torch.from_numpy(x_post_np).float().unsqueeze(0).to(device)
-            imu_mean_t = torch.from_numpy(imu_mean_np).float().unsqueeze(0).to(device)
-            bias_t, hidden = model(x_post_t, imu_mean_t, hidden)
-            bias_np = bias_t[0].cpu().numpy()
-
-        db_acc = bias_np[0:3]   # δb_acc in FLU [m/s²]
-        db_gyr = bias_np[3:6]   # δb_gyr in FLU [rad/s]
-
-        # ── G. Store outputs ───────────────────────────────────────────
+        # ── G. Store outputs ──────────────────────────────────────────
         pos[i+1]       = pIMU
         vel[i+1]       = vIMU
         rpy_out[i+1]   = _qto_rpy(q)
-        b_acc_out[i+1] = db_acc       # LSTM-decoded bias (interpretable)
-        b_gyr_out[i+1] = db_gyr
+        b_acc_out[i+1] = b_a
+        b_gyr_out[i+1] = b_g
         std_pos[i+1]      = np.sqrt(np.maximum(np.diag(P[0:3,   0:3]),   0.))
         std_vel[i+1]      = np.sqrt(np.maximum(np.diag(P[3:6,   3:6]),   0.))
         std_orient[i+1]   = np.sqrt(np.maximum(np.diag(P[6:9,   6:9]),   0.))

@@ -12,15 +12,11 @@ Usage
 
 Input interface (matches 0_onxx_converter.py)
 ---------------------------------------------
-    x  [1, 1, 21]   pre-concatenated [nav_state(15) | imu_mean(6)]
-
-    The input must be provided as a flat float32 array of length 21 per
-    inference call; hailort's VDevice / InferModel handles the NHWC layout
-    internally.
+    x  [1, 1, 15]   nav_state [p(3)|v(3)|rpy(3)|b_a(3)|b_g(3)]
 
 Output
 ------
-    bias  [1, 6]    [δb_acc(3) | δb_gyr(3)] in FLU body frame
+    state  [1, 15]   predicted state x_t^{+-}
 
 Profiler with runtime data
 --------------------------
@@ -56,9 +52,8 @@ if str(_MODEL_DIR) not in sys.path:
 from model import DeepKFNet  # noqa: E402
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-NAV_DIM  = 15
-IMU_DIM  = 6
-BIAS_DIM = 6
+NAV_DIM   = 15
+STATE_DIM = 15
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -99,40 +94,39 @@ class DeepKFNetONNX(torch.nn.Module):
 
         self.decoder = model.decoder
 
-    def forward(self, x):           # x: [batch, 1, 21]
+    def forward(self, x):           # x: [batch, 1, 15]
         out, _ = self.lstm_l0(x)
         out, _ = self.lstm_l1(out)
-        return self.decoder(out[:, 0, :])
+        h_out = out[:, 0, :]
+        delta = self.decoder(h_out)
+        nav_state = x[:, 0, :]
+        return nav_state + delta
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_x(nav_np: np.ndarray, imu_np: np.ndarray) -> np.ndarray:
-    """Concatenate nav_state + imu_mean → [N, 1, 21]."""
-    return np.concatenate([nav_np, imu_np], axis=-1)[:, np.newaxis, :]
+def _make_x(nav_np: np.ndarray) -> np.ndarray:
+    """Add seq dim -> [N, 1, 15]."""
+    return nav_np[:, np.newaxis, :]
 
 
-def infer_pytorch(model, nav_np, imu_np):
-    x = _make_x(nav_np, imu_np)
+def infer_pytorch(model, nav_np):
+    x = _make_x(nav_np)
     with torch.no_grad():
         return model(torch.from_numpy(x).float()).numpy()
 
 
-def infer_hef(hef_path: Path, nav_np: np.ndarray, imu_np: np.ndarray) -> np.ndarray:
+def infer_hef(hef_path: Path, nav_np: np.ndarray) -> np.ndarray:
     """Run inference on a physical Hailo-8 device via hailort bindings.
-
-    The HEF input is a flat float32 vector of length 21 (pre-concatenated
-    nav_state + imu_mean).  hailort handles the NHWC layout internally.
 
     Parameters
     ----------
     hef_path : Path to the compiled .hef file
     nav_np   : [N, 15] float32
-    imu_np   : [N,  6] float32
 
     Returns
     -------
-    bias : [N, 6] float32
+    state : [N, 15] float32
     """
     try:
         import hailo_platform as hp
@@ -142,7 +136,7 @@ def infer_hef(hef_path: Path, nav_np: np.ndarray, imu_np: np.ndarray) -> np.ndar
             "(hailort-*.whl) that matches your firmware version."
         )
 
-    x = _make_x(nav_np, imu_np)   # [N, 1, 21]
+    x = _make_x(nav_np)   # [N, 1, 15]
     n_samples = x.shape[0]
 
     params  = hp.VDevice.create_params()
@@ -159,35 +153,38 @@ def infer_hef(hef_path: Path, nav_np: np.ndarray, imu_np: np.ndarray) -> np.ndar
             output_name = infer_model.output().name
 
             for i in range(n_samples):
-                sample = x[i].astype(np.float32)   # [1, 21]
+                sample = x[i].astype(np.float32)   # [1, 15]
                 bindings.input(input_name).set_buffer(sample)
 
-                out_buf = np.empty((1, BIAS_DIM), dtype=np.float32)
+                out_buf = np.empty((1, STATE_DIM), dtype=np.float32)
                 bindings.output(output_name).set_buffer(out_buf)
 
                 configured_model.run([bindings], timeout_ms=1000)
                 results.append(out_buf.copy())
 
-    return np.concatenate(results, axis=0)   # [N, 6]
+    return np.concatenate(results, axis=0)   # [N, 15]
 
 
 def _fmt(arr):
     return np.array2string(arr, precision=5, suppress_small=True, separator=", ")
 
 
-def print_comparison(pt_bias: np.ndarray, hef_bias: np.ndarray):
-    print("\n" + "=" * 70)
-    print("BIAS CORRECTIONS  [δb_acc_x  δb_acc_y  δb_acc_z  δb_gyr_x  δb_gyr_y  δb_gyr_z]")
-    print("=" * 70)
-    for i in range(pt_bias.shape[0]):
-        print(f"\nSample {i}:")
-        print(f"  PyTorch  {_fmt(pt_bias[i])}")
-        print(f"  HEF      {_fmt(hef_bias[i])}")
+STATE_LABELS = "p_e  p_n  p_u  v_e  v_n  v_u  roll  pitch  yaw  ba_x  ba_y  ba_z  bg_x  bg_y  bg_z"
 
-    mae = float(np.mean(np.abs(hef_bias - pt_bias)))
-    print("\n" + "-" * 70)
+
+def print_comparison(pt_state: np.ndarray, hef_state: np.ndarray):
+    print("\n" + "=" * 80)
+    print(f"STATE PREDICTIONS  [{STATE_LABELS}]")
+    print("=" * 80)
+    for i in range(pt_state.shape[0]):
+        print(f"\nSample {i}:")
+        print(f"  PyTorch  {_fmt(pt_state[i])}")
+        print(f"  HEF      {_fmt(hef_state[i])}")
+
+    mae = float(np.mean(np.abs(hef_state - pt_state)))
+    print("\n" + "-" * 80)
     print(f"MAE (HEF vs PyTorch): {mae:.6e}")
-    print("=" * 70 + "\n")
+    print("=" * 80 + "\n")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -202,15 +199,13 @@ def main():
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--nav-dim",    type=int, default=NAV_DIM)
-    parser.add_argument("--imu-dim",    type=int, default=IMU_DIM)
     args = parser.parse_args()
 
-    # ── Synthetic test data (same seed as 2_optimisation.py) ─────────────────
+    # ── Synthetic test data (same seed as 2_optimisation.py) ─────────────
     rng     = np.random.default_rng(42)
     nav_np  = rng.standard_normal((args.n_samples, args.nav_dim)).astype(np.float32)
-    imu_np  = rng.standard_normal((args.n_samples, args.imu_dim)).astype(np.float32)
 
-    # ── PyTorch ground truth ──────────────────────────────────────────────────
+    # ── PyTorch ground truth ──────────────────────────────────────────────
     log.info("Loading PyTorch checkpoint: %s", args.artifact)
     ckpt       = torch.load(args.artifact, map_location="cpu")
     state_dict = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
@@ -219,7 +214,7 @@ def main():
     num_layers  = cfg.get("num_layers",  args.num_layers)
 
     pt_model = DeepKFNet(
-        nav_state_dim=args.nav_dim, imu_dim=args.imu_dim,
+        nav_state_dim=args.nav_dim,
         hidden_dim=hidden_dim, num_layers=num_layers,
     )
     pt_model.load_state_dict(state_dict)
@@ -229,18 +224,18 @@ def main():
     wrapped.eval()
 
     log.info("PyTorch inference ...")
-    pt_bias = infer_pytorch(wrapped, nav_np, imu_np)
+    pt_state = infer_pytorch(wrapped, nav_np)
 
-    # ── HEF on-device inference ───────────────────────────────────────────────
+    # ── HEF on-device inference ───────────────────────────────────────────
     if not args.hef.exists():
         log.error("HEF not found: %s — run 3_compilation.py first.", args.hef)
         return
 
     log.info("HEF inference on Hailo-8: %s", args.hef)
-    hef_bias = infer_hef(args.hef, nav_np, imu_np)
+    hef_state = infer_hef(args.hef, nav_np)
 
-    # ── Print comparison ──────────────────────────────────────────────────────
-    print_comparison(pt_bias, hef_bias)
+    # ── Print comparison ──────────────────────────────────────────────────
+    print_comparison(pt_state, hef_state)
 
 
 if __name__ == "__main__":

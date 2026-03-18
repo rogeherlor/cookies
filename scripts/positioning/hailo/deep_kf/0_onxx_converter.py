@@ -1,5 +1,5 @@
 """
-DeepKFNet → ONNX converter
+DeepKFNet -> ONNX converter
 ==========================
 Exports a trained DeepKFNet checkpoint to ONNX for Hailo DFC parsing.
 
@@ -17,31 +17,24 @@ Outputs (next to the script by default, or set --out-dir):
 ONNX interface
 --------------
 Input:
-    x      (1, 1, 21)    [nav_state(15) | imu_mean(6)] — pre-concatenated,
+    x      (1, 1, 15)    nav_state [p(3)|v(3)|rpy(3)|b_a(3)|b_g(3)]
                           seq_len=1 in dim-1 for LSTM-style 3-D input
 
 Output:
-    bias   (1,  6)       [δb_acc(3) | δb_gyr(3)] corrections in FLU
+    state  (1, 15)       predicted state x_t^{+-} (residual already added)
 
 Why a single 3-D input?
 -----------------------
 Hailo's emulator (acceleras) maps LSTM gates to Conv2D ops and requires the
 input tensor to have at least 3 dimensions (N, H, W or N, H, W, C).
-When nav_state and imu_mean are passed as separate 2-D tensors [N, 15] and
-[N, 6], the internal Concat + Unsqueeze ops that produce [N, 1, 21] are not
-propagated correctly through the Hailo emulator, causing:
-    ValueError: not enough values to unpack (expected 2, got 1)
-in conv_stripped_op._compute_output_shape (input_shape[1:3] has 1 element).
-
-Moving the concatenation OUTSIDE the model (caller concatenates nav_state
-and imu_mean, adds seq dim → [N, 1, 21]) gives Hailo a clean 3-D input.
+Keeping the input as [N, 1, 15] gives Hailo a clean 3-D LSTM-style input.
 
 Note on statefulness
 --------------------
 The LSTM initial states (h0, c0) are intentionally omitted from the ONNX
 graph inputs.  Hailo's DFC parser only supports zero or constant initial
 states — dynamic h/c inputs cause a parse error.  The Hailo runtime handles
-LSTM state recurrence (h_n → h0 feedback) internally across calls.
+LSTM state recurrence (h_n -> h0 feedback) internally across calls.
 """
 
 import argparse
@@ -69,22 +62,20 @@ class DeepKFNetONNX(nn.Module):
     Hailo-compatible export wrapper.
 
     Two key design decisions:
-    1. Unrolled layers: nn.LSTM(num_layers=2) → two nn.LSTM(num_layers=1).
+    1. Unrolled layers: nn.LSTM(num_layers=2) -> two nn.LSTM(num_layers=1).
        This removes Slice ops on h0/c0 that Hailo's parser cannot follow.
     2. No initial-state inputs: h0/c0 are omitted from the graph entirely.
-       Hailo only supports zero or constant LSTM initial states.  Dynamic
-       initial states (graph inputs) cause 'ValueInfoProto has no attribute'
-       in the parser.
+       Hailo only supports zero or constant LSTM initial states.
 
-    Weights are copied directly from the original checkpoint using PyTorch's
-    weight_ih_l{i} / weight_hh_l{i} / bias_ih_l{i} / bias_hh_l{i} names.
+    The residual connection (nav_state + delta) is included in the ONNX graph
+    so the output is the full predicted state x_t^{+-}.
     """
 
     def __init__(self, model: DeepKFNet):
         super().__init__()
 
         orig_lstm = model.lstm.lstm
-        input_dim  = orig_lstm.input_size    # 21  (15 nav + 6 imu)
+        input_dim  = orig_lstm.input_size    # 15
         hidden_dim = orig_lstm.hidden_size   # 128
 
         self.lstm_l0 = nn.LSTM(input_size=input_dim,  hidden_size=hidden_dim,
@@ -109,26 +100,25 @@ class DeepKFNetONNX(nn.Module):
         """
         Parameters
         ----------
-        x : (batch, 1, nav_dim + imu_dim)  e.g. (1, 1, 21)
-            Pre-concatenated [nav_state | imu_mean] with sequence dim=1.
-            Keeping the Concat + Unsqueeze OUTSIDE the ONNX graph gives
-            Hailo's emulator a clean 3-D LSTM-style input and avoids the
-            'not enough values to unpack' error in conv_stripped_op.
+        x : (batch, 1, 15)
+            Navigation state with sequence dim=1.
 
         Returns
         -------
-        bias : (batch, 6)
+        state : (batch, 15) — predicted state x_t^{+-} (with residual)
         """
         out_l0, _ = self.lstm_l0(x)       # (batch, 1, 128)
         out_l1, _ = self.lstm_l1(out_l0)  # (batch, 1, 128)
         h_out = out_l1[:, 0, :]           # (batch, 128)
-        return self.decoder(h_out)        # (batch, 6)
+        delta = self.decoder(h_out)       # (batch, 15)
+        nav_state = x[:, 0, :]           # (batch, 15) — input for residual
+        return nav_state + delta          # (batch, 15)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _simplify_onnx(onnx_path: Path) -> None:
-    """Run onnx-simplifier in-place (promotes initializers → Constant nodes)."""
+    """Run onnx-simplifier in-place (promotes initializers -> Constant nodes)."""
     try:
         import onnx
         import onnxsim
@@ -145,7 +135,7 @@ def _simplify_onnx(onnx_path: Path) -> None:
     model_sim, ok = onnxsim.simplify(model)
     if ok:
         onnx.save(model_sim, str(onnx_path))
-        print(f"Simplified ONNX saved → {onnx_path}")
+        print(f"Simplified ONNX saved -> {onnx_path}")
     else:
         print("[warning] onnxsim could not simplify the model — using original.")
 
@@ -166,7 +156,6 @@ def main():
     parser.add_argument("--hidden-dim",  type=int, default=128)
     parser.add_argument("--num-layers",  type=int, default=2)
     parser.add_argument("--nav-dim",     type=int, default=15)
-    parser.add_argument("--imu-dim",     type=int, default=6)
     parser.add_argument("--opset",       type=int, default=11,
                         help="ONNX opset (Hailo DFC 3.x supports up to 11/12)")
     args = parser.parse_args()
@@ -175,7 +164,7 @@ def main():
     if not artifact.exists():
         raise FileNotFoundError(f"Checkpoint not found: {artifact}")
 
-    # ── Load checkpoint ───────────────────────────────────────────────────────
+    # ── Load checkpoint ───────────────────────────────────────────────────
     print(f"Loading checkpoint: {artifact}")
     ckpt = torch.load(artifact, map_location="cpu")
     if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
@@ -196,7 +185,6 @@ def main():
 
     model = DeepKFNet(
         nav_state_dim=args.nav_dim,
-        imu_dim=args.imu_dim,
         hidden_dim=hidden_dim,
         num_layers=num_layers,
     )
@@ -207,16 +195,16 @@ def main():
     wrapped = DeepKFNetONNX(model)
     wrapped.eval()
 
-    input_dim = args.nav_dim + args.imu_dim   # 21
-    x_dummy   = torch.zeros(1, 1, input_dim)  # (batch=1, seq=1, features=21)
+    input_dim = args.nav_dim                       # 15
+    x_dummy   = torch.zeros(1, 1, input_dim)       # (batch=1, seq=1, features=15)
 
     input_names  = ["x"]
-    output_names = ["bias"]
+    output_names = ["state"]
 
     out_path = args.out_dir / "deep_kf.onnx"
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Exporting ONNX (opset {args.opset}) → {out_path}")
+    print(f"Exporting ONNX (opset {args.opset}) -> {out_path}")
     with torch.no_grad():
         torch.onnx.export(
             wrapped,
@@ -234,8 +222,8 @@ def main():
     print("Done.")
     print()
     print("ONNX interface:")
-    print(f"  Input : x=[1, 1, {input_dim}]  (batch, seq=1, [nav_state | imu_mean])")
-    print(f"  Output: bias=[1, 6]")
+    print(f"  Input : x=[1, 1, {input_dim}]  (batch, seq=1, nav_state)")
+    print(f"  Output: state=[1, {input_dim}]  (predicted state)")
 
 
 if __name__ == "__main__":

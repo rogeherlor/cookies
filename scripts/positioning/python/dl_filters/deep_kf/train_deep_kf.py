@@ -10,23 +10,22 @@ python train_deep_kf.py --mode loo --val-seq 01 --epochs 150 --output artifacts/
 # Train on ALL clean sequences:
 python train_deep_kf.py --mode all --epochs 150 --output artifacts/deep_kf/
 
-Training objective
-------------------
-The LSTM learns to predict IMU bias corrections by minimising the position and
-velocity error on GPS-available timesteps (where GPS provides a strong label).
+Training objective (Hosseinyalamdary 2018, Eqs. 27-28)
+------------------------------------------------------
+Two-phase training faithful to the original DKF paper:
 
-For each timestep i where GPS is available:
-    δb_acc_i, δb_gyr_i = decoder(LSTM(x_{i-T:i}, imu_{i-T:i}))
-    acc_corr = accel_flu[i] - δb_acc_i
-    gyr_corr = gyro_flu[i]  - δb_gyr_i
-    [propagate strapdown with corrected IMU over GPS interval]
-    L = MSE(p_propagated, p_gps) + λ_v * MSE(v_propagated, v_gps_derived)
+Phase 1: Generate ESKF posterior trajectories x_t^+ for each training sequence
+          by running eskf_enhanced with GPS updates.
 
-This is a supervised regression problem: the GPS provides ground-truth labels
-at 1 Hz; the LSTM learns to correct IMU biases to match them.
+Phase 2: Teacher-forced sequence training:
+    - Input:  x_{t-1}^+ (15D posterior state from ESKF)
+    - Target: x_t^+     (15D posterior state at next timestep)
+    - Loss:   weighted MSE on all 15 state components
+    - The LSTM learns to predict state transitions, including the effect of
+      GPS measurement updates on the state.
 
-Training is done via TBPTT (Truncated Back-Propagation Through Time) over
-segments of length tbptt_len steps.
+The model uses residual prediction (Eq. 21, μ_t = x_{t-1}^+):
+    x_t^{+-} = decoder(LSTM(x_{t-1}^+)) + x_{t-1}^+
 
 LOO Clean Sequences
 -------------------
@@ -53,8 +52,9 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 _HERE      = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent.parent.parent.parent
 _SCRIPTS   = _REPO_ROOT / 'scripts/positioning/python'
+_FILTERS   = _SCRIPTS / 'filters'
 
-for p in [str(_HERE), str(_SCRIPTS)]:
+for p in [str(_HERE), str(_SCRIPTS), str(_FILTERS)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -63,188 +63,122 @@ from model import DeepKFNet
 
 CLEAN_SEQS = ['01', '04', '06', '07', '08', '09', '10']
 
-GRAVITY_ENU = np.array([0., 0., -9.81])
 
+# ── Phase 1: Generate ESKF posterior trajectories ─────────────────────────────
 
-# ── Quaternion utilities ──────────────────────────────────────────────────────
-
-def _skew(v):
-    return np.array([[ 0.,-v[2], v[1]],[ v[2], 0.,-v[0]],[-v[1], v[0], 0.]])
-
-def _qnorm(q):
-    n = np.linalg.norm(q); return q/n if n > 0. else np.array([1.,0.,0.,0.])
-
-def _qmul(q1, q2):
-    w1,x1,y1,z1=q1; w2,x2,y2,z2=q2
-    return np.array([w1*w2-x1*x2-y1*y2-z1*z2, w1*x2+x1*w2+y1*z2-z1*y2,
-                     w1*y2-x1*z2+y1*w2+z1*x2, w1*z2+x1*y2-y1*x2+z1*w2])
-
-def _qfrom_axis_angle(dtheta):
-    a = np.linalg.norm(dtheta)
-    if a < 1e-12: return _qnorm(np.array([1., .5*dtheta[0], .5*dtheta[1], .5*dtheta[2]]))
-    ax = dtheta/a; s = np.sin(.5*a)
-    return np.array([np.cos(.5*a), ax[0]*s, ax[1]*s, ax[2]*s])
-
-def _qfrom_euler(roll, pitch, yaw):
-    cr,sr = np.cos(roll/2), np.sin(roll/2)
-    cp,sp = np.cos(pitch/2), np.sin(pitch/2)
-    cy,sy = np.cos(yaw/2), np.sin(yaw/2)
-    return _qnorm(np.array([cr*cp*cy+sr*sp*sy, sr*cp*cy-cr*sp*sy,
-                              cr*sp*cy+sr*cp*sy, cr*cp*sy-sr*sp*cy]))
-
-def _qto_Rbn(q):
-    w,x,y,z=q
-    return np.array([[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
-                     [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
-                     [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
-
-def _qto_rpy(q):
-    w,x,y,z=q
-    return np.array([np.arctan2(2*(w*x+y*z),1-2*(x*x+y*y)),
-                     np.arcsin(np.clip(2*(w*y-z*x),-1.,1.)),
-                     np.arctan2(2*(w*z+x*y),1-2*(y*y+z*z))])
-
-
-# ── Propagation helper ────────────────────────────────────────────────────────
-
-def propagate_step(q, pIMU, vIMU, acc_b, omega_b, Ts, use_3d=True):
-    """Single IMU propagation step. Returns (q_new, p_new, v_new, Rbn)."""
-    dtheta = omega_b * Ts if use_3d else np.array([0.,0.,omega_b[2]*Ts])
-    q_new  = _qnorm(_qmul(q, _qfrom_axis_angle(dtheta)))
-    Rbn    = _qto_Rbn(q_new)
-    accENU = Rbn @ acc_b
-    p_new  = pIMU + Ts*vIMU + 0.5*Ts**2*(accENU + GRAVITY_ENU)
-    v_new  = vIMU + Ts*(accENU + GRAVITY_ENU)
-    return q_new, p_new, v_new, Rbn
-
-
-# ── Training ──────────────────────────────────────────────────────────────────
-
-def run_sequence_tbptt(nav, model, optimizer, device, tbptt_len,
-                       lambda_vel, gps_interval=100, use_3d=True,
-                       training=True):
+def generate_eskf_posteriors(nav):
     """
-    Run one epoch pass on a single sequence with TBPTT.
+    Run ESKF enhanced on a sequence to produce the posterior state trajectory.
 
-    Position and velocity are kept as differentiable torch tensors so that
-    gradients flow: LSTM → db_acc_t → acc_corr_t → pIMU_t → loss_pos.
-    Orientation (quaternion) is updated in numpy since we do not backprop
-    through rotation.  At each GPS update the strapdown is hard-reset to the
-    GPS position/velocity (detached), which caps the graph depth at ~100 IMU
-    steps between GPS fixes.
+    Returns
+    -------
+    x_post : (N, 15) float32 — [p(3), v(3), rpy(3), b_acc(3), b_gyr(3)]
+    """
+    import eskf_enhanced
+
+    result = eskf_enhanced.run(nav)
+    x_post = np.concatenate([
+        result['p'],         # (N, 3) position ENU
+        result['v'],         # (N, 3) velocity ENU
+        result['r'],         # (N, 3) roll, pitch, yaw
+        result['bias_acc'],  # (N, 3) accel bias FLU
+        result['bias_gyr'],  # (N, 3) gyro bias FLU
+    ], axis=1)  # (N, 15)
+
+    # Unwrap yaw to avoid 2π discontinuities in training targets
+    x_post[:, 8] = np.unwrap(x_post[:, 8])  # yaw is index 8 (rpy[2])
+
+    return x_post.astype(np.float32)
+
+
+# ── Phase 2: Teacher-forced sequence training ─────────────────────────────────
+
+def compute_component_weights(x_post_list):
+    """
+    Compute per-component inverse-variance weights for balanced MSE loss.
+
+    The 15D state has very different scales (position ~100m, biases ~0.01).
+    Weighting inversely by variance balances gradient contributions.
 
     Parameters
     ----------
-    training : bool
-        If True, call backward() and optimizer.step().
-        If False (validation), only accumulate loss values.
+    x_post_list : list of (N_i, 15) arrays
 
-    Returns cumulative loss value (float).
+    Returns
+    -------
+    weights : (15,) tensor — normalised so mean(weights) = 1
     """
-    import pymap3d as pm
+    all_data = np.concatenate(x_post_list, axis=0)  # (N_total, 15)
+    # Compute variance of state increments (what the residual network predicts)
+    deltas = np.diff(all_data, axis=0)  # (N_total-1, 15)
+    var = np.var(deltas, axis=0) + 1e-12  # avoid division by zero
+    inv_var = 1.0 / var
+    inv_var = inv_var / inv_var.mean()  # normalise so mean weight = 1
+    return torch.from_numpy(inv_var.astype(np.float32))
 
-    accel_flu = nav.accel_flu
-    gyro_flu  = nav.gyro_flu
-    orient    = nav.orient
-    vel_enu   = nav.vel_enu
-    lla       = nav.lla
-    lla0      = nav.lla0
-    N  = accel_flu.shape[0]
-    Ts = 1.0 / nav.sample_rate
-    T_win = int(1.0 * nav.sample_rate)   # 1-second rolling buffer for LSTM
 
-    e, n, u = pm.geodetic2enu(lla[:,0], lla[:,1], lla[:,2],
-                               lla0[0], lla0[1], lla0[2])
-    p_gps = np.column_stack([e, n, u])
+def run_sequence_teacher_forced(x_post, model, optimizer, device,
+                                tbptt_len, weights, training=True):
+    """
+    Run one epoch pass on a single sequence with teacher-forced LSTM training.
 
-    GRAVITY_T   = torch.tensor([0., 0., -9.81], device=device)
-    accel_flu_t = torch.from_numpy(accel_flu).float().to(device)  # (N, 3)
+    At each step t:
+        input  = x_post[t-1]  (15D posterior state)
+        target = x_post[t]    (15D next posterior state)
+        pred   = model(input) (15D predicted state, with residual)
+        loss   = weighted_MSE(pred, target)
 
-    # Nominal state as torch tensors (grad flows through these)
-    pIMU_t = torch.tensor(p_gps[0],   dtype=torch.float32, device=device)
-    vIMU_t = torch.tensor(vel_enu[0], dtype=torch.float32, device=device)
-    q      = _qfrom_euler(orient[0, 0], orient[0, 1], orient[0, 2])
+    Parameters
+    ----------
+    x_post   : (N, 15) float32 — ESKF posterior trajectory
+    model    : DeepKFNet
+    optimizer: torch optimizer
+    device   : 'cpu' or 'cuda'
+    tbptt_len: int — TBPTT segment length (number of steps)
+    weights  : (15,) tensor — per-component MSE weights
+    training : bool — if True, backward() + step()
+
+    Returns
+    -------
+    total_loss : float — accumulated loss over the sequence
+    """
+    N = x_post.shape[0]
+    x_t = torch.from_numpy(x_post).to(device)  # (N, 15)
+    w = weights.to(device)  # (15,)
 
     hidden = model.init_hidden(batch_size=1, device=device)
     hidden = tuple(h.detach() for h in hidden)
 
-    imu_buf_acc = np.zeros((T_win, 3))
-    imu_buf_gyr = np.zeros((T_win, 3))
-
     total_loss  = 0.
-    tbptt_count = 0
-    loss_seg    = None          # None until we accumulate a GPS step with grad
+    step_count  = 0
+    loss_seg    = None
 
-    for i in range(N - 1):
-        # ── LSTM modelling step (produces differentiable bias corrections) ──
-        rpy_now = _qto_rpy(q)
-        x_post_np = np.concatenate([
-            pIMU_t.detach().cpu().numpy(),
-            vIMU_t.detach().cpu().numpy(),
-            rpy_now, np.zeros(3), np.zeros(3),
-        ])
-        imu_mean_np = np.concatenate([imu_buf_acc.mean(0), imu_buf_gyr.mean(0)])
+    for t in range(1, N):
+        # Teacher forcing: always feed the ground-truth posterior
+        input_t  = x_t[t - 1].unsqueeze(0)   # (1, 15)
+        target_t = x_t[t].unsqueeze(0)        # (1, 15)
 
-        x_post_t   = torch.from_numpy(x_post_np).float().unsqueeze(0).to(device)
-        imu_mean_t = torch.from_numpy(imu_mean_np).float().unsqueeze(0).to(device)
+        pred_t, hidden = model(input_t, hidden)  # (1, 15)
 
-        bias_t, hidden = model(x_post_t, imu_mean_t, hidden)
-        db_acc_t = bias_t[0, 0:3]   # (3,) — has grad_fn via LSTM
-        db_gyr_t = bias_t[0, 3:6]   # (3,)
+        # Weighted MSE loss
+        step_loss = ((pred_t - target_t) ** 2 * w).mean()
 
-        # Gyro correction in numpy (orientation, no backprop needed)
-        db_gyr_np = db_gyr_t.detach().cpu().numpy()
-        gyr_corr  = gyro_flu[i] - db_gyr_np
+        loss_seg = step_loss if loss_seg is None else loss_seg + step_loss
+        step_count += 1
 
-        # Update rolling IMU buffer
-        buf_idx = i % T_win
-        imu_buf_acc[buf_idx] = accel_flu[i]
-        imu_buf_gyr[buf_idx] = gyro_flu[i]
-
-        # Quaternion / orientation update (numpy)
-        dtheta = (gyr_corr * Ts if use_3d
-                  else np.array([0., 0., gyr_corr[2] * Ts]))
-        q     = _qnorm(_qmul(q, _qfrom_axis_angle(dtheta)))
-        Rbn_t = torch.from_numpy(_qto_Rbn(q)).float().to(device)   # (3, 3)
-
-        # ── Strapdown integration in torch — grad flows from db_acc_t ──────
-        acc_corr_t = accel_flu_t[i] - db_acc_t          # (3,) — keeps grad_fn
-        acc_enu_t  = Rbn_t @ acc_corr_t + GRAVITY_T     # (3,)
-        pIMU_t = pIMU_t + Ts * vIMU_t + 0.5 * Ts ** 2 * acc_enu_t
-        vIMU_t = vIMU_t + Ts * acc_enu_t
-
-        # ── GPS supervision ─────────────────────────────────────────────────
-        if nav.gps_available[i + 1]:
-            p_gps_t = torch.tensor(p_gps[i + 1],
-                                   dtype=torch.float32, device=device)
-            v_gps_t = torch.tensor(vel_enu[i + 1],
-                                   dtype=torch.float32, device=device)
-
-            loss_pos  = ((pIMU_t - p_gps_t) ** 2).mean()
-            loss_vel  = ((vIMU_t - v_gps_t) ** 2).mean()
-            step_loss = loss_pos + lambda_vel * loss_vel
-
-            loss_seg = step_loss if loss_seg is None else loss_seg + step_loss
-            tbptt_count += 1
-
-            # Hard GPS reset: detach so the graph does not grow unboundedly.
-            # Gradient of this step's loss has already been attached to loss_seg.
-            pIMU_t = p_gps_t.detach().clone()
-            vIMU_t = v_gps_t.detach().clone()
-
-        # ── TBPTT boundary ──────────────────────────────────────────────────
-        if tbptt_count >= tbptt_len and loss_seg is not None:
+        # TBPTT boundary
+        if step_count >= tbptt_len and loss_seg is not None:
             if training:
                 optimizer.zero_grad()
                 loss_seg.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.)
                 optimizer.step()
                 hidden = tuple(h.detach() for h in hidden)
-            total_loss  += loss_seg.item()
-            loss_seg     = None
-            tbptt_count  = 0
+            total_loss += loss_seg.item()
+            loss_seg    = None
+            step_count  = 0
 
-    # ── Final partial segment ────────────────────────────────────────────────
+    # Final partial segment
     if loss_seg is not None:
         if training:
             optimizer.zero_grad()
@@ -255,6 +189,8 @@ def run_sequence_tbptt(nav, model, optimizer, device, tbptt_len,
 
     return total_loss
 
+
+# ── Training loop ─────────────────────────────────────────────────────────────
 
 def train(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -273,7 +209,7 @@ def train(args):
 
     print(f"Mode={args.mode}  train={train_seqs}  val={val_seqs}")
 
-    # Load nav data
+    # ── Load nav data ─────────────────────────────────────────────────────
     print("Loading sequences ...")
     train_navs = []
     for seq in train_seqs:
@@ -290,8 +226,26 @@ def train(args):
         except Exception as e:
             print(f"  WARNING: failed to load val seq {seq}: {e}")
 
-    # Model
-    model = DeepKFNet(nav_state_dim=15, imu_dim=6,
+    # ── Phase 1: Generate ESKF posteriors ─────────────────────────────────
+    print("Phase 1: Generating ESKF posterior trajectories ...")
+    train_posteriors = []
+    for i, nav in enumerate(train_navs):
+        x_post = generate_eskf_posteriors(nav)
+        train_posteriors.append(x_post)
+        print(f"  Seq {train_seqs[i]}: {x_post.shape[0]} samples, "
+              f"pos range [{x_post[:,:3].min():.1f}, {x_post[:,:3].max():.1f}] m")
+
+    val_posteriors = []
+    for i, nav in enumerate(val_navs):
+        x_post = generate_eskf_posteriors(nav)
+        val_posteriors.append(x_post)
+
+    # Compute per-component weights from training data
+    weights = compute_component_weights(train_posteriors)
+    print(f"  Component weights: {weights.numpy().round(3)}")
+
+    # ── Phase 2: Train LSTM ───────────────────────────────────────────────
+    model = DeepKFNet(nav_state_dim=15,
                       hidden_dim=args.latent_dim, num_layers=2)
     model = model.to(device)
 
@@ -310,58 +264,72 @@ def train(args):
 
     best_val = float('inf')
 
+    print(f"\nPhase 2: Training LSTM (teacher-forced, {args.epochs} epochs) ...")
     for epoch in range(start_epoch, args.epochs):
         model.train()
         train_loss = 0.
-        for nav in train_navs:
-            train_loss += run_sequence_tbptt(
-                nav, model, optimizer, device,
-                tbptt_len=args.tbptt_len, lambda_vel=args.lambda_vel,
+        for x_post in train_posteriors:
+            train_loss += run_sequence_teacher_forced(
+                x_post, model, optimizer, device,
+                tbptt_len=args.tbptt_len, weights=weights,
                 training=True,
             )
         scheduler.step()
 
-        if val_navs:
+        if val_posteriors:
             model.eval()
             val_loss = 0.
-            for nav in val_navs:
-                val_loss += run_sequence_tbptt(
-                    nav, model, optimizer, device,
-                    tbptt_len=args.tbptt_len, lambda_vel=args.lambda_vel,
-                    training=False,
-                )
+            with torch.no_grad():
+                for x_post in val_posteriors:
+                    val_loss += run_sequence_teacher_forced(
+                        x_post, model, optimizer, device,
+                        tbptt_len=args.tbptt_len, weights=weights,
+                        training=False,
+                    )
             print(f"Epoch {epoch+1:4d}/{args.epochs}  "
                   f"train={train_loss:.4f}  val={val_loss:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
             if val_loss < best_val:
                 best_val = val_loss
-                torch.save({'epoch': epoch,
-                            'model_state_dict': model.state_dict(),
-                            'val_loss': val_loss}, output_dir / out_name)
-                print(f"  → saved best ({out_name})")
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'val_loss': val_loss,
+                    'config': {
+                        'latent_dim': args.latent_dim,
+                        'num_layers': 2,
+                        'nav_state_dim': 15,
+                    },
+                }, output_dir / out_name)
+                print(f"  -> saved best ({out_name})")
         else:
             print(f"Epoch {epoch+1:4d}/{args.epochs}  "
                   f"train={train_loss:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
 
-    if not val_navs:
-        torch.save({'epoch': args.epochs-1,
-                    'model_state_dict': model.state_dict()}, output_dir / out_name)
+    if not val_posteriors:
+        torch.save({
+            'epoch': args.epochs - 1,
+            'model_state_dict': model.state_dict(),
+            'config': {
+                'latent_dim': args.latent_dim,
+                'num_layers': 2,
+                'nav_state_dim': 15,
+            },
+        }, output_dir / out_name)
 
     print("Training complete.")
 
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Deep KF LSTM training on KITTI")
-    parser.add_argument('--mode',       choices=['loo','all'], default='loo')
+    parser.add_argument('--mode',       choices=['loo', 'all'], default='loo')
     parser.add_argument('--val-seq',    default='01')
     parser.add_argument('--epochs',     type=int,   default=150)
     parser.add_argument('--lr',         type=float, default=1e-3)
     parser.add_argument('--latent-dim', type=int,   default=128)
-    parser.add_argument('--tbptt-len',  type=int,   default=20,
-                        help="TBPTT segment length (number of GPS updates)")
-    parser.add_argument('--lambda-vel', type=float, default=0.5,
-                        help="Weight for velocity loss term")
+    parser.add_argument('--tbptt-len',  type=int,   default=200,
+                        help="TBPTT segment length (number of IMU steps)")
     parser.add_argument('--output',     default=str(_REPO_ROOT / 'artifacts/deep_kf'))
     parser.add_argument('--resume',     default=None)
     return parser.parse_args()

@@ -139,7 +139,7 @@ CMD_BUILDERS = {
 
 FILTER_LABELS = {
     'tlio':       'TLIO (ResNet1D displacement)',
-    'deep_kf':    'Deep KF (LSTM bias correction)',
+    'deep_kf':    'Deep KF (LSTM state prediction)',
     'tartan_imu': 'Tartan IMU (LoRA fine-tuning)',
     'ai_imu':     'AI-IMU (Deep IEKF CNN)',
 }

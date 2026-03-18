@@ -1,5 +1,5 @@
 """
-DeepKFNet ONNX → Hailo HAR (parsing step)
+DeepKFNet ONNX -> Hailo HAR (parsing step)
 ==========================================
 Parses the ONNX produced by 0_onxx_converter.py into a Hailo HAR archive
 using the Hailo Dataflow Compiler SDK.
@@ -12,21 +12,21 @@ Outputs (next to the script):
     deep_kf_hailo_model.har   — parsed model ready for optimization
 
 ONNX interface expected (must match 0_onxx_converter.py output):
-    Input : x [1, 1, 21]  (batch=1, seq=1, [nav_state | imu_mean])
-    Output: bias [1, 6]
+    Input : x     [1, 1, 15]  (batch=1, seq=1, nav_state)
+    Output: state [1, 15]     (predicted state x_t^{+-})
 
 HAR representation (Conv layers in Netron)
 ------------------------------------------
-The Hailo DFC maps all matrix multiplications to 1×1 Conv2D ops in the HAR,
+The Hailo DFC maps all matrix multiplications to 1x1 Conv2D ops in the HAR,
 because Hailo's hardware is built around convolutional engines.  Seeing Conv
 layers in Netron is expected and correct — it is not a bug.
 
-    LSTM gate  (W · x  or  U · h)  →  Conv 1×1
-    BiasDecoder Linear(128→64)      →  Conv 1×1
-    BiasDecoder Linear(64→6)        →  Conv 1×1
+    LSTM gate  (W · x  or  U · h)  ->  Conv 1x1
+    StateDecoder Linear(128->128)  ->  Conv 1x1
+    StateDecoder Linear(128->15)   ->  Conv 1x1
 
-Each LSTM has 4 gates (i, f, g, o) × 2 operands (input weight, recurrent
-weight), so 2 layers × 8 Conv nodes = ~16 Conv nodes from the LSTMs alone,
+Each LSTM has 4 gates (i, f, g, o) x 2 operands (input weight, recurrent
+weight), so 2 layers x 8 Conv nodes = ~16 Conv nodes from the LSTMs alone,
 plus 2 more from the decoder MLP.  The model is functionally identical to
 the original — only the internal representation differs.
 """
@@ -45,17 +45,15 @@ CHOSEN_HW_ARCH  = "hailo8"
 ONNX_MODEL_NAME = "deep_kf"
 
 NAV_DIM    = 15
-IMU_DIM    = 6
-INPUT_DIM  = NAV_DIM + IMU_DIM   # 21
+INPUT_DIM  = NAV_DIM   # 15
 BATCH_SIZE = 1
 
 # Single 3-D input: (batch, seq=1, features) — required for Hailo conv ops.
-# Caller must pre-concatenate nav_state and imu_mean before inference.
 START_NODES = ["x"]
-END_NODES   = ["bias"]
+END_NODES   = ["state"]
 
 NET_INPUT_SHAPES = {
-    "x": [BATCH_SIZE, 1, INPUT_DIM],   # [1, 1, 21]
+    "x": [BATCH_SIZE, 1, INPUT_DIM],   # [1, 1, 15]
 }
 
 # ── Parse ─────────────────────────────────────────────────────────────────────
