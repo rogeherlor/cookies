@@ -234,11 +234,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             z_body = Rnb @ (p_gps - pIMU)
             innov  = z_body - xi[6:9]
 
-            S = P[6:9, 6:9] + R_pos
-            K = P[:, 6:9] @ np.linalg.inv(S)
-            xi = xi + K @ innov
-            P  = P - K @ S @ K.T
-            P  = 0.5 * (P + P.T)
+            S     = P[6:9, 6:9] + R_pos
+            S_reg = S + 1e-9 * np.eye(3)
+            K     = np.linalg.solve(S_reg, P[6:9, :]).T   # 15×3, stable solve
+            xi    = xi + K @ innov
+            H_pos = np.zeros((3, 15)); H_pos[:, 6:9] = np.eye(3)
+            IKH   = np.eye(15) - K @ H_pos
+            P     = IKH @ P @ IKH.T + K @ R_pos @ K.T    # Joseph form
+            P     = 0.5 * (P + P.T)
             update_occurred = True
 
         # ── B. Non-Holonomic Constraints (NHC) ────────────────────────────────
@@ -253,9 +256,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
         innov_nhc = z_nhc - H_nhc @ xi[0:6]
         S_nhc     = H_nhc @ P[0:6, 0:6] @ H_nhc.T + R_nhc
-        K_nhc     = P[:, 0:6] @ H_nhc.T @ np.linalg.inv(S_nhc)
+        S_nhc_reg = S_nhc + 1e-9 * np.eye(2)
+        K_nhc     = np.linalg.solve(S_nhc_reg, H_nhc @ P[0:6, :]).T   # 15×2
         xi = xi + K_nhc @ innov_nhc
-        P  = P - K_nhc @ S_nhc @ K_nhc.T
+        H_nhc_full = np.zeros((2, 15)); H_nhc_full[:, 0:6] = H_nhc
+        IKH_nhc    = np.eye(15) - K_nhc @ H_nhc_full
+        P  = IKH_nhc @ P @ IKH_nhc.T + K_nhc @ R_nhc @ K_nhc.T       # Joseph form
         P  = 0.5 * (P + P.T)
         update_occurred = True
 
@@ -273,9 +279,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             # H selects ξ_v (columns 3:6) — direct body-frame velocity observation
             innov_zupt = z_zupt - xi[3:6]
             S_zupt     = P[3:6, 3:6] + R_zupt
-            K_zupt     = P[:, 3:6] @ np.linalg.inv(S_zupt)
+            S_zupt_reg = S_zupt + 1e-9 * np.eye(3)
+            K_zupt     = np.linalg.solve(S_zupt_reg, P[3:6, :]).T     # 15×3
             xi = xi + K_zupt @ innov_zupt
-            P  = P - K_zupt @ S_zupt @ K_zupt.T
+            H_zupt = np.zeros((3, 15)); H_zupt[:, 3:6] = np.eye(3)
+            IKH_zupt = np.eye(15) - K_zupt @ H_zupt
+            P  = IKH_zupt @ P @ IKH_zupt.T + K_zupt @ R_zupt @ K_zupt.T  # Joseph form
             P  = 0.5 * (P + P.T)
             update_occurred = True
 

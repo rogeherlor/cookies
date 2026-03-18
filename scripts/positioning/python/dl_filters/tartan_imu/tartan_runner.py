@@ -154,14 +154,38 @@ def _find_tartan_weights() -> Path:
     )
 
 
+def _resolve_seq_id(seq_id):
+    """Convert full KITTI drive name to short seq ID if needed."""
+    if seq_id is None:
+        return None
+    if len(seq_id) <= 2:
+        return seq_id
+    from data_loader import KITTI_SEQ_TO_DRIVE
+    _drive_to_seq = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
+    return _drive_to_seq.get(seq_id, seq_id)
+
+
 def _find_lora_adapter(seq_id=None):
-    if seq_id is not None:
-        fold = _ARTIFACTS / f'lora_fold_{seq_id}.pt'
+    """
+    Locate LoRA adapter weights.  Search order:
+      1. lora_fold_<seq_id>.pt  (LOO fold)
+      2. lora_adapters.pt       (all-sequences)
+      3. Any available lora_fold_*.pt (fallback with warning)
+    """
+    short_id = _resolve_seq_id(seq_id)
+    if short_id is not None:
+        fold = _ARTIFACTS / f'lora_fold_{short_id}.pt'
         if fold.exists():
             return fold
     general = _ARTIFACTS / 'lora_adapters.pt'
     if general.exists():
         return general
+    # Fallback: use any available LoRA fold
+    available = sorted(_ARTIFACTS.glob('lora_fold_*.pt'))
+    if available:
+        print(f"WARNING: Tartan lora_fold_{short_id}.pt not found, falling back to {available[0].name}. "
+              f"Train the proper fold with: python ins_train.py tartan_imu --seqs {short_id}")
+        return available[0]
     return None
 
 
@@ -424,29 +448,35 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
                 v_body  = v_body_t[0].cpu().numpy().astype(np.float64)
                 log_std = log_std_t[0].cpu().numpy().astype(np.float64)
+                log_std = np.clip(log_std, -10.0, 10.0)   # prevent exp underflow/overflow
 
                 v_enu_pred = Rbn @ v_body
-                Sigma_body = np.diag(np.exp(log_std))
+                Sigma_body = np.diag(np.maximum(np.exp(log_std), 1e-4))   # floor at 1e-4 m²/s²
                 Sigma_enu  = Rbn @ Sigma_body @ Rbn.T
 
-                z_vel = v_enu_pred - vIMU
-                H_vel = np.zeros((3,15)); H_vel[:,3:6] = np.eye(3)
-                S_vel = H_vel @ P @ H_vel.T + Sigma_enu
-                K_vel = P @ H_vel.T @ np.linalg.inv(S_vel)
-                dx    = dx + K_vel @ (z_vel - H_vel @ dx)
-                P     = P - K_vel @ S_vel @ K_vel.T
-                P     = 0.5*(P + P.T)
+                z_vel  = v_enu_pred - vIMU
+                H_vel  = np.zeros((3,15)); H_vel[:,3:6] = np.eye(3)
+                S_vel  = H_vel @ P @ H_vel.T + Sigma_enu
+                S_vel_reg = S_vel + 1e-9 * np.eye(3)
+                K_vel  = np.linalg.solve(S_vel_reg, H_vel @ P).T   # 15×3
+                dx     = dx + K_vel @ (z_vel - H_vel @ dx)
+                IKH_v  = np.eye(15) - K_vel @ H_vel
+                P      = IKH_v @ P @ IKH_v.T + K_vel @ Sigma_enu @ K_vel.T  # Joseph form
+                P      = 0.5*(P + P.T)
                 update_occurred = True
 
         # ── GPS position update ────────────────────────────────────────
         if gps_avail[i + 1]:
-            z_pos = p_gps_enu[i+1] - pIMU
-            innov = z_pos - dx[0:3]
-            S_gps = P[0:3,0:3] + R_pos
-            K_gps = P[:,0:3] @ np.linalg.inv(S_gps)
-            dx    = dx + K_gps @ innov
-            P     = P - K_gps @ S_gps @ K_gps.T
-            P     = 0.5*(P + P.T)
+            z_pos     = p_gps_enu[i+1] - pIMU
+            innov     = z_pos - dx[0:3]
+            S_gps     = P[0:3,0:3] + R_pos
+            S_gps_reg = S_gps + 1e-9 * np.eye(3)
+            K_gps     = np.linalg.solve(S_gps_reg, P[0:3, :]).T   # 15×3
+            dx        = dx + K_gps @ innov
+            H_gps     = np.zeros((3, 15)); H_gps[:, 0:3] = np.eye(3)
+            IKH_gps   = np.eye(15) - K_gps @ H_gps
+            P         = IKH_gps @ P @ IKH_gps.T + K_gps @ R_pos @ K_gps.T  # Joseph form
+            P         = 0.5*(P + P.T)
             update_occurred = True
 
         if update_occurred:

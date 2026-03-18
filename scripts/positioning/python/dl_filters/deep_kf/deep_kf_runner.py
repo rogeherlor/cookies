@@ -84,20 +84,50 @@ GRAVITY = np.array([0., 0., -9.81])
 
 # ── Weight loading ─────────────────────────────────────────────────────────────
 
+def _resolve_seq_id(seq_id):
+    """Convert full KITTI drive name to short seq ID if needed."""
+    if seq_id is None:
+        return None
+    if len(seq_id) <= 2:
+        return seq_id
+    from data_loader import KITTI_SEQ_TO_DRIVE
+    _drive_to_seq = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
+    return _drive_to_seq.get(seq_id, seq_id)
+
+
 def _find_weights(seq_id: str = None) -> Path:
+    """
+    Locate Deep KF weights.  Search order:
+      1. DEEP_KF_WEIGHTS env var
+      2. artifacts/deep_kf/fold_<seq_id>.pt  (LOO fold)
+      3. artifacts/deep_kf/deep_kf.pt        (all-sequences checkpoint)
+      4. Any available fold_*.pt             (fallback with warning)
+    """
     env = os.environ.get('DEEP_KF_WEIGHTS')
     if env and Path(env).exists():
         return Path(env)
-    if seq_id is not None:
-        fold = _ARTIFACTS / f'fold_{seq_id}.pt'
+
+    short_id = _resolve_seq_id(seq_id)
+    if short_id is not None:
+        fold = _ARTIFACTS / f'fold_{short_id}.pt'
         if fold.exists():
             return fold
+
     default = _ARTIFACTS / 'deep_kf.pt'
     if default.exists():
         return default
+
+    # Fallback: use any available fold
+    available = sorted(_ARTIFACTS.glob('fold_*.pt'))
+    available = [p for p in available if '_ckpt' not in p.name]
+    if available:
+        print(f"WARNING: Deep KF fold_{short_id}.pt not found, falling back to {available[0].name}. "
+              f"Train the proper fold with: python ins_train.py deep_kf --seqs {short_id}")
+        return available[0]
+
     raise RuntimeError(
         "Deep KF weights not found.  Train the model first:\n"
-        f"  python dl_filters/deep_kf/train_deep_kf.py --mode all --output {_ARTIFACTS}\n"
+        f"  python ins_train.py deep_kf\n"
         "or set DEEP_KF_WEIGHTS environment variable."
     )
 
@@ -359,11 +389,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         if gps_avail[i + 1]:
             z_pos = p_gps_enu[i + 1] - pIMU
             innov = z_pos - dx[0:3]
-            S_gps = P[0:3, 0:3] + R_pos
-            K_gps = P[:, 0:3] @ np.linalg.inv(S_gps)
-            dx    = dx + K_gps @ innov
-            P     = P - K_gps @ S_gps @ K_gps.T
-            P     = 0.5 * (P + P.T)
+            S_gps     = P[0:3, 0:3] + R_pos
+            S_gps_reg = S_gps + 1e-9 * np.eye(3)
+            K_gps     = np.linalg.solve(S_gps_reg, P[0:3, :]).T   # 15×3
+            dx        = dx + K_gps @ innov
+            H_gps     = np.zeros((3, 15)); H_gps[:, 0:3] = np.eye(3)
+            IKH_gps   = np.eye(15) - K_gps @ H_gps
+            P         = IKH_gps @ P @ IKH_gps.T + K_gps @ R_pos @ K_gps.T  # Joseph form
+            P         = 0.5 * (P + P.T)
             update_occurred = True
 
         # ── E. Error injection ──────────────────────────────────────────

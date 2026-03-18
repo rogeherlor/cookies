@@ -265,12 +265,15 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             innov   = z_body - xi[6:9]   # account for accumulated xi
 
             # Observation: H selects ξ_p (columns 6:9), pre-multiplied by I
-            S = P[6:9, 6:9] + R_pos
-            K = P[:, 6:9] @ np.linalg.inv(S)
+            S     = P[6:9, 6:9] + R_pos
+            S_reg = S + 1e-9 * np.eye(3)
+            K     = np.linalg.solve(S_reg, P[6:9, :]).T   # 15×3, stable solve
 
             xi = xi + K @ innov
-            P  = P - K @ S @ K.T
-            P  = 0.5 * (P + P.T)
+            H_pos = np.zeros((3, 15)); H_pos[:, 6:9] = np.eye(3)
+            IKH   = np.eye(15) - K @ H_pos
+            P     = IKH @ P @ IKH.T + K @ R_pos @ K.T    # Joseph form
+            P     = 0.5 * (P + P.T)
             update_occurred = True
 
         # ── Error injection (body → nav conversion for p and v) ───────────────

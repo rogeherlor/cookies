@@ -243,12 +243,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             z     = p_gps - pIMU
             innov = z - H @ dx
 
-            S = H @ P @ H.T + R_pos
-            K = P @ H.T @ np.linalg.inv(S)
+            S     = H @ P @ H.T + R_pos
+            S_reg = S + 1e-9 * np.eye(3)
+            K     = np.linalg.solve(S_reg, H @ P).T   # stable solve, 15×3
 
             dx = dx + K @ innov
-            P  = (np.eye(15) - K @ H) @ P
-            P  = 0.5 * (P + P.T)
+            IKH = np.eye(15) - K @ H
+            P   = IKH @ P @ IKH.T + K @ R_pos @ K.T  # Joseph form
+            P   = 0.5 * (P + P.T)
 
             # Error injection (nav-frame attitude error added directly to rpy)
             pIMU   += dx[0:3]

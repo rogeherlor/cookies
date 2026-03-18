@@ -244,11 +244,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             # Sparse Kalman gain (avoids full H @ P @ H.T with dense H)
             innov = z_pos - dx[0:3]
             S     = P[0:3, 0:3] + R_pos
-            K     = P[:, 0:3] @ np.linalg.inv(S)
+            S_reg = S + 1e-9 * np.eye(3)
+            K     = np.linalg.solve(S_reg, P[0:3, :]).T   # 15×3, stable solve
 
             dx = dx + K @ innov
-            P  = P - K @ S @ K.T
-            P  = 0.5 * (P + P.T)
+            H_pos = np.zeros((3, 15)); H_pos[:, 0:3] = np.eye(3)
+            IKH   = np.eye(15) - K @ H_pos
+            P     = IKH @ P @ IKH.T + K @ R_pos @ K.T    # Joseph form
+            P     = 0.5 * (P + P.T)
             update_occurred = True
 
         # Error injection and covariance reset (Solà §7.3)

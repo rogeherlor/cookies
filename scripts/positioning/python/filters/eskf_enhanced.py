@@ -241,9 +241,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             z_pos = p_gps - pIMU
             innov = z_pos - dx[0:3]
             S     = P[0:3, 0:3] + R_pos
-            K     = P[:, 0:3] @ np.linalg.inv(S)
+            S_reg = S + 1e-9 * np.eye(3)
+            K     = np.linalg.solve(S_reg, P[0:3, :]).T   # 15×3, stable solve
             dx    = dx + K @ innov
-            P     = P - K @ S @ K.T
+            H_pos = np.zeros((3, 15)); H_pos[:, 0:3] = np.eye(3)
+            IKH   = np.eye(15) - K @ H_pos
+            P     = IKH @ P @ IKH.T + K @ R_pos @ K.T    # Joseph form
             P     = 0.5 * (P + P.T)
             update_occurred = True
 
@@ -259,9 +262,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
         innov_nhc = z_nhc - H_nhc @ dx[3:9]
         S_nhc     = H_nhc @ P[3:9, 3:9] @ H_nhc.T + R_nhc
-        K_nhc     = P[:, 3:9] @ H_nhc.T @ np.linalg.inv(S_nhc)
+        S_nhc_reg = S_nhc + 1e-9 * np.eye(2)
+        K_nhc     = np.linalg.solve(S_nhc_reg, H_nhc @ P[3:9, :]).T  # 15×2
         dx = dx + K_nhc @ innov_nhc
-        P  = P - K_nhc @ S_nhc @ K_nhc.T
+        H_nhc_full = np.zeros((2, 15)); H_nhc_full[:, 3:9] = H_nhc
+        IKH_nhc    = np.eye(15) - K_nhc @ H_nhc_full
+        P  = IKH_nhc @ P @ IKH_nhc.T + K_nhc @ R_nhc @ K_nhc.T      # Joseph form
         P  = 0.5 * (P + P.T)
         update_occurred = True
 
@@ -276,9 +282,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             z_zupt     = -vIMU
             innov_zupt = z_zupt - dx[3:6]
             S_zupt     = P[3:6, 3:6] + R_zupt
-            K_zupt     = P[:, 3:6] @ np.linalg.inv(S_zupt)
+            S_zupt_reg = S_zupt + 1e-9 * np.eye(3)
+            K_zupt     = np.linalg.solve(S_zupt_reg, P[3:6, :]).T     # 15×3
             dx = dx + K_zupt @ innov_zupt
-            P  = P - K_zupt @ S_zupt @ K_zupt.T
+            H_zupt = np.zeros((3, 15)); H_zupt[:, 3:6] = np.eye(3)
+            IKH_zupt = np.eye(15) - K_zupt @ H_zupt
+            P  = IKH_zupt @ P @ IKH_zupt.T + K_zupt @ R_zupt @ K_zupt.T  # Joseph form
             P  = 0.5 * (P + P.T)
             update_occurred = True
 

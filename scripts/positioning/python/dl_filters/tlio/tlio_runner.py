@@ -88,20 +88,35 @@ def _add_tlio_src():
         sys.path.insert(0, src)
 
 
+def _resolve_seq_id(seq_id):
+    """Convert full KITTI drive name to short seq ID if needed."""
+    if seq_id is None:
+        return None
+    # Already a short ID (e.g. '01')
+    if len(seq_id) <= 2:
+        return seq_id
+    # Reverse lookup: drive name → short ID
+    from data_loader import KITTI_SEQ_TO_DRIVE
+    _drive_to_seq = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
+    return _drive_to_seq.get(seq_id, seq_id)
+
+
 def _find_weights(seq_id: str = None) -> Path:
     """
     Locate TLIO weights file.  Search order:
       1. TLIO_WEIGHTS env var
       2. artifacts/tlio/fold_<seq_id>.pt  (LOO fold)
       3. artifacts/tlio/tlio_resnet.pt    (all-sequences checkpoint)
+      4. Any available fold_*.pt          (fallback with warning)
     Raises RuntimeError if nothing found.
     """
     env = os.environ.get('TLIO_WEIGHTS')
     if env and Path(env).exists():
         return Path(env)
 
-    if seq_id is not None:
-        fold = _ARTIFACTS / f'fold_{seq_id}.pt'
+    short_id = _resolve_seq_id(seq_id)
+    if short_id is not None:
+        fold = _ARTIFACTS / f'fold_{short_id}.pt'
         if fold.exists():
             return fold
 
@@ -109,9 +124,17 @@ def _find_weights(seq_id: str = None) -> Path:
     if default.exists():
         return default
 
+    # Fallback: use any available fold (not proper LOO, but functional)
+    available = sorted(_ARTIFACTS.glob('fold_*.pt'))
+    available = [p for p in available if '_ckpt' not in p.name]
+    if available:
+        print(f"WARNING: TLIO fold_{short_id}.pt not found, falling back to {available[0].name}. "
+              f"Train the proper fold with: python ins_train.py tlio --seqs {short_id}")
+        return available[0]
+
     raise RuntimeError(
         "TLIO weights not found.  Train the model first:\n"
-        f"  python dl_filters/tlio/train_tlio.py --mode all --output {_ARTIFACTS}\n"
+        f"  python ins_train.py tlio\n"
         "or set the TLIO_WEIGHTS environment variable to an existing .pt file."
     )
 

@@ -26,3 +26,13 @@ simplicity/**/*.mk
 *.map
 *.s37
 
+*.whl
+*.dot
+*.har
+*.html
+*.svg
+*.hef
+*.onnx
+*.pt
+*.csv
+*.log
