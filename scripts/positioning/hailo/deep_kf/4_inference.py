@@ -98,9 +98,7 @@ class DeepKFNetONNX(torch.nn.Module):
         out, _ = self.lstm_l0(x)
         out, _ = self.lstm_l1(out)
         h_out = out[:, 0, :]
-        delta = self.decoder(h_out)
-        nav_state = x[:, 0, :]
-        return nav_state + delta
+        return self.decoder(h_out)  # delta only; caller adds residual
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -113,7 +111,8 @@ def _make_x(nav_np: np.ndarray) -> np.ndarray:
 def infer_pytorch(model, nav_np):
     x = _make_x(nav_np)
     with torch.no_grad():
-        return model(torch.from_numpy(x).float()).numpy()
+        delta = model(torch.from_numpy(x).float()).numpy()
+    return delta + nav_np   # x_t^{+-} = delta + x_{t-1}^+
 
 
 def infer_hef(hef_path: Path, nav_np: np.ndarray) -> np.ndarray:
@@ -162,7 +161,8 @@ def infer_hef(hef_path: Path, nav_np: np.ndarray) -> np.ndarray:
                 configured_model.run([bindings], timeout_ms=1000)
                 results.append(out_buf.copy())
 
-    return np.concatenate(results, axis=0)   # [N, 15]
+    delta = np.concatenate(results, axis=0)   # [N, 15]
+    return delta + nav_np                     # x_t^{+-} = delta + x_{t-1}^+
 
 
 def _fmt(arr):

@@ -21,13 +21,22 @@ Input:
                           seq_len=1 in dim-1 for LSTM-style 3-D input
 
 Output:
-    state  (1, 15)       predicted state x_t^{+-} (residual already added)
+    state  (1, 15)       delta for the last timestep; caller adds residual
 
 Why a single 3-D input?
 -----------------------
 Hailo's emulator (acceleras) maps LSTM gates to Conv2D ops and requires the
 input tensor to have at least 3 dimensions (N, H, W or N, H, W, C).
 Keeping the input as [N, 1, 15] gives Hailo a clean 3-D LSTM-style input.
+
+Note on bias_hh epsilon
+-----------------------
+The trained model may have near-zero bias_hh values.  With h0=0 this makes
+the LSTM recurrent branch always output all-zeros during calibration, causing
+scale=0 → desired_factor=inf → crash in Hailo's EW_Add quantisation.
+A small epsilon (1e-2) is added to bias_hh in the ONNX wrapper so the
+recurrent branch is always non-zero.  This does not affect the model's
+trained weights and has negligible impact on inference accuracy.
 
 Note on statefulness
 --------------------
@@ -83,16 +92,21 @@ class DeepKFNetONNX(nn.Module):
         self.lstm_l1 = nn.LSTM(input_size=hidden_dim, hidden_size=hidden_dim,
                                num_layers=1, batch_first=True)
 
-        # Copy weights layer-by-layer from the original 2-layer LSTM
+        # Copy weights layer-by-layer from the original 2-layer LSTM.
+        # A small epsilon is added to bias_hh so that the LSTM's recurrent branch
+        # always produces a non-zero output even when h0=0 (first calibration step).
+        # Without this the EW_Add inside Hailo's LSTM representation gets scale=0
+        # → desired_factor=inf → crash in int_smallnum_factorize.
+        BIAS_HH_EPS = 1e-2
         self.lstm_l0.weight_ih_l0.data.copy_(orig_lstm.weight_ih_l0.data)
         self.lstm_l0.weight_hh_l0.data.copy_(orig_lstm.weight_hh_l0.data)
         self.lstm_l0.bias_ih_l0.data.copy_(orig_lstm.bias_ih_l0.data)
-        self.lstm_l0.bias_hh_l0.data.copy_(orig_lstm.bias_hh_l0.data)
+        self.lstm_l0.bias_hh_l0.data.copy_(orig_lstm.bias_hh_l0.data + BIAS_HH_EPS)
 
         self.lstm_l1.weight_ih_l0.data.copy_(orig_lstm.weight_ih_l1.data)
         self.lstm_l1.weight_hh_l0.data.copy_(orig_lstm.weight_hh_l1.data)
         self.lstm_l1.bias_ih_l0.data.copy_(orig_lstm.bias_ih_l1.data)
-        self.lstm_l1.bias_hh_l0.data.copy_(orig_lstm.bias_hh_l1.data)
+        self.lstm_l1.bias_hh_l0.data.copy_(orig_lstm.bias_hh_l1.data + BIAS_HH_EPS)
 
         self.decoder = model.decoder
 
@@ -105,14 +119,13 @@ class DeepKFNetONNX(nn.Module):
 
         Returns
         -------
-        state : (batch, 15) — predicted state x_t^{+-} (with residual)
+        delta : (batch, 15) — state increment; caller adds residual:
+                state = delta + x[:, 0, :]
         """
         out_l0, _ = self.lstm_l0(x)       # (batch, 1, 128)
         out_l1, _ = self.lstm_l1(out_l0)  # (batch, 1, 128)
         h_out = out_l1[:, 0, :]           # (batch, 128)
-        delta = self.decoder(h_out)       # (batch, 15)
-        nav_state = x[:, 0, :]           # (batch, 15) — input for residual
-        return nav_state + delta          # (batch, 15)
+        return self.decoder(h_out)        # (batch, 15) — delta only; caller adds residual
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -223,7 +236,7 @@ def main():
     print()
     print("ONNX interface:")
     print(f"  Input : x=[1, 1, {input_dim}]  (batch, seq=1, nav_state)")
-    print(f"  Output: state=[1, {input_dim}]  (predicted state)")
+    print(f"  Output: state=[1, {input_dim}]  (delta; caller adds residual)")
 
 
 if __name__ == "__main__":

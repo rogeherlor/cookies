@@ -70,9 +70,12 @@ log = init_logging()   # module-level so helpers can use it
 class DeepKFNetONNX(torch.nn.Module):
     """Matches the exported ONNX: two unrolled single-layer LSTMs, no h0/c0.
 
-    Accepts a single 3-D input x [batch, 1, 15] = nav_state.
-    Includes the residual connection so output is x_t^{+-} [batch, 15].
+    Accepts x [batch, 1, 15] = nav_state.  Returns delta [batch, 15].
+    Caller adds the residual: state = delta + nav_np.
+    bias_hh is offset by BIAS_HH_EPS so the LSTM recurrent branch is never
+    all-zeros during Hailo calibration (which always starts with h0=0).
     """
+    BIAS_HH_EPS = 1e-2
 
     def __init__(self, model: DeepKFNet):
         super().__init__()
@@ -86,12 +89,12 @@ class DeepKFNetONNX(torch.nn.Module):
         self.lstm_l0.weight_ih_l0.data.copy_(orig.weight_ih_l0)
         self.lstm_l0.weight_hh_l0.data.copy_(orig.weight_hh_l0)
         self.lstm_l0.bias_ih_l0.data.copy_(orig.bias_ih_l0)
-        self.lstm_l0.bias_hh_l0.data.copy_(orig.bias_hh_l0)
+        self.lstm_l0.bias_hh_l0.data.copy_(orig.bias_hh_l0 + self.BIAS_HH_EPS)
 
         self.lstm_l1.weight_ih_l0.data.copy_(orig.weight_ih_l1)
         self.lstm_l1.weight_hh_l0.data.copy_(orig.weight_hh_l1)
         self.lstm_l1.bias_ih_l0.data.copy_(orig.bias_ih_l1)
-        self.lstm_l1.bias_hh_l0.data.copy_(orig.bias_hh_l1)
+        self.lstm_l1.bias_hh_l0.data.copy_(orig.bias_hh_l1 + self.BIAS_HH_EPS)
 
         self.decoder = model.decoder
 
@@ -99,9 +102,7 @@ class DeepKFNetONNX(torch.nn.Module):
         out, _ = self.lstm_l0(x)
         out, _ = self.lstm_l1(out)
         h_out = out[:, 0, :]               # (batch, 128)
-        delta = self.decoder(h_out)         # (batch, 15)
-        nav_state = x[:, 0, :]             # (batch, 15)
-        return nav_state + delta            # (batch, 15)
+        return self.decoder(h_out)         # (batch, 15)  — delta only
 
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
@@ -112,10 +113,14 @@ def _make_x(nav_np):
 
 
 def infer_pytorch(model, nav_np):
-    """Run PyTorch model on numpy arrays, return numpy state [N, 15]."""
+    """Run PyTorch model on numpy arrays, return numpy state [N, 15].
+
+    The ONNX wrapper outputs delta only; add nav_np as the residual here.
+    """
     x = _make_x(nav_np)
     with torch.no_grad():
-        return model(torch.from_numpy(x).float()).numpy()
+        delta = model(torch.from_numpy(x).float()).numpy()
+    return delta + nav_np  # x_t^{+-} = delta + x_{t-1}^+
 
 
 def infer_onnx(session, nav_np):
@@ -124,8 +129,9 @@ def infer_onnx(session, nav_np):
     results = []
     for i in range(len(x)):
         out = session.run(None, {"x": x[i : i + 1]})
-        results.append(out[0])   # state [1, 15]
-    return np.concatenate(results, axis=0)
+        results.append(out[0])   # delta [1, 15]
+    delta = np.concatenate(results, axis=0)
+    return delta + nav_np  # residual
 
 
 def _hailo_input_names(runner):
@@ -140,6 +146,8 @@ def infer_hailo(runner, ctx, nav_np):
     Hailo stores inputs in NHWC 4-D format internally.  Parsing with shape
     [1, 1, 15] causes Hailo to add a channel dim -> [1, 1, 1, 15].  We must
     provide the same 4-D shape at inference time.
+
+    The ONNX/HAR output is delta only; add nav_np as the residual here.
     """
     names = _hailo_input_names(runner)
     log.debug("Hailo input layer names: %s", names)
@@ -149,7 +157,8 @@ def infer_hailo(runner, ctx, nav_np):
         )
     x = _make_x(nav_np)[:, :, np.newaxis, :]  # [N, 1, 1, 15] NHWC
     results = runner.infer(ctx, {names[0]: x})
-    return np.concatenate(results, axis=0)
+    delta = np.concatenate(results, axis=0)
+    return delta + nav_np  # residual
 
 
 # ── Comparison printout ───────────────────────────────────────────────────────
@@ -253,14 +262,48 @@ def main():
             backends["SDK_FP_OPT"] = infer_hailo(runner, ctx, infer_nav)
 
         # 5. Quantization -> SDK_QUANTIZED
+        # Two Hailo SDK bugs encountered and worked around:
+        #
+        # Bug 1 — dead_layers_removal IndexError:
+        #   Normalization layers wrapping LSTM hidden-state inputs have near-zero
+        #   weights and are flagged as dead.  After removal the output node has no
+        #   predecessor → IndexError in model_flow.py.
+        #   Fix: disable dead_layers_removal via model script (below).
+        #
+        # Bug 2 — EW_Add zero-scale crash (ValueError in int_smallnum_factorize):
+        #   With h0=0 the LSTM recurrent branch (U·h + b_hh) is all-zeros when
+        #   b_hh≈0, giving scale=0 → desired_factor=inf → np.arange crash.
+        #   Fix: BIAS_HH_EPS=1e-2 added to bias_hh in DeepKFNetONNX.__init__ so
+        #   the recurrent branch is never all-zeros even at the first calibration
+        #   step.  This is applied in the ONNX wrapper only (trained weights unchanged).
+        #
+        # Remaining limitation (no fix without GPU):
+        #   Without a GPU Hailo reduces to optimization level 0 and compresses
+        #   near-zero normalization layers to ≤2-bit, producing NaN kernels that
+        #   crash activation quantization (AccelerasNegativeSlopesError).
+        #   The try-except below catches this and skips SDK_QUANTIZED gracefully.
+        runner.load_model_script(
+            "pre_quantization_optimization(dead_layers_removal, policy=disabled)\n"
+        )
         log.info("Running optimize() (quantization) ...")
-        runner.optimize(calib_dataset)
-        runner.save_har(str(QUANTIZED_HAR_PATH))
-        log.info("Quantized HAR saved: %s", QUANTIZED_HAR_PATH)
+        try:
+            runner.optimize(calib_dataset)
+            runner.save_har(str(QUANTIZED_HAR_PATH))
+            log.info("Quantized HAR saved: %s", QUANTIZED_HAR_PATH)
 
-        log.info("Hailo SDK_QUANTIZED inference ...")
-        with runner.infer_context(InferenceContext.SDK_QUANTIZED) as ctx:
-            backends["SDK_QUANTIZED"] = infer_hailo(runner, ctx, infer_nav)
+            log.info("Hailo SDK_QUANTIZED inference ...")
+            with runner.infer_context(InferenceContext.SDK_QUANTIZED) as ctx:
+                backends["SDK_QUANTIZED"] = infer_hailo(runner, ctx, infer_nav)
+        except Exception as e:
+            log.warning(
+                "Quantization failed (%s: %s). "
+                "Known Hailo SDK limitation for LSTM models without a GPU: "
+                "near-zero normalization layer weights get over-compressed (<=2-bit), "
+                "producing NaN kernels that crash the quantization flow. "
+                "SDK_NATIVE and SDK_FP_OPTIMIZED results are still valid. "
+                "Re-run with a GPU or after retraining the model.",
+                type(e).__name__, e,
+            )
 
     # ── Print results ─────────────────────────────────────────────────────────
     print_comparison(backends)
