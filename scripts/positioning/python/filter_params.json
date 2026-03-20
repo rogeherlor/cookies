@@ -714,6 +714,45 @@
             "2011_09_30_drive_0034_extract"
           ]
         }
+      },
+      "2011_10_03_drive_0042_extract": {
+        "params": {
+          "Qpos": 0.11380828650654291,
+          "Qvel": 0.5550900861244076,
+          "QorientXY": 0.015620383296000526,
+          "QorientZ": 0.19283259055700083,
+          "Qacc": 0.1220344631575754,
+          "QgyrXY": 0.0002085123064134433,
+          "QgyrZ": 0.012593066709700536,
+          "Rpos": 1.0079588916840094,
+          "beta_acc": -2.894971727974612e-07,
+          "beta_gyr": -0.3912587016433242,
+          "P_pos_std": 15.428416226318328,
+          "P_vel_std": 0.16695004068248365,
+          "P_orient_std": 0.2096422323656424,
+          "P_acc_std": 0.04530831208075604,
+          "P_gyr_std": 0.005634376174957589
+        },
+        "cost": 6.620149646381196,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 3,
+          "popsize": 8,
+          "timestamp": "20260319_124434",
+          "outage": {
+            "start": 200,
+            "duration": 200
+          },
+          "held_out_seq": "01",
+          "training_seqs": [
+            "2011_09_30_drive_0016_extract",
+            "2011_09_30_drive_0020_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
       }
     }
   },
@@ -1428,6 +1467,45 @@
           "held_out_seq": "02",
           "training_seqs": [
             "2011_10_03_drive_0042_extract",
+            "2011_09_30_drive_0016_extract",
+            "2011_09_30_drive_0020_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
+      },
+      "2011_10_03_drive_0042_extract": {
+        "params": {
+          "Qpos": 3.956542646719828,
+          "Qvel": 70.58340588602107,
+          "QorientXY": 4.424574215621992e-05,
+          "QorientZ": 0.021884380025254852,
+          "Qacc": 0.0036821166145483758,
+          "QgyrXY": 1.0520595365833844e-06,
+          "QgyrZ": 0.05145333841048418,
+          "Rpos": 0.1658833388758925,
+          "beta_acc": -1.6893803029588142e-06,
+          "beta_gyr": -0.41472426133188395,
+          "P_pos_std": 24.549237860355706,
+          "P_vel_std": 0.17725135129512914,
+          "P_orient_std": 0.04260882915317635,
+          "P_acc_std": 0.03215595213734269,
+          "P_gyr_std": 0.0005321311729646838
+        },
+        "cost": 7.28238674064052,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 3,
+          "popsize": 8,
+          "timestamp": "20260319_124434",
+          "outage": {
+            "start": 200,
+            "duration": 200
+          },
+          "held_out_seq": "01",
+          "training_seqs": [
             "2011_09_30_drive_0016_extract",
             "2011_09_30_drive_0020_extract",
             "2011_09_30_drive_0027_extract",
@@ -2158,6 +2236,45 @@
             "2011_09_30_drive_0034_extract"
           ]
         }
+      },
+      "2011_10_03_drive_0042_extract": {
+        "params": {
+          "Qpos": 32.47113747572613,
+          "Qvel": 2.325730526995195,
+          "QorientXY": 1.0996123608695963e-05,
+          "QorientZ": 0.05238767630928656,
+          "Qacc": 0.0014722041228871126,
+          "QgyrXY": 0.0001377337151766482,
+          "QgyrZ": 0.07294912144696529,
+          "Rpos": 0.12581214212014158,
+          "beta_acc": -1.6267045911112864e-06,
+          "beta_gyr": -1.0540062221781141,
+          "P_pos_std": 0.46377871903563317,
+          "P_vel_std": 0.38042597258758093,
+          "P_orient_std": 0.031606687350332105,
+          "P_acc_std": 0.0021493772544337415,
+          "P_gyr_std": 0.002775590107776641
+        },
+        "cost": 6.248894050579121,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 3,
+          "popsize": 8,
+          "timestamp": "20260319_124434",
+          "outage": {
+            "start": 200,
+            "duration": 200
+          },
+          "held_out_seq": "01",
+          "training_seqs": [
+            "2011_09_30_drive_0016_extract",
+            "2011_09_30_drive_0020_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
       }
     }
   },
@@ -2872,6 +2989,45 @@
           "held_out_seq": "02",
           "training_seqs": [
             "2011_10_03_drive_0042_extract",
+            "2011_09_30_drive_0016_extract",
+            "2011_09_30_drive_0020_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
+      },
+      "2011_10_03_drive_0042_extract": {
+        "params": {
+          "Qpos": 1.0302367596349167,
+          "Qvel": 0.4861997565568296,
+          "QorientXY": 3.600504013512716e-05,
+          "QorientZ": 0.029199530751453612,
+          "Qacc": 0.002694260570597779,
+          "QgyrXY": 0.0002466155301834006,
+          "QgyrZ": 0.21167735004780253,
+          "Rpos": 0.2005534544344564,
+          "beta_acc": -4.064136918758852e-06,
+          "beta_gyr": -0.013011594911167391,
+          "P_pos_std": 6.064521377792277,
+          "P_vel_std": 1.0745346861919411,
+          "P_orient_std": 0.0511592609222009,
+          "P_acc_std": 0.0051816329293771415,
+          "P_gyr_std": 0.005799951512243338
+        },
+        "cost": 3.0907672349663016,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 3,
+          "popsize": 8,
+          "timestamp": "20260319_124434",
+          "outage": {
+            "start": 200,
+            "duration": 200
+          },
+          "held_out_seq": "01",
+          "training_seqs": [
             "2011_09_30_drive_0016_extract",
             "2011_09_30_drive_0020_extract",
             "2011_09_30_drive_0027_extract",
@@ -3602,6 +3758,45 @@
             "2011_09_30_drive_0034_extract"
           ]
         }
+      },
+      "2011_10_03_drive_0042_extract": {
+        "params": {
+          "Qpos": 1.6378321804670237,
+          "Qvel": 5.857065969998768,
+          "QorientXY": 8.740044450072756e-05,
+          "QorientZ": 0.08658199087364649,
+          "Qacc": 0.09157198069935488,
+          "QgyrXY": 6.132675484515022e-06,
+          "QgyrZ": 0.047135910512861715,
+          "Rpos": 0.32508439301000314,
+          "beta_acc": -2.903133748729397e-07,
+          "beta_gyr": -0.05519866109754442,
+          "P_pos_std": 8.554864636331208,
+          "P_vel_std": 0.731301620299391,
+          "P_orient_std": 0.03988318048107488,
+          "P_acc_std": 0.0023500182026301095,
+          "P_gyr_std": 0.0019180416491558815
+        },
+        "cost": 7.05581643709679,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 3,
+          "popsize": 8,
+          "timestamp": "20260319_124434",
+          "outage": {
+            "start": 200,
+            "duration": 200
+          },
+          "held_out_seq": "01",
+          "training_seqs": [
+            "2011_09_30_drive_0016_extract",
+            "2011_09_30_drive_0020_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
       }
     }
   },
@@ -4316,6 +4511,45 @@
           "held_out_seq": "02",
           "training_seqs": [
             "2011_10_03_drive_0042_extract",
+            "2011_09_30_drive_0016_extract",
+            "2011_09_30_drive_0020_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
+      },
+      "2011_10_03_drive_0042_extract": {
+        "params": {
+          "Qpos": 0.5813604548528428,
+          "Qvel": 2.0457738302397597,
+          "QorientXY": 0.0002653988961191142,
+          "QorientZ": 0.5496091721730593,
+          "Qacc": 0.0012885162184925938,
+          "QgyrXY": 5.53450192240681e-06,
+          "QgyrZ": 0.0013198529758852188,
+          "Rpos": 0.11831713624824997,
+          "beta_acc": -1.1430298665491373e-08,
+          "beta_gyr": -0.9761697058372574,
+          "P_pos_std": 0.7050464408041685,
+          "P_vel_std": 1.6143466952203027,
+          "P_orient_std": 0.04572188390361835,
+          "P_acc_std": 0.05260777350784225,
+          "P_gyr_std": 0.0001891124396226919
+        },
+        "cost": 4.029428541471061,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 3,
+          "popsize": 8,
+          "timestamp": "20260319_124434",
+          "outage": {
+            "start": 200,
+            "duration": 200
+          },
+          "held_out_seq": "01",
+          "training_seqs": [
             "2011_09_30_drive_0016_extract",
             "2011_09_30_drive_0020_extract",
             "2011_09_30_drive_0027_extract",

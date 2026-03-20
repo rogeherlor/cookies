@@ -36,14 +36,34 @@ except ImportError:
 # ── Per-filter colors and markers ─────────────────────────────────────────────
 _FILTER_STYLE = {
     'ekf_vanilla':   {'color': '#1f77b4', 'ls': '--',  'marker': 'o', 'label': 'EKF'},
-    'ekf_enhanced':  {'color': '#0a3d7a', 'ls': '-',   'marker': 's', 'label': 'EKF Enhanced'},
+    'ekf_enhanced':  {'color': '#0a3d7a', 'ls': '-',   'marker': 's', 'label': 'EKF+'},
     'eskf_vanilla':  {'color': '#ff7f0e', 'ls': '--',  'marker': '^', 'label': 'ESKF'},
-    'eskf_enhanced': {'color': '#a63c00', 'ls': '-',   'marker': 'D', 'label': 'ESKF Enhanced'},
+    'eskf_enhanced': {'color': '#a63c00', 'ls': '-',   'marker': 'D', 'label': 'ESKF+'},
     'iekf_vanilla':  {'color': '#2ca02c', 'ls': '--',  'marker': 'v', 'label': 'IEKF'},
-    'iekf_enhanced': {'color': '#145214', 'ls': '-',   'marker': 'P', 'label': 'IEKF Enhanced'},
+    'iekf_enhanced': {'color': '#145214', 'ls': '-',   'marker': 'P', 'label': 'IEKF+'},
     'imu_only':      {'color': '#d62728', 'ls': ':',   'marker': 'x', 'label': 'IMU Only'},
     'rts_smoother':  {'color': '#9467bd', 'ls': '-',   'marker': '*', 'label': 'Ground Truth (RTS)'},
+    # Deep learning filters
+    'iekf_ai_imu':   {'color': '#c2185b', 'ls': '-',   'marker': 'o', 'label': 'IEKF AI-IMU'},
+    'tlio':          {'color': '#00838f', 'ls': '-',   'marker': 's', 'label': 'TLIO'},
+    'deep_kf':       {'color': '#6a0dad', 'ls': '-',   'marker': '^', 'label': 'Deep KF'},
+    'tartan_imu':    {'color': '#bf360c', 'ls': '-',   'marker': 'D', 'label': 'Tartan IMU'},
+    'isam2':         {'color': '#1565c0', 'ls': '-',   'marker': 'P', 'label': 'iSAM2'},
 }
+
+
+# Each entry: (filename_suffix, set_of_keys, plot_title)
+_TRAJECTORY_GROUPS = [
+    ('ekf',         {'ekf_vanilla', 'ekf_enhanced'},  '2D Trajectory \u2014 EKF'),
+    ('eskf',        {'eskf_vanilla', 'eskf_enhanced'}, '2D Trajectory \u2014 ESKF'),
+    ('iekf',        {'iekf_vanilla', 'iekf_enhanced'}, '2D Trajectory \u2014 IEKF'),
+    ('imu_only',    {'imu_only'},                      '2D Trajectory \u2014 IMU Only'),
+    ('iekf_ai_imu', {'iekf_ai_imu'},                   '2D Trajectory \u2014 IEKF AI-IMU'),
+    ('tlio',        {'tlio'},                          '2D Trajectory \u2014 TLIO'),
+    ('deep_kf',     {'deep_kf'},                       '2D Trajectory \u2014 Deep KF'),
+    ('tartan_imu',  {'tartan_imu'},                    '2D Trajectory \u2014 Tartan IMU'),
+    ('isam2',       {'isam2'},                         '2D Trajectory \u2014 iSAM2'),
+]
 
 
 def _style(key: str) -> dict:
@@ -68,7 +88,9 @@ def _save(fig, path: str, dpi: int = 150) -> str:
 # ── 1. 2D Trajectory overlay ──────────────────────────────────────────────────
 
 def _plot_trajectory_2d(filter_results, p_gt, gnss_outage_info, output_dir,
-                        lla0=None, p_rts=None, gt_label='Ground Truth') -> str:
+                        lla0=None, p_rts=None, gt_label='Ground Truth',
+                        out_fname='compare_trajectory_2d.png',
+                        title='2D Trajectory Comparison') -> str:
     A = gnss_outage_info['start_idx']
     B = gnss_outage_info['end_idx']
     use_map = lla0 is not None and HAS_MAP_SUPPORT
@@ -90,61 +112,80 @@ def _plot_trajectory_2d(filter_results, p_gt, gnss_outage_info, output_dir,
             xs_fil.append(xe); ys_fil.append(ye)
         x_fil = np.concatenate(xs_fil) if xs_fil else x_gt
         y_fil = np.concatenate(ys_fil) if ys_fil else y_gt
-        ax.set_xlim(*_axis_limits(x_gt, x_fil))
-        ax.set_ylim(*_axis_limits(y_gt, y_fil))
+        # Build limits: min-GT + expand for filter (capped at 1.5× GT half-extent).
+        # Then expand the shorter axis to match the longer one so the map has equal
+        # x/y scale without set_aspect ever needing to shrink the other axis.
+        _xl = _axis_limits(x_gt, x_fil)
+        _yl = _axis_limits(y_gt, y_fil)
+        _xr, _yr = _xl[1] - _xl[0], _yl[1] - _yl[0]
+        if _xr >= _yr:
+            _cy = (_yl[0] + _yl[1]) / 2.0
+            map_xlim, map_ylim = _xl, (_cy - _xr / 2, _cy + _xr / 2)
+        else:
+            _cx = (_xl[0] + _xl[1]) / 2.0
+            map_xlim, map_ylim = (_cx - _yr / 2, _cx + _yr / 2), _yl
+        # Set before add_basemap so contextily fetches the right tile region.
+        ax.set_xlim(*map_xlim)
+        ax.set_ylim(*map_ylim)
         try:
             ctx.add_basemap(ax, crs='EPSG:3857', source=ctx.providers.OpenStreetMap.Mapnik,
                             zoom='auto', alpha=1.0)
         except Exception as e:
             print(f"Warning: Could not add map background: {e}")
         for entry in filter_results:
-            if entry['key'] == 'imu_only':
-                continue
             st = _style(entry['key'])
             p  = entry['p']
             lat_e, lon_e, _ = pm.enu2geodetic(p[:, 0], p[:, 1], p[:, 2],
                                                lla0[0], lla0[1], lla0[2])
             x_e, y_e = _latlon_to_mercator(lat_e, lon_e)
             ax.plot(x_e, y_e, color=st['color'], ls=st['ls'], lw=2.0,
-                    label=st['label'], alpha=1.0, zorder=5)
+                    label=st['label'], alpha=0.92, zorder=5)
+        ax.plot(x_gt, y_gt, color='white', lw=3.5, zorder=1)   # white halo for readability
+        ax.plot(x_gt, y_gt, 'k--', lw=1.5, label=gt_label, zorder=2)
+        if A > 0 and B > A:
+            ax.plot(x_gt[A:B+1], y_gt[A:B+1], color='red', lw=5.0, alpha=0.45,
+                    zorder=3, label='GT outage')  # transparent red highlight
         if p_rts is not None:
             lat_r, lon_r, _ = pm.enu2geodetic(p_rts[:, 0], p_rts[:, 1], p_rts[:, 2],
                                                lla0[0], lla0[1], lla0[2])
             x_r, y_r = _latlon_to_mercator(lat_r, lon_r)
             ax.plot(x_r, y_r, color='#9467bd', lw=2.5, ls='-',
-                    label='Ground Truth (RTS)', zorder=8)
+                    label='Ground Truth (RTS)', zorder=4)
             if A > 0 and B > A:
                 ax.plot(x_r[A:B+1], y_r[A:B+1], color='#9467bd', lw=5.0,
-                        ls='-', zorder=9)   # highlight outage segment, no extra legend entry
-        ax.plot(x_gt, y_gt, color='white', lw=3.5, zorder=9)   # white halo for readability
-        ax.plot(x_gt, y_gt, 'k--', lw=1.5, label=gt_label, zorder=10)
+                        ls='-', zorder=4)   # highlight outage segment, no extra legend entry
         if A > 0 and B > A:
-            ax.plot(x_gt[A:B+1], y_gt[A:B+1], 'k-', lw=3.5, zorder=11)  # highlight outage
-            ax.plot(x_gt[A], y_gt[A], 'gv', ms=10, zorder=12, label='Outage start')
-            ax.plot(x_gt[B], y_gt[B], 'r^', ms=10, zorder=12, label='Outage end')
+            ax.plot(x_gt[A], y_gt[A], 'gv', ms=10, zorder=6, label='Outage start')
+            ax.plot(x_gt[B], y_gt[B], 'r^', ms=10, zorder=6, label='Outage end')
+        # Re-apply limits after drawing (artist additions can trigger autoscale).
+        # Because map_xlim and map_ylim already have equal ranges, set_aspect is a no-op.
         ax.set_aspect('equal')
+        ax.set_xlim(*map_xlim)
+        ax.set_ylim(*map_ylim)
         _apply_mercator_tick_labels(ax)
         ax.set_xlabel('Easting (Web Mercator)')
         ax.set_ylabel('Northing (Web Mercator)')
-        ax.set_title('2D Trajectory Comparison (Map View)')
+        ax.set_title(f'{title} (Map View)')
     else:
         non_imu = [e for e in filter_results if e['key'] != 'imu_only']
         for entry in filter_results:
             st = _style(entry['key'])
             p  = entry['p']
             ax.plot(p[:, 0], p[:, 1], color=st['color'], ls=st['ls'], lw=2.0,
-                    label=st['label'], alpha=1.0, zorder=5)
+                    label=st['label'], alpha=0.92, zorder=5)
+        ax.plot(p_gt[:, 0], p_gt[:, 1], 'k--', lw=1.5, label=gt_label, zorder=2)
+        if A > 0 and B > A:
+            ax.plot(p_gt[A:B+1, 0], p_gt[A:B+1, 1], color='red', lw=5.0, alpha=0.45,
+                    zorder=3, label='GT outage')  # transparent red highlight
         if p_rts is not None:
             ax.plot(p_rts[:, 0], p_rts[:, 1], color='#9467bd', lw=2.5, ls='-',
-                    label='Ground Truth (RTS)', zorder=8)
+                    label='Ground Truth (RTS)', zorder=4)
             if A > 0 and B > A:
                 ax.plot(p_rts[A:B+1, 0], p_rts[A:B+1, 1], color='#9467bd', lw=5.0,
-                        ls='-', zorder=9)   # highlight outage segment, no extra legend entry
-        ax.plot(p_gt[:, 0], p_gt[:, 1], 'k--', lw=1.5, label=gt_label, zorder=10)
+                        ls='-', zorder=4)   # highlight outage segment, no extra legend entry
         if A > 0 and B > A:
-            ax.plot(p_gt[A:B+1, 0], p_gt[A:B+1, 1], 'k-', lw=3.5, zorder=11)  # highlight
-            ax.plot(p_gt[A, 0], p_gt[A, 1], 'gv', ms=10, zorder=12, label='Outage start')
-            ax.plot(p_gt[B, 0], p_gt[B, 1], 'r^', ms=10, zorder=12, label='Outage end')
+            ax.plot(p_gt[A, 0], p_gt[A, 1], 'gv', ms=10, zorder=6, label='Outage start')
+            ax.plot(p_gt[B, 0], p_gt[B, 1], 'r^', ms=10, zorder=6, label='Outage end')
         # Per-axis limits: GT + non-IMU filters, capped at 1× GT span beyond GT boundary
         x_fil = np.concatenate([e['p'][:, 0] for e in non_imu]) if non_imu else p_gt[:, 0]
         y_fil = np.concatenate([e['p'][:, 1] for e in non_imu]) if non_imu else p_gt[:, 1]
@@ -152,12 +193,12 @@ def _plot_trajectory_2d(filter_results, p_gt, gnss_outage_info, output_dir,
         ax.set_ylim(*_axis_limits(p_gt[:, 1], y_fil))
         ax.set_xlabel('East [m]')
         ax.set_ylabel('North [m]')
-        ax.set_title('2D Trajectory Comparison')
+        ax.set_title(title)
 
     ax.legend(loc='lower left', fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    path = os.path.join(output_dir, 'compare_trajectory_2d.png')
+    path = os.path.join(output_dir, out_fname)
     return _save(fig, path)
 
 
@@ -361,8 +402,8 @@ def _axis_limits(gt_vals, fil_vals, n=1.5):
     pad = max(gt_pos + gt_neg, 1.0) * 0.03
     fil_pos = max(float(fil_vals.max()) - cx, 0.0)
     fil_neg = max(cx - float(fil_vals.min()), 0.0)
-    lim_max = cx + min(fil_pos, n * gt_pos) + pad
-    lim_min = cx - min(fil_neg, n * gt_neg) - pad
+    lim_max = cx + min(max(fil_pos, gt_pos), n * gt_pos) + pad
+    lim_min = cx - min(max(fil_neg, gt_neg), n * gt_neg) - pad
     return lim_min, lim_max
 
 
@@ -409,7 +450,7 @@ def _plot_outage_zoom(filter_results, p_gt, gnss_outage_info, output_dir,
                                                lla0[0], lla0[1], lla0[2])
             x_e, y_e = _latlon_to_mercator(lat_e, lon_e)
             ax.plot(x_e, y_e, color=st['color'], ls=st['ls'], lw=2.0,
-                    label=st['label'], alpha=1.0, zorder=5)
+                    label=st['label'], alpha=0.92, zorder=5)
         if p_rts is not None:
             lat_r, lon_r, _ = pm.enu2geodetic(p_rts[A:B, 0], p_rts[A:B, 1], p_rts[A:B, 2],
                                                lla0[0], lla0[1], lla0[2])
@@ -433,7 +474,7 @@ def _plot_outage_zoom(filter_results, p_gt, gnss_outage_info, output_dir,
             st = _style(entry['key'])
             p  = entry['p']
             ax.plot(p[A:B, 0], p[A:B, 1], color=st['color'], ls=st['ls'], lw=2.0,
-                    label=st['label'], alpha=1.0, zorder=5)
+                    label=st['label'], alpha=0.92, zorder=5)
         if p_rts is not None:
             ax.plot(p_rts[A:B, 0], p_rts[A:B, 1], color='#9467bd', lw=3.5, ls='-',
                     label='Ground Truth (RTS)', zorder=11)
@@ -613,9 +654,14 @@ def generate_comparison_plots(
     generated = []
 
     plots = [
-        ('trajectory_2d',    lambda: _plot_trajectory_2d(
-            filter_results, p_gt, gnss_outage_info, output_dir,
-            lla0=lla0, p_rts=p_rts, gt_label=gt_label)),
+        (f'trajectory_2d_{sfx}', lambda fr=keys, t=ttl, s=sfx: _plot_trajectory_2d(
+            [e for e in filter_results if e['key'] in fr],
+            p_gt, gnss_outage_info, output_dir,
+            lla0=lla0, p_rts=p_rts, gt_label=gt_label,
+            out_fname=f'compare_trajectory_2d_{s}.png',
+            title=t))
+        for sfx, keys, ttl in _TRAJECTORY_GROUPS
+    ] + [
         ('position_error',   lambda: _plot_position_error(
             filter_results, p_gt, gnss_outage_info, sample_rate, output_dir)),
         ('error_magnitude',  lambda: _plot_error_magnitude(

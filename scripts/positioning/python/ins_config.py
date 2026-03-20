@@ -48,8 +48,8 @@ MODE_3D = False
 
 
 # ── GNSS outage simulation ─────────────────────────────────────────────────────
-OUTAGE_START    = 200   # [s] — time from start when GPS signal is lost
-OUTAGE_DURATION = 200    # [s] — duration of GPS blackout
+OUTAGE_START    = 80  # [s] — time from start when GPS signal is lost
+OUTAGE_DURATION = 40   # [s] — duration of GPS blackout
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
@@ -67,11 +67,12 @@ DR_MODE = False
 
 
 # ── Ground truth source ────────────────────────────────────────────────────────
-# True  → use the RTS smoother (best achievable from IMU+GPS, full-data pass)
-#          as ground truth for metrics and plots.
-# False → use the raw KITTI GPS reference as ground truth; RTS is shown as an
-#          additional purple overlay in trajectory/error plots.
-USE_RTS_AS_GT = True
+# 'batch'  → FGO-Batch: offline GTSAM factor graph optimisation (non-causal,
+#             best precision; outage window is ignored — all GPS used).
+# 'rts'    → RTS smoother: EKF-based forward-backward sweep (fast, good).
+# 'kitti'  → raw KITTI GPS reference; RTS shown as purple overlay.
+GT_SOURCE = 'batch'
+USE_RTS_AS_GT = (GT_SOURCE == 'rts')   # backward-compat alias
 
 
 # ── Filter parameters ──────────────────────────────────────────────────────────

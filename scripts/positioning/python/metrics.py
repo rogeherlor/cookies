@@ -214,7 +214,11 @@ def analyze_outage_segment(errors, start_idx, end_idx):
         dict: Statistics for the segment
     """
     segment_errors = errors[start_idx:end_idx]
-    
+
+    if len(segment_errors) == 0:
+        return {'mean': float('nan'), 'max': float('nan'),
+                'min': float('nan'), 'std': float('nan')}
+
     return {
         'mean': np.mean(segment_errors),
         'max': np.max(segment_errors),

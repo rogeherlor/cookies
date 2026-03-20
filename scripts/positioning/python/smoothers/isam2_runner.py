@@ -199,7 +199,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     # ── iSAM2 setup ───────────────────────────────────────────────────────────
     isam2_p = gtsam.ISAM2Params()
     isam2_p.setRelinearizeThreshold(p_cfg['isam2_relinearize_threshold'])
-    isam2_p.setRelinearizeSkip(int(p_cfg['isam2_relinearize_skip']))
+    isam2_p.relinearizeSkip = int(p_cfg['isam2_relinearize_skip'])
     isam = gtsam.ISAM2(isam2_p)
 
     # ── IMU preintegration parameters (ENU Z-up frame) ────────────────────────
@@ -215,7 +215,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     pim_params.setIntegrationCovariance(np.eye(3) * 1e-8)
     pim_params.setBiasAccCovariance(np.eye(3) * p_cfg['acc_bias_sigma'] ** 2)
     pim_params.setBiasOmegaCovariance(np.eye(3) * p_cfg['gyr_bias_sigma'] ** 2)
-    pim_params.setBiasAccOmegaInt(np.eye(6) * 1e-8)
+    pim_params.setBiasAccOmegaInit(np.eye(6) * 1e-8)
 
     # Initial IMU bias (zero — will be estimated online)
     bias_prev = gtsam.imuBias.ConstantBias(np.zeros(3), np.zeros(3))

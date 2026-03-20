@@ -48,7 +48,7 @@ from filters import (
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
-from smoothers import rts_smoother, isam2_runner
+from smoothers import rts_smoother, isam2_runner, fgo_batch_runner
 from dl_filters.deep_iekf  import iekf_ai_imu
 from dl_filters.tlio       import tlio_runner
 from dl_filters.deep_kf    import deep_kf_runner
@@ -159,7 +159,8 @@ def main():
 
     use_3d        = ins_config.MODE_3D
     dr_mode       = args.dr_mode or getattr(ins_config, 'DR_MODE', False)
-    use_rts_as_gt = ins_config.USE_RTS_AS_GT and not dr_mode
+    gt_source     = getattr(ins_config, 'GT_SOURCE', 'rts' if ins_config.USE_RTS_AS_GT else 'kitti')
+    use_rts_as_gt = (gt_source == 'rts') and not dr_mode
     TUNED_PARAMS  = _load_tuned_params(nav_data, use_3d)
     t1       = ins_config.OUTAGE_START
     d        = ins_config.OUTAGE_DURATION
@@ -238,38 +239,41 @@ def main():
     logger.info("      Run ins_genetic.py for each filter before comparing.")
     logger.info("=" * 65)
 
-    # ── RTS Smoother — skipped in DR_MODE (no GPS available) ──────────────────
+    # ── Ground truth selection ─────────────────────────────────────────────────
     if dr_mode:
-        p_rts     = None
         p_rts_vis = None
         p_gt      = p_kitti
         gt_label  = 'KITTI GPS GT'
-        logger.info("DR_MODE: skipping RTS smoother; ground truth = KITTI GPS")
+        logger.info("DR_MODE: ground truth = KITTI GPS")
+    elif gt_source == 'batch':
+        logger.info("Running FGO-Batch optimizer (ground truth, all GPS, non-causal)…")
+        batch_result = fgo_batch_runner.run(
+            nav_data=nav_data,
+            params=TUNED_PARAMS.get('isam2', None),
+        )
+        p_gt      = batch_result['p']
+        p_rts_vis = None
+        gt_label  = 'Ground Truth (FGO-Batch)'
+        logger.info("  FGO-Batch done.")
     else:
-        # ── RTS Smoother (best-achievable reference, always full GPS) ──────────
-        logger.info("Running RTS smoother (best-achievable reference, no outage)…")
-        rts_params = TUNED_PARAMS.get('ekf_enhanced', None)
+        # RTS needed as primary GT or overlay
+        logger.info("Running RTS smoother…")
         rts_result = rts_smoother.run(
             nav_data=nav_data,
-            params=rts_params,
+            params=TUNED_PARAMS.get('ekf_enhanced', None),
             use_3d_rotation=use_3d,
         )
         p_rts = rts_result['p']
         logger.info("  RTS smoother done.")
-
-        # ── Select ground truth source ─────────────────────────────────────────
-        # p_gt        : array used for metric evaluation and as the GT line in plots
-        # p_rts_vis   : optional second reference overlaid in plots (purple); None
-        #               when RTS is already the primary GT
-        if use_rts_as_gt:
-            p_gt       = p_rts
-            p_rts_vis  = None
-            gt_label   = 'Ground Truth (RTS)'
+        if gt_source == 'rts':
+            p_gt      = p_rts
+            p_rts_vis = None
+            gt_label  = 'Ground Truth (RTS)'
             logger.info("Ground truth: RTS smoother")
-        else:
-            p_gt       = p_kitti
-            p_rts_vis  = p_rts
-            gt_label   = 'KITTI GPS GT'
+        else:   # 'kitti'
+            p_gt      = p_kitti
+            p_rts_vis = p_rts
+            gt_label  = 'KITTI GPS GT'
             logger.info("Ground truth: KITTI GPS")
 
     # ── Run all filters ────────────────────────────────────────────────────────
@@ -289,12 +293,14 @@ def main():
         elif fkey == 'iekf_ai_imu':
             os.environ.pop('AI_IMU_WEIGHTS', None)
 
+        _t0 = datetime.now()
         result = fmod.run(
             nav_data=nav_data,
             params=params,
             outage_config=outage_config,
             use_3d_rotation=use_3d,
         )
+        _elapsed_s = (datetime.now() - _t0).total_seconds()
 
         p = result['p'];  v = result['v'];  r = result['r']
 
@@ -328,6 +334,7 @@ def main():
             'std_pos':     result['std_pos'],
             'metrics':     mets,
             'kitti_mets':  kitti_mets,
+            'elapsed_s':   _elapsed_s,
             'result':      result,
         }
         all_results.append(entry)
@@ -397,13 +404,13 @@ def main():
 
     # ── Summary table to console ───────────────────────────────────────────────
     _mode_str = 'DR mode (no GPS)' if dr_mode else f'Outage {t1}s+{d}s'
-    print("\n" + "=" * 100)
+    print("\n" + "=" * 112)
     print(f"COMPARISON SUMMARY — {nav_data.dataset_name}  |  "
           f"{_mode_str}  |  {'3D' if use_3d else '2D'}")
-    print("=" * 100)
+    print("=" * 112)
     print(f"{'Filter':<20} {'ATE 2D [m]':>12} {'ATE 3D [m]':>12} {'Pos RMSE 2D':>13} "
-          f"{'Outage max [m]':>16} {'t_rel [%]':>11} {'r_rel [°/km]':>13}")
-    print("-" * 100)
+          f"{'Outage max [m]':>16} {'t_rel [%]':>11} {'r_rel [°/km]':>13} {'Time [s]':>10}")
+    print("-" * 112)
     for entry in all_results:
         mets   = entry['metrics']
         km     = entry['kitti_mets']
@@ -413,9 +420,10 @@ def main():
         outagm = mets.get('outage_analysis', {}).get('max', float('nan'))
         trel   = km.get('t_rel', float('nan'))
         rrel   = km.get('r_rel', float('nan'))
+        elapsed = entry.get('elapsed_s', float('nan'))
         print(f"{entry['name']:<20} {ate2d:>12.2f} {ate3d:>12.2f} {prmse:>13.2f} "
-              f"{outagm:>16.2f} {trel:>11.2f} {rrel:>13.2f}")
-    print("=" * 100)
+              f"{outagm:>16.2f} {trel:>11.2f} {rrel:>13.2f} {elapsed:>10.1f}")
+    print("=" * 112)
     print("NOTE: Tune parameters with ins_genetic.py before drawing conclusions.\n"
           "      t_rel / r_rel are KITTI odometry metrics (full sequence, vs raw GPS).\n")
 
