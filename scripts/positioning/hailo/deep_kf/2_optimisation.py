@@ -201,9 +201,35 @@ def main():
     parser.add_argument("--nav-dim",    type=int, default=NAV_DIM)
     args = parser.parse_args()
 
-    # ── Synthetic data ────────────────────────────────────────────────────────
-    rng = np.random.default_rng(42)
-    calib_nav = rng.standard_normal((N_CALIB, args.nav_dim)).astype(np.float32)
+    # ── Calibration data — real KITTI navigation states ───────────────────────
+    # Synthetic random data gives unrepresentative activation ranges through
+    # the LSTM normalization layers, causing the Hailo SDK to over-compress them.
+    # Real nav states (position [m], velocity [m/s], angles [rad], biases) produce
+    # the correct dynamic range so the quantizer assigns sensible bit-widths.
+    _scripts = _REPO_ROOT / "scripts/positioning/python"
+    try:
+        if str(_scripts) not in sys.path:
+            sys.path.insert(0, str(_scripts))
+        import data_loader as _dl
+        _nav = _dl.get_kitti_dataset("00")
+        # Build nav state matrix: [p(3) | v(3) | rpy(3) | b_acc(3) | b_gyr(3)]
+        import pymap3d as _pm
+        _e, _n, _u = _pm.geodetic2enu(
+            _nav.lla[:, 0], _nav.lla[:, 1], _nav.lla[:, 2],
+            _nav.lla0[0], _nav.lla0[1], _nav.lla0[2])
+        _p = np.column_stack([_e, _n, _u]).astype(np.float32)
+        _v = _nav.vel_enu.astype(np.float32)
+        _r = _nav.orient.astype(np.float32)
+        _ba = np.zeros((_p.shape[0], 3), np.float32)
+        _bg = np.zeros((_p.shape[0], 3), np.float32)
+        all_states = np.concatenate([_p, _v, _r, _ba, _bg], axis=1)  # (N, 15)
+        idx = np.linspace(0, len(all_states) - 1, N_CALIB, dtype=int)
+        calib_nav = all_states[idx]
+        log.info("Calibration: using %d real KITTI nav states", len(calib_nav))
+    except Exception as _e_cal:
+        log.warning("KITTI calibration data unavailable (%s) — using synthetic data.", _e_cal)
+        rng = np.random.default_rng(42)
+        calib_nav = rng.standard_normal((N_CALIB, args.nav_dim)).astype(np.float32)
     infer_nav = calib_nav[:N_INFER]
 
     backends = {}
@@ -277,11 +303,6 @@ def main():
         #   the recurrent branch is never all-zeros even at the first calibration
         #   step.  This is applied in the ONNX wrapper only (trained weights unchanged).
         #
-        # Remaining limitation (no fix without GPU):
-        #   Without a GPU Hailo reduces to optimization level 0 and compresses
-        #   near-zero normalization layers to ≤2-bit, producing NaN kernels that
-        #   crash activation quantization (AccelerasNegativeSlopesError).
-        #   The try-except below catches this and skips SDK_QUANTIZED gracefully.
         runner.load_model_script(
             "pre_quantization_optimization(dead_layers_removal, policy=disabled)\n"
         )
@@ -297,11 +318,13 @@ def main():
         except Exception as e:
             log.warning(
                 "Quantization failed (%s: %s). "
-                "Known Hailo SDK limitation for LSTM models without a GPU: "
-                "near-zero normalization layer weights get over-compressed (<=2-bit), "
-                "producing NaN kernels that crash the quantization flow. "
-                "SDK_NATIVE and SDK_FP_OPTIMIZED results are still valid. "
-                "Re-run with a GPU or after retraining the model.",
+                "Root cause: normalization2/7 (wrapping W_hh @ h in the LSTM recurrent "
+                "branch) receive near-zero activations during calibration because Hailo "
+                "runs each calibration sample independently with constant h₀. "
+                "The SDK over-compresses them to ≤2-bit, producing NaN kernels. "
+                "Fix: re-export ONNX with H_INIT=1.0 constant h₀ (0_onxx_converter.py), "
+                "re-parse (1_parsing.py), then re-run this script. "
+                "SDK_NATIVE and SDK_FP_OPTIMIZED results are still valid.",
                 type(e).__name__, e,
             )
 

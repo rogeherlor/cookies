@@ -38,12 +38,20 @@ A small epsilon (1e-2) is added to bias_hh in the ONNX wrapper so the
 recurrent branch is always non-zero.  This does not affect the model's
 trained weights and has negligible impact on inference accuracy.
 
-Note on statefulness
---------------------
-The LSTM initial states (h0, c0) are intentionally omitted from the ONNX
-graph inputs.  Hailo's DFC parser only supports zero or constant initial
-states — dynamic h/c inputs cause a parse error.  The Hailo runtime handles
-LSTM state recurrence (h_n -> h0 feedback) internally across calls.
+Note on statefulness and constant h₀
+--------------------------------------
+Dynamic h/c inputs to the ONNX LSTM cause a Hailo DFC parse error.
+Instead, h₀ is embedded as a constant buffer (H_INIT * ones) in the graph.
+
+Why non-zero? During Hailo calibration each sample runs independently with
+whatever h₀ is in the graph.  With h₀=0 the recurrent branch W_hh @ h₀ is
+identically zero → normalization2/7 (which wrap that branch) record a
+near-zero activation range → SDK reduces them from 8-bit to 2-bit → NaN
+kernels → AccelerasNegativeSlopesError.  H_INIT=1.0 makes W_hh @ h₀ ≈ O(1),
+giving the normalization layers a real range to quantise against.
+
+The Hailo runtime replaces the constant h₀ with actual h_n feedback between
+inference calls, so deployment behaviour is unaffected.
 """
 
 import argparse
@@ -93,10 +101,8 @@ class DeepKFNetONNX(nn.Module):
                                num_layers=1, batch_first=True)
 
         # Copy weights layer-by-layer from the original 2-layer LSTM.
-        # A small epsilon is added to bias_hh so that the LSTM's recurrent branch
-        # always produces a non-zero output even when h0=0 (first calibration step).
-        # Without this the EW_Add inside Hailo's LSTM representation gets scale=0
-        # → desired_factor=inf → crash in int_smallnum_factorize.
+        # A small epsilon is added to bias_hh so the EW_Add inside Hailo's
+        # LSTM representation never gets scale=0 → desired_factor=inf → crash.
         BIAS_HH_EPS = 1e-2
         self.lstm_l0.weight_ih_l0.data.copy_(orig_lstm.weight_ih_l0.data)
         self.lstm_l0.weight_hh_l0.data.copy_(orig_lstm.weight_hh_l0.data)
@@ -110,6 +116,25 @@ class DeepKFNetONNX(nn.Module):
 
         self.decoder = model.decoder
 
+        # Constant non-zero initial hidden states embedded as ONNX constants.
+        #
+        # Problem: Hailo's calibration runs each sample independently (h_0=0
+        # every call).  The recurrent branch W_hh @ h is therefore always zero,
+        # so normalization2/7 (which wrap that branch) record a near-zero
+        # activation range → SDK reduces them from 8-bit to 2-bit → NaN kernels
+        # → AccelerasNegativeSlopesError during quantization.
+        #
+        # Fix: embed h_0 = H_INIT * ones as a buffer (constant initializer in the
+        # ONNX graph).  Hailo's DFC accepts constant initial LSTM states and its
+        # runtime replaces them with actual h_n feedback between inference calls.
+        # H_INIT=1.0 gives W_hh @ h_0 with std ≈ sqrt(hidden_dim)*||W_hh||*H_INIT
+        # ≈ O(1), safely above the 2-bit threshold.
+        H_INIT = 1.0
+        self.register_buffer('h0_l0', H_INIT * torch.ones(1, 1, hidden_dim))
+        self.register_buffer('c0_l0', torch.zeros(1, 1, hidden_dim))
+        self.register_buffer('h0_l1', H_INIT * torch.ones(1, 1, hidden_dim))
+        self.register_buffer('c0_l1', torch.zeros(1, 1, hidden_dim))
+
     def forward(self, x: torch.Tensor):
         """
         Parameters
@@ -122,8 +147,8 @@ class DeepKFNetONNX(nn.Module):
         delta : (batch, 15) — state increment; caller adds residual:
                 state = delta + x[:, 0, :]
         """
-        out_l0, _ = self.lstm_l0(x)       # (batch, 1, 128)
-        out_l1, _ = self.lstm_l1(out_l0)  # (batch, 1, 128)
+        out_l0, _ = self.lstm_l0(x, (self.h0_l0, self.c0_l0))   # (batch, 1, 128)
+        out_l1, _ = self.lstm_l1(out_l0, (self.h0_l1, self.c0_l1))  # (batch, 1, 128)
         h_out = out_l1[:, 0, :]           # (batch, 128)
         return self.decoder(h_out)        # (batch, 15) — delta only; caller adds residual
 

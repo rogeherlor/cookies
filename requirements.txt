@@ -25,18 +25,27 @@ markdown-it-py==4.0.0
 MarkupSafe==3.0.3
 matplotlib==3.10.7
 mdurl==0.1.2
-ml_dtypes==0.4.1
+ml_dtypes>=0.5.1,<1.0.0
 namex==0.1.0
 numba==0.64.0
 numpy==2.3.4
 onnx==1.16.0
+onnxruntime==1.18.0
 onnxscript==0.5.0
+onnxsim==0.4.36
+# CUDA 12.x packages — required for TensorFlow GPU support (used by Hailo DFC).
+# Install AFTER tensorflow. Set XLA_FLAGS (see hailo/README) for libdevice path.
+# hailo-dataflow-compiler and hailort are NOT on PyPI — install from Hailo developer portal.
+nvidia-cublas-cu12==12.8.4.1
+nvidia-cuda-nvcc-cu12==12.9.86
+nvidia-cuda-runtime-cu12==12.8.90
+nvidia-cudnn-cu12==9.10.2.21
 opt_einsum==3.4.0
 optree==0.17.0
 packaging==25.0
 pandas==2.3.3
 pillow==12.0.0
-protobuf==3.20.3
+protobuf>=5.28.0
 Pygments==2.19.2
 pymap3d==3.2.0
 pyparsing==3.2.5
