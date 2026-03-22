@@ -114,6 +114,203 @@ class _TartanImuStub(nn.Module):
         return v_body, log_std
 
 
+# ── Real TartanIMU architecture (reconstructed from checkpoint state dict) ─────
+#
+# Key dimensions verified from checkpoint_28.pt:
+#   input_block : Conv1d(6→64, k=7, stride=4, padding=3), BN
+#   residual_groups: 3 groups of 2 ResBlocks
+#     group 0: 64→64 (stride=1)
+#     group 1: 64→128, 128→128 (stride=2 in first block)
+#     group 2: 128→256, 256→256 (stride=2 in first block)
+#   resnet_post_pro : Conv1d(256→128, k=1), BN, ReLU, Conv1d(128→128, k=1), BN
+#   lstm            : LSTM(input=1664, hidden=64)   1664 = 128 × 13 time steps
+#   IMU_Trunk       : 6 × TransformerBlock(embed=64, heads=4, ffn=256)
+#   heads           : {car, dog, human, drone} each with 3 MLP output blocks
+
+class _ResBlock1D(nn.Module):
+    """1-D residual block matching TartanIMU checkpoint structure."""
+
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1):
+        super().__init__()
+        self.convs = nn.Sequential(
+            nn.Conv1d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False),
+            nn.BatchNorm1d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm1d(out_ch),
+        )
+        if stride != 1 or in_ch != out_ch:
+            self.downsample = nn.Sequential(
+                nn.Conv1d(in_ch, out_ch, 1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_ch),
+            )
+        else:
+            self.downsample = None
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.convs(x)
+        res = self.downsample(x) if self.downsample is not None else x
+        return self.relu(out + res)
+
+
+class _TransformerBlock(nn.Module):
+    """Pre-norm transformer block matching IMU_Trunk checkpoint structure."""
+
+    def __init__(self, embed_dim: int = 64, num_heads: int = 4, ffn_dim: int = 256):
+        super().__init__()
+        self.attn   = nn.MultiheadAttention(embed_dim, num_heads,
+                                            add_bias_kv=True, batch_first=True)
+        self.norm_1 = nn.LayerNorm(embed_dim)
+        self.norm_2 = nn.LayerNorm(embed_dim)
+        from collections import OrderedDict
+        self.mlp = nn.Sequential(OrderedDict([
+            ('fc1',  nn.Linear(embed_dim, ffn_dim)),
+            ('act',  nn.GELU()),
+            ('fc2',  nn.Linear(ffn_dim, embed_dim)),
+        ]))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        xn = self.norm_1(x)
+        attn_out, _ = self.attn(xn, xn, xn)
+        x = x + attn_out
+        x = x + self.mlp(self.norm_2(x))
+        return x
+
+
+class _IMUTrunk(nn.Module):
+    def __init__(self, embed_dim: int = 64, num_heads: int = 4,
+                 ffn_dim: int = 256, n_blocks: int = 6):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            _TransformerBlock(embed_dim, num_heads, ffn_dim)
+            for _ in range(n_blocks)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for blk in self.blocks:
+            x = blk(x)
+        return x
+
+
+class _OutputBlock(nn.Module):
+    """MLP head: Linear indices 0, 3, 6 with ReLU+Dropout at 1-2, 4-5."""
+
+    def __init__(self, in_dim: int = 64, hidden: int = 256, out_dim: int = 3):
+        super().__init__()
+        self.fcs = nn.Sequential(
+            nn.Linear(in_dim, hidden),   # 0
+            nn.ReLU(),                   # 1
+            nn.Dropout(0.0),             # 2
+            nn.Linear(hidden, hidden),   # 3
+            nn.ReLU(),                   # 4
+            nn.Dropout(0.0),             # 5
+            nn.Linear(hidden, out_dim),  # 6
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fcs(x)
+
+
+class _RobotHead(nn.Module):
+    """Per-robot output head with 3 MLP blocks matching checkpoint structure."""
+
+    def __init__(self):
+        super().__init__()
+        self.output_block1   = _OutputBlock(64, 256, 2)  # vx, vy
+        self.output_block1_z = _OutputBlock(64, 256, 1)  # vz
+        self.output_block2   = _OutputBlock(64, 256, 3)  # log_std
+
+    def forward(self, feat: torch.Tensor):
+        v_xy    = self.output_block1(feat)    # (B, 2)
+        v_z     = self.output_block1_z(feat)  # (B, 1)
+        log_std = self.output_block2(feat)    # (B, 3)
+        v_body  = torch.cat([v_xy, v_z], dim=-1)  # (B, 3)
+        return v_body, log_std
+
+
+class _TartanIMUBackbone(nn.Module):
+    """
+    Conv1D backbone matching TartanIMU checkpoint.
+
+    Processes one LSTM step window: (B, 6, step_samples) → (B, 1664).
+    After stride-4 input conv + 3 residual groups + post-processing:
+      200 → 50 → 25 → 13  time steps; 13 × 128 = 1664 LSTM input.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.input_block = nn.Sequential(
+            nn.Conv1d(6, 64, 7, stride=4, padding=3, bias=False),
+            nn.BatchNorm1d(64),
+        )
+        self.residual_groups = nn.ModuleList([
+            nn.ModuleList([_ResBlock1D(64,  64,  stride=1),
+                           _ResBlock1D(64,  64,  stride=1)]),
+            nn.ModuleList([_ResBlock1D(64,  128, stride=2),
+                           _ResBlock1D(128, 128, stride=1)]),
+            nn.ModuleList([_ResBlock1D(128, 256, stride=2),
+                           _ResBlock1D(256, 256, stride=1)]),
+        ])
+        self.resnet_post_pro = nn.Sequential(
+            nn.Conv1d(256, 128, 1, bias=False),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(128, 128, 1, bias=False),
+            nn.BatchNorm1d(128),
+        )
+        self.lstm      = nn.LSTM(input_size=1664, hidden_size=64, batch_first=True)
+        self.IMU_Trunk = _IMUTrunk()
+
+    def forward_cnn(self, x: torch.Tensor) -> torch.Tensor:
+        """One step: (B, 6, step_samples) → (B, 1664)."""
+        x = torch.relu(self.input_block(x))
+        for group in self.residual_groups:
+            for block in group:
+                x = block(x)
+        x = self.resnet_post_pro(x)          # (B, 128, 13)
+        return x.flatten(1)                  # (B, 1664)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, lstm_steps, step_samples, 6)
+        Returns: (B, 64) — transformer features from last LSTM step
+        """
+        B, T, S, C = x.shape
+        feats = self.forward_cnn(x.reshape(B * T, C, S))  # (B*T, 1664)
+        feats = feats.reshape(B, T, -1)                    # (B, T, 1664)
+        lstm_out, _ = self.lstm(feats)                     # (B, T, 64)
+        trunk_out   = self.IMU_Trunk(lstm_out)             # (B, T, 64)
+        return trunk_out[:, -1, :]                         # (B, 64)
+
+
+class _TartanIMUModel(nn.Module):
+    """
+    Full TartanIMU model matching checkpoint_28.pt state dict.
+
+    State dict structure:
+      model.*  — _TartanIMUBackbone (CNN + LSTM + Transformer)
+      heads.*  — _RobotHead per robot type {car, dog, human, drone}
+
+    Input : (B, lstm_steps, step_samples, 6)
+    Output: (v_body (B,3), log_std (B,3))
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.model = _TartanIMUBackbone()
+        self.heads  = nn.ModuleDict({
+            'car':   _RobotHead(),
+            'dog':   _RobotHead(),
+            'human': _RobotHead(),
+            'drone': _RobotHead(),
+        })
+
+    def forward(self, x: torch.Tensor, robot_type: str = 'car'):
+        feat = self.model(x)                    # (B, 64)
+        return self.heads[robot_type](feat)     # (v_body, log_std)
+
+
 # ── Weight discovery ──────────────────────────────────────────────────────────
 
 def _find_tartan_weights() -> Path:
@@ -199,11 +396,17 @@ def _load_tartan_model(weights_path: Path, lora_path, lora_rank: int,
     elif isinstance(ckpt, dict):
         state = (ckpt.get('model_state_dict') or ckpt.get('state_dict')
                  or ckpt.get('model') or ckpt)
-        model = _TartanImuStub()
+        model = _TartanIMUModel()
         try:
-            model.load_state_dict(state, strict=False)
+            result = model.load_state_dict(state, strict=False)
+            missing = [k for k in result.missing_keys if 'num_batches_tracked' not in k]
+            if missing:
+                print(f"Tartan IMU: {len(missing)} missing keys (first 3: {missing[:3]}). Best effort.")
+            else:
+                print("Tartan IMU: checkpoint loaded successfully into _TartanIMUModel.")
         except Exception as e:
             print(f"Tartan IMU: could not load state dict ({e}). Using stub.")
+            model = _TartanImuStub()
     else:
         print(f"Tartan IMU: unrecognised checkpoint type ({type(ckpt)}). Using stub.")
         model = _TartanImuStub()

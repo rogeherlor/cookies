@@ -1,8 +1,13 @@
 """
-Tartan IMU ONNX -> Hailo HAR (parsing step)
-=============================================
-Parses the ONNX produced by 0_onnx_converter.py into a Hailo HAR archive
-using the Hailo Dataflow Compiler SDK.
+Tartan IMU CNN backbone ONNX -> Hailo HAR (parsing step)
+=========================================================
+Parses the ONNX produced by 0_onnx_converter.py into a Hailo HAR archive.
+
+Hailo executes only the Conv1D ResNet backbone (exported as Conv2D with 4D NCHW):
+    Input : imu_step  [1, 6, 1, 200]   NCHW — one LSTM step of IMU
+    Output: cnn_feat  [1, 128, 1, 13]  NCHW — ResNet features before LSTM
+
+Python handles LSTM + Transformer + head using tartan_imu_postproc.pt.
 
 Usage
 -----
@@ -10,16 +15,6 @@ Usage
 
 Outputs (next to the script):
     tartan_imu_hailo_model.har   — parsed model ready for optimization
-
-ONNX interface expected (must match 0_onnx_converter.py output):
-    Input : imu_lstm    [1, 10, 200, 6]  (batch, lstm_steps, step_samples, channels)
-    Output: vel_logstd  [1, 6]           (cat([v_body(3), log_std(3)]))
-
-HAR representation
-------------------
-The Hailo DFC maps all linear/Conv ops to Conv2D in the HAR.  The 4-D input
-[1, 10, 200, 6] is already in NHWC format (batch, H=lstm_steps, W=step_samples,
-C=imu_channels), which Hailo handles natively.
 """
 
 import subprocess
@@ -35,15 +30,16 @@ ONNX_PATH = FILE_DIR / "tartan_imu.onnx"
 CHOSEN_HW_ARCH  = "hailo8"
 ONNX_MODEL_NAME = "tartan_imu"
 
-LSTM_STEPS   = 10
 STEP_SAMPLES = 200
 IMU_CHANNELS = 6
+CNN_OUT_CH   = 128
+CNN_OUT_T    = 13   # 200 → 50 (stride-4) → 25 (stride-2) → 13 (stride-2)
 
-START_NODES = ["imu_lstm"]
-END_NODES   = ["vel_logstd"]
+START_NODES = ["imu_step"]
+END_NODES   = ["cnn_feat"]
 
 NET_INPUT_SHAPES = {
-    "imu_lstm": [1, LSTM_STEPS, STEP_SAMPLES, IMU_CHANNELS],  # [1, 10, 200, 6]
+    "imu_step": [1, IMU_CHANNELS, 1, STEP_SAMPLES],  # [1, 6, 1, 200] NCHW
 }
 
 # ── Parse ─────────────────────────────────────────────────────────────────────
