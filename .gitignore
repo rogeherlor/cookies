@@ -36,3 +36,4 @@ simplicity/**/*.mk
 *.pt
 *.csv
 *.log
+*.npz

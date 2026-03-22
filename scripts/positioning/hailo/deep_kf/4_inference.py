@@ -201,9 +201,31 @@ def main():
     parser.add_argument("--nav-dim",    type=int, default=NAV_DIM)
     args = parser.parse_args()
 
-    # ── Synthetic test data (same seed as 2_optimisation.py) ─────────────
-    rng     = np.random.default_rng(42)
-    nav_np  = rng.standard_normal((args.n_samples, args.nav_dim)).astype(np.float32)
+    # ── Test data — real KITTI navigation states ──────────────────────────
+    # Uses the same data source as 2_optimisation.py for consistency.
+    _scripts = _REPO_ROOT / "scripts/positioning/python"
+    try:
+        if str(_scripts) not in sys.path:
+            sys.path.insert(0, str(_scripts))
+        import data_loader as _dl
+        import pymap3d as _pm
+        _nav = _dl.get_kitti_dataset("00")
+        _e, _n, _u = _pm.geodetic2enu(
+            _nav.lla[:, 0], _nav.lla[:, 1], _nav.lla[:, 2],
+            _nav.lla0[0], _nav.lla0[1], _nav.lla0[2])
+        _p  = np.column_stack([_e, _n, _u]).astype(np.float32)
+        _v  = _nav.vel_enu.astype(np.float32)
+        _r  = _nav.orient.astype(np.float32)
+        _ba = np.zeros((_p.shape[0], 3), np.float32)
+        _bg = np.zeros((_p.shape[0], 3), np.float32)
+        all_states = np.concatenate([_p, _v, _r, _ba, _bg], axis=1)
+        idx = np.linspace(0, len(all_states) - 1, args.n_samples, dtype=int)
+        nav_np = all_states[idx]
+        log.info("Test data: %d real KITTI nav states", len(nav_np))
+    except Exception as _e_data:
+        log.warning("KITTI data unavailable (%s) — using synthetic data.", _e_data)
+        rng    = np.random.default_rng(42)
+        nav_np = rng.standard_normal((args.n_samples, args.nav_dim)).astype(np.float32)
 
     # ── PyTorch ground truth ──────────────────────────────────────────────
     log.info("Loading PyTorch checkpoint: %s", args.artifact)
