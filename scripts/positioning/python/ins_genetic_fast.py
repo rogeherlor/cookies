@@ -292,6 +292,10 @@ def main():
     parser.add_argument('--2d',  dest='do_2d', action='store_true',  default=None)
     parser.add_argument('--maxiter', type=int, default=MAXITER)
     parser.add_argument('--popsize', type=int, default=POPSIZE)
+    parser.add_argument('--outage-start', type=float, default=None,
+                        help='GNSS outage start time [s] (overrides ins_config.OUTAGE_START)')
+    parser.add_argument('--outage-duration', type=float, default=None,
+                        help='GNSS outage duration [s] (overrides ins_config.OUTAGE_DURATION)')
     args = parser.parse_args()
 
     MAXITER = args.maxiter
@@ -311,9 +315,9 @@ def main():
     else:
         modes = [True, False]   # both by default
 
-    # ── Outage config from ins_config ─────────────────────────────────────────
-    t1 = ins_config.OUTAGE_START
-    d  = ins_config.OUTAGE_DURATION
+    # ── Outage config (CLI overrides ins_config) ─────────────────────────────
+    t1 = args.outage_start if args.outage_start is not None else ins_config.OUTAGE_START
+    d  = args.outage_duration if args.outage_duration is not None else ins_config.OUTAGE_DURATION
 
     # ── Build training pool ───────────────────────────────────────────────────
     held_out_seq  = args.seq

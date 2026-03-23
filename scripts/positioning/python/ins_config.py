@@ -44,7 +44,7 @@ FILTER = "eskf_enhanced"
 # ── Rotation mode ──────────────────────────────────────────────────────────────
 # True  → full 3D (roll, pitch, yaw), recommended for vehicles with pitch changes
 # False → 2D (yaw only, flat-earth assumption), simpler and faster
-MODE_3D = False
+MODE_3D = True
 
 
 # ── GNSS outage simulation ─────────────────────────────────────────────────────

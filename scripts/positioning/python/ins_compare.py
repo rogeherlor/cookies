@@ -48,7 +48,7 @@ from filters import (
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
-from smoothers import rts_smoother, isam2_runner, fgo_batch_runner
+from smoothers import rts_smoother, isam2_runner, isam2_map_runner, fgo_batch_runner
 from dl_filters.deep_iekf  import iekf_ai_imu
 from dl_filters.tlio       import tlio_runner
 from dl_filters.deep_kf    import deep_kf_runner
@@ -134,6 +134,7 @@ FILTER_CONFIGS = [
     {'name': 'Tartan IMU',   'key': 'tartan_imu',   'module': tartan_runner},
     # Online smoothers
     {'name': 'iSAM2',        'key': 'isam2',        'module': isam2_runner},
+    {'name': 'iSAM2 Map',    'key': 'isam2_map',    'module': isam2_map_runner},
 ]
 
 
@@ -149,6 +150,10 @@ def main():
     parser.add_argument('--ai-imu-weights', type=str, default=None,
                         help='Path to fold-specific AI-IMU weights (iekfnets_held_*.p). '
                              'Auto-detected from --test-seq when not provided.')
+    parser.add_argument('--outage-start', type=float, default=None,
+                        help='GNSS outage start time [s] (overrides ins_config.OUTAGE_START)')
+    parser.add_argument('--outage-duration', type=float, default=None,
+                        help='GNSS outage duration [s] (overrides ins_config.OUTAGE_DURATION)')
     args = parser.parse_args()
 
     # ── Shared configuration ───────────────────────────────────────────────────
@@ -162,8 +167,15 @@ def main():
     gt_source     = getattr(ins_config, 'GT_SOURCE', 'rts' if ins_config.USE_RTS_AS_GT else 'kitti')
     use_rts_as_gt = (gt_source == 'rts') and not dr_mode
     TUNED_PARAMS  = _load_tuned_params(nav_data, use_3d)
-    t1       = ins_config.OUTAGE_START
-    d        = ins_config.OUTAGE_DURATION
+    t1 = args.outage_start if args.outage_start is not None else ins_config.OUTAGE_START
+    d  = args.outage_duration if args.outage_duration is not None else ins_config.OUTAGE_DURATION
+
+    # Validate outage window against trajectory length
+    traj_duration = (len(nav_data.lla) - 1) / nav_data.sample_rate
+    if t1 + d > traj_duration:
+        print(f"WARNING: outage window {t1}s\u2013{t1+d}s exceeds trajectory "
+              f"duration {traj_duration:.1f}s \u2014 running without outage")
+        t1, d = 0, 0
 
     lla      = nav_data.lla
     lla0     = nav_data.lla0
@@ -323,7 +335,8 @@ def main():
             p_gt=p_kitti, r_gt=nav_data.orient,
         )
         logger.info(f"  t_rel = {kitti_mets['t_rel']:.2f} %  |  r_rel = {kitti_mets['r_rel']:.2f} deg/km"
-                    f"  (n_seg={kitti_mets['n_segments']})")
+                    f"  (n_seg={kitti_mets['n_segments']}, dist={kitti_mets['total_dist_m']:.0f} m,"
+                    f"  lengths=100…{kitti_mets['lengths_used'][-1]} m)")
 
         entry = {
             'name':        fname,

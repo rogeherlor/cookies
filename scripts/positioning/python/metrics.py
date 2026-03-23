@@ -2,78 +2,40 @@
 Trajectory Evaluation Metrics for Navigation Systems
 
 This module provides standard metrics for evaluating trajectory estimation accuracy:
-- Absolute Trajectory Error (ATE) with SE(3) alignment
+- Absolute Trajectory Error (ATE) — no alignment, both trajectories in the same ENU frame
 - Relative Trajectory Error (RTE) for drift analysis
+- KITTI odometry metrics (t_rel, r_rel) with SE(3) relative pose error
 - Traditional RMSE metrics
 - Peak error analysis
 
 Based on:
-- Scaramuzza et al. visual odometry evaluation methods
-- TUM RGB-D benchmark evaluation tools
+- Sturm et al., "A Benchmark for the Evaluation of RGB-D SLAM Systems", IROS 2012
+- Geiger et al., "Are we ready for Autonomous Driving? The KITTI Vision Benchmark Suite", CVPR 2012
 """
 
 import numpy as np
 import logging
 from math import sqrt
 from sklearn.metrics import mean_squared_error
-from scipy.linalg import orthogonal_procrustes
 
 
-def align_trajectories(p_est, p_gt):
+def compute_ate(p_est, p_gt):
     """
-    Align estimated trajectory to ground truth using SE(3) alignment.
-    
-    Args:
-        p_est: Estimated trajectory (Nx3 numpy array)
-        p_gt: Ground truth trajectory (Nx3 numpy array)
-    
-    Returns:
-        tuple: (aligned_trajectory, scale, rotation, translation)
-        
-    Based on Umeyama's method (similarity transformation)
-    """
-    # Center both trajectories
-    centroid_est = np.mean(p_est, axis=0)
-    centroid_gt = np.mean(p_gt, axis=0)
-    
-    p_est_centered = p_est - centroid_est
-    p_gt_centered = p_gt - centroid_gt
-    
-    # Compute optimal rotation using Procrustes
-    R, scale = orthogonal_procrustes(p_est_centered, p_gt_centered)
-    
-    # Apply transformation
-    p_est_aligned = scale * (p_est_centered @ R.T) + centroid_gt
-    
-    return p_est_aligned, scale, R, centroid_gt - scale * (centroid_est @ R.T)
+    Compute Absolute Trajectory Error (ATE) — RMSE of position errors.
 
+    Both trajectories must already be in the same coordinate frame (ENU with
+    the same origin). No alignment is applied: for navigation systems positions
+    are metric and share a common reference, so alignment would hide real errors.
 
-def compute_ate(p_est, p_gt, align=True):
-    """
-    Compute Absolute Trajectory Error (ATE) - RMSE of aligned positions.
-    
-    ATE measures the global consistency of the trajectory after removing
-    systematic biases through alignment. Lower is better.
-    
-    Note: Set align=False when trajectories are already in the same coordinate
-    frame (e.g., both in ENU with same origin). Alignment is only needed when
-    comparing trajectories from different sensors/coordinate systems.
-    
     Args:
         p_est: Estimated trajectory (Nx3 numpy array) [E, N, U]
         p_gt: Ground truth trajectory (Nx3 numpy array) [E, N, U]
-        align: Whether to perform SE(3) alignment (default: True)
-    
+
     Returns:
         dict: Statistics including rmse (total, E, N, 2D, U, 3D), mean, median, std, min, max, and raw errors
     """
-    if align:
-        p_est_aligned, _, _, _ = align_trajectories(p_est, p_gt)
-    else:
-        p_est_aligned = p_est
-    
     # Component-wise errors
-    diff = p_gt - p_est_aligned
+    diff = p_gt - p_est
     error_E = np.abs(diff[:, 0])
     error_N = np.abs(diff[:, 1])
     error_U = np.abs(diff[:, 2])
@@ -328,21 +290,40 @@ def compute_kitti_metrics(p_est, r_est, p_gt, r_gt, lengths=None):
     """
     Compute KITTI odometry benchmark metrics t_rel and r_rel.
 
-    Matches the evaluation protocol in Brossard et al. (IEEE TIV 2020) and the
-    official KITTI odometry benchmark (Geiger et al. 2013).
+    Faithfully reimplements the official KITTI odometry evaluation protocol:
+      Geiger et al., "Are we ready for Autonomous Driving? The KITTI Vision
+      Benchmark Suite", CVPR 2012.
+      Official C++ devkit: http://www.cvlibs.net/datasets/kitti/eval_odometry.php
 
-    Metrics are computed over all possible sub-sequences whose traveled distance
-    (along the GT trajectory) equals each entry in `lengths`:
+    Reference Python port (cross-checked):
+      Huangying Zhan, kitti-odom-eval,
+      https://github.com/Huangying-Zhan/kitti-odom-eval
 
-      t_rel  — averaged relative translational error, in **percent** of traveled distance.
-      r_rel  — averaged relative rotational error, in **degrees per kilometer**.
+    For each start frame i and subsequence length L the end frame j is chosen
+    such that the GT path length from i to j equals L.  The SE(3) relative
+    poses are computed in the body frame of i (T_i^{-1} T_j), and the pose
+    error is the composition:
+
+      T_err = (T_ij_gt)^{-1}  *  T_ij_est
+
+    Translational error  = ||translation(T_err)||
+                         = ||R_i_est^T (p_j_est-p_i_est)  -  R_i_gt^T (p_j_gt-p_i_gt)||
+
+    Rotational error     = arccos( (trace(R_err) - 1) / 2 )
+
+      t_rel  — mean relative translational error, **percent** of traveled distance.
+      r_rel  — mean relative rotational error, **degrees per kilometer**.
 
     Args:
         p_est   : Estimated positions  (N×3) in ENU [m]
         r_est   : Estimated orientations (N×3) as [roll, pitch, yaw] [rad]
         p_gt    : Ground-truth positions (N×3) in ENU [m]
         r_gt    : Ground-truth orientations (N×3) as [roll, pitch, yaw] [rad]
-        lengths : Subsequence lengths in meters (default: 100, 200, …, 800 m)
+        lengths : Subsequence lengths in meters. If None, lengths are set
+                  automatically to [100, 200, …, N*100] where N*100 is the
+                  largest multiple of 100 m that fits within the GT trajectory,
+                  matching the official KITTI step size while adapting to
+                  sequences shorter or longer than 800 m.
 
     Returns:
         dict with keys:
@@ -351,10 +332,9 @@ def compute_kitti_metrics(p_est, r_est, p_gt, r_gt, lengths=None):
           't_rel_by_length' — {L: mean_t_rel} per length
           'r_rel_by_length' — {L: mean_r_rel} per length
           'n_segments'      — total number of evaluated (i, L) pairs
+          'total_dist_m'    — total GT trajectory length [m]
+          'lengths_used'    — list of subsequence lengths actually evaluated
     """
-    if lengths is None:
-        lengths = [100, 200, 300, 400, 500, 600, 700, 800]
-
     N = len(p_gt)
 
     # Build rotation matrices from ZYX Euler angles
@@ -378,6 +358,10 @@ def compute_kitti_metrics(p_est, r_est, p_gt, r_gt, lengths=None):
     cum_dist  = np.concatenate([[0.0], np.cumsum(step_dist)])   # (N,)
     total_dist = cum_dist[-1]
 
+    if lengths is None:
+        max_len = int(total_dist // 100) * 100
+        lengths = list(range(100, max_len + 1, 100)) if max_len >= 100 else [100]
+
     t_errors_all = []
     r_errors_all = []
     t_by_length  = {L: [] for L in lengths}
@@ -393,10 +377,12 @@ def compute_kitti_metrics(p_est, r_est, p_gt, r_gt, lengths=None):
             if j >= N:
                 continue
 
-            # Translational error — norm is rotation-invariant, so no need to rotate
-            t_err = np.linalg.norm(
-                (p_est[j] - p_est[i]) - (p_gt[j] - p_gt[i])
-            )
+            # SE(3) relative translations in the body frame of i (official KITTI method):
+            #   t_delta = R_i^T * (p_j - p_i)
+            # Error = ||t_delta_est - t_delta_gt||  (rotation-invariant norm)
+            t_delta_gt  = Rot_gt[i].T  @ (p_gt[j]  - p_gt[i])
+            t_delta_est = Rot_est[i].T @ (p_est[j] - p_est[i])
+            t_err = np.linalg.norm(t_delta_est - t_delta_gt)
 
             # Rotational error: angle of relative-pose error rotation
             # R_ij_gt = R_i_gt^T @ R_j_gt,  R_ij_est = R_i_est^T @ R_j_est
@@ -421,6 +407,8 @@ def compute_kitti_metrics(p_est, r_est, p_gt, r_gt, lengths=None):
             't_rel_by_length': {L: float('nan') for L in lengths},
             'r_rel_by_length': {L: float('nan') for L in lengths},
             'n_segments': 0,
+            'total_dist_m': float(total_dist),
+            'lengths_used': lengths,
         }
 
     return {
@@ -431,6 +419,8 @@ def compute_kitti_metrics(p_est, r_est, p_gt, r_gt, lengths=None):
         'r_rel_by_length': {L: float(np.mean(v)) if v else float('nan')
                             for L, v in r_by_length.items()},
         'n_segments':      len(t_errors_all),
+        'total_dist_m':    float(total_dist),
+        'lengths_used':    lengths,
     }
 
 
@@ -480,7 +470,7 @@ def evaluate_navigation_performance(p_est, v_est, r_est, p_gt, v_gt, r_gt,
     # Advanced trajectory metrics
     # Both trajectories are in same ENU frame - no alignment needed
     # Alignment would introduce artificial scaling errors
-    ate = compute_ate(p_est, p_gt, align=False)
+    ate = compute_ate(p_est, p_gt)
     rte_1s = compute_rte(p_est, p_gt, delta=int(1*sample_rate))   # 1 second
     rte_5s = compute_rte(p_est, p_gt, delta=int(5*sample_rate))   # 5 seconds
     rte_10s = compute_rte(p_est, p_gt, delta=int(10*sample_rate)) # 10 seconds
