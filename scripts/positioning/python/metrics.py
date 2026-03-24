@@ -2,7 +2,7 @@
 Trajectory Evaluation Metrics for Navigation Systems
 
 This module provides standard metrics for evaluating trajectory estimation accuracy:
-- Absolute Trajectory Error (ATE) — no alignment, both trajectories in the same ENU frame
+- Absolute Translation Error (ATE) — no alignment, both trajectories in the same ENU frame
 - Relative Trajectory Error (RTE) for drift analysis
 - KITTI odometry metrics (t_rel, r_rel) with SE(3) relative pose error
 - Traditional RMSE metrics
@@ -21,7 +21,7 @@ from sklearn.metrics import mean_squared_error
 
 def compute_ate(p_est, p_gt):
     """
-    Compute Absolute Trajectory Error (ATE) — RMSE of position errors.
+    Compute Absolute Translation Error (ATE) — RMSE of position errors.
 
     Both trajectories must already be in the same coordinate frame (ENU with
     the same origin). No alignment is applied: for navigation systems positions
@@ -230,7 +230,7 @@ def log_evaluation_results(logger, results, log_file):
     logger.info('')
     
     # ATE
-    logger.info('--- Absolute Trajectory Error (ATE) - no alignment (same ENU frame) ---')
+    logger.info('--- Absolute Translation Error (ATE) - no alignment (same ENU frame) ---')
     ate = results["ate"]
     logger.info('ATE RMSE (meters):')
     logger.info(f'  East:  {ate["rmse_E"]:.3f} m')

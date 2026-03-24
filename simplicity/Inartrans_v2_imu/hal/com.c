@@ -23,6 +23,8 @@
 #include <stdarg.h>
 #include "gps-uart.h"
 
+extern volatile uint8_t gnss_lines_received;
+
 #ifdef CORTEXM3_EFM32_MICRO
 #include "em_device.h"
 #include "em_usart.h"
@@ -1002,13 +1004,21 @@ void USART1_RX_IRQHandler(void)				// aqui es donde activamos el flag tengo_gps 
   uint32_t flags;
   flags = USART_IntGet(USART1);
   USART_IntClear(USART1, flags);
-  tengo_gps = 1;
-  /* Store incoming data into rx_buffer, set rx_data_ready when a full
-  * line has been received
-  */
-  if (indice < MI_BUFFER_SIZE){
-	  mi_buffer[indice] = USART_RxDataGet(USART1);
-	  indice++;
+  uint8_t c = USART_RxDataGet(USART1);
+
+  if (indice < MI_BUFFER_SIZE - 1) {
+    mi_buffer[indice] = c;
+    indice++;
+    tengo_gps = 1;
+    if (c == '\n') {
+      gnss_lines_received++;  // one complete NMEA sentence received
+    }
+  } else {
+    // Buffer overflow: reset and start fresh for next epoch
+    for (int i = 0; i < MI_BUFFER_SIZE; i++) mi_buffer[i] = '0';
+    indice = 0;
+    tengo_gps = 0;
+    gnss_lines_received = 0;
   }
 }
 

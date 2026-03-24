@@ -55,9 +55,6 @@ uint8_t              IMU_state = IMU_STATE_DISABLED;/**< IMU state variable     
 static float         gyroSampleRate;                /**< Gyroscope sample rate                               */
 static float         accelSampleRate;               /**< Accelerometer sample rate                           */
 static volatile bool dataReady;                     /**< Flag to show if new accel/gyro data ready to read   */
-static uint32_t      IMU_interruptCount = 0;        /**< IMU interrupt counter                               */
-static uint32_t      IMU_isDataReadyQueryCount = 0; /**< The number of the total data ready queries          */
-static uint32_t      IMU_isDataReadyTrueCount = 0;  /**< The number of queries when data is ready            */
 IMU_SensorFusion     fuseObj;                       /**< Structure to store the sensor fusion data           */
 
 /** @endcond */
@@ -191,9 +188,9 @@ void IMU_config(float sampleRate)
 
   printf("IMU sample rate set to %f Hz (accel), %f Hz (gyro)\r\n", accelSampleRate, gyroSampleRate);
 
-  /* Filter bandwidth: 12kHz, otherwise the results may be off */
-  ICM20648_accelBandwidthSet(ICM20648_ACCEL_BW_6HZ);
-  ICM20648_gyroBandwidthSet(ICM20648_GYRO_BW_6HZ);
+  /* Filter bandwidth: 24Hz — removes vibration/spikes (~21ms lag), preserves navigation dynamics (0-10Hz) */
+  ICM20648_accelBandwidthSet(ICM20648_ACCEL_BW_24HZ);
+  ICM20648_gyroBandwidthSet(ICM20648_GYRO_BW_24HZ);
 
   /* Accel: 2G full scale */
   ICM20648_accelFullscaleSet(ICM20648_ACCEL_FULLSCALE_2G);
@@ -204,8 +201,9 @@ void IMU_config(float sampleRate)
   UTIL_delay(50);
 
 
-  /* Enable the raw data ready interrupt */
-  ICM20648_interruptEnable(true, false);
+  /* Data-ready interrupt disabled: sampling is driven by RTCDRV 5ms timer, not the ICM20648 INT pin.
+   * Disabling avoids a 200Hz GPIO IRQ that would otherwise fire and set dataReady with no consumer. */
+  ICM20648_interruptEnable(false, false);
 
   /* Enter low power mode */
   // // ICM20648_lowPowerModeEnter(true, true, false);
@@ -429,11 +427,6 @@ bool IMU_isDataReady(void)
   }
 
   ready = ICM20648_isDataReady();
-  IMU_isDataReadyQueryCount++;
-
-  if ( ready ) {
-    IMU_isDataReadyTrueCount++;
-  }
 
   return ready;
 }
@@ -495,7 +488,6 @@ void IMU_clearDataReadyFlag(void)
 static void gpioInterrupt(void)
 {
   dataReady = true;
-  IMU_interruptCount++;
 
 #ifdef RADIO_BLE
   gecko_external_signal(1);

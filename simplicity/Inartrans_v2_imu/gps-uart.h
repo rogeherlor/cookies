@@ -15,12 +15,10 @@
 #define MI_BUFFER_SIZE 1024
 
 void gps_uart_set_input_handler(int (* handler)(unsigned char c));
-void gps_uart_init(void);
 int gps_putchar(int ch);
-int gps_inputbyte(unsigned char c);
 //void busca(void);
 void set_GNSS_mode(uint8_t mode);
-int busca2(void);
+int parse_nmea_epoch(void);
 
 extern USART_TypeDef * g_uart;
 extern int (* input_handler)(unsigned char c);
@@ -32,7 +30,6 @@ extern int (* input_handler)(unsigned char c);
 #endif
 
 extern uint8_t tiempo[10];
-extern uint8_t tiempo_out[10];
 extern uint8_t tiemponuevo[10];
 extern uint8_t fecha[6];
 extern uint8_t tiempo2[10];
