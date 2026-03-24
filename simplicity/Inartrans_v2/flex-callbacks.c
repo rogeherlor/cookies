@@ -60,6 +60,7 @@ uint16_t sensorReportPeriodMs =  250; 				// Periodo de "reportes" AKA envio de 
 static uint16_t sensorReportPeriodMs =  1000;		// para RED_DEMO2 quiero envios cada 1 segundo
 #endif
 uint8_t flagStandby = 0;							// Oct22 0 manda datos, 1 no manda. No deshabilita la radio ni su consumo (pendiente)
+uint8_t flagConfig = 0;
 //extern EmberStatus emberAfPluginWstkSensorsGetSample(uint32_t *rhData, int32_t *tData);
 
 //////////////   GNSS   /////////////////			//Feb23
@@ -84,10 +85,9 @@ uint8_t cont_bad_PDOP_lim = 60;						//Umbral del numero de veces que se puede d
 ////////////////////////////////////////
 
 extern uint8_t tengo_gps;
-uint8_t tengo_datos_gps = 0;
+static bool tengo_datos_gps = false;
 extern uint8_t validez;
 extern uint8_t tiempo[10];
-extern uint8_t tiempo_ultimo_valido[10];
 uint8_t tiempo_out[10] = "000000.000";
 uint8_t fecha_out[6] = "000000"; 		//Mar23
 //extern uint8_t tiemponuevo[10];
@@ -108,13 +108,31 @@ uint8_t EnablePrint_A = 1;
 uint8_t EnablePrint_G = 1;
 uint8_t EnablePrint_GPS = 1;
 
-static uint32_t tiempo_referencia = 0;
-static uint32_t tiempo_actual = 0;
-static uint32_t tiempo_anterior = 0;
-static uint32_t tiempo_incremento = 0;
+// ---- IMU 200 Hz timer (RTCDRV periodic, 5ms) ----
+static RTCDRV_TimerID_t imu_timer_id;
+static volatile bool imu_sample_pending = false;
+// -------------------------------------------------
+
+// ---- GNSS epoch detection ----
+volatile uint8_t gnss_lines_received = 0;   // incremented by USART1 ISR on each '\n'
+#define GNSS_LINES_PER_EPOCH  6             // RMC + GGA + GSA; all arrive within 1s at 9600 baud
+// ------------------------------
+
+// ---- GPS-synced timestamp ----
+static uint32_t gps_ms_ref     = 0;   // GPS time of last valid fix, ms since UTC midnight
+static uint32_t rtc_at_gps_fix = 0;   // RTCDRV tick at moment of last GPS fix
+static bool     gps_time_valid = false;
+// ------------------------------
+
+// ---- Cached sensor state for packet assembly ----
+static int32_t last_acelint[3]  = {0, 0, 0};  // accel * 1000 (raw units)
+static int32_t last_gyroint[3]  = {0, 0, 0};  // gyro integer (deg/s), for RED_DEMO2
+static float   latitud_s  = 0.0f;
+static float   longitud_s = 0.0f;
+static float   altitud_s  = 0.0f;
+// -------------------------------------------------
 
 uint16_t rango_ack;
-uint8_t flagConfig = 0;
 uint16_t conf_orig;
 uint16_t conf_rang;
 uint16_t conf_padre;
@@ -128,429 +146,178 @@ EKF_Context_t myEKF;
 bool ekf_initialized = false;
 ////////////  END EKF   ////////////////
 
-
-static float Ts1_sum = 0.001;
-uint16_t t_max_ciclo=10;			//CUIDADO. Maxima duracion de una iteracion del kalman. Valor hardcodeado. Se utiliza para que el kalman no retrase el tiempo de envio. Se podria eliminar.
 uint8_t cont_valid_gps = 0;
 uint16_t cont_invalid_gps = 0;
 bool flag_first_gps = true; 		//Primer gps valido cuando cumple varios gps seguidos validos
-bool flag_gps0 = true;
 
 
+
+// ---- IMU timer callback (ISR context — only sets flag) ----
+static void imuTimerCallback(RTCDRV_TimerID_t id, void *user)
+{
+    (void)id; (void)user;
+    imu_sample_pending = true;
+}
+
+static void IMU_initTimer(void)
+{
+    RTCDRV_AllocateTimer(&imu_timer_id);
+    RTCDRV_StartTimer(imu_timer_id, rtcdrvTimerTypePeriodic, 5, imuTimerCallback, NULL);
+}
+// -----------------------------------------------------------
 
 void reportHandler(void)
 {
-	if (NODO_QUE_ENVIA == 0){return;}
-	if (flagStandby == 1){flag_first_gps=true; cont_valid_gps=0; return;} 	//No manda datos, pero no apaga radio
+	if (NODO_QUE_ENVIA == 0) { return; }
+	if (flagStandby == 1) {
+		flag_first_gps = true; cont_valid_gps = 0;
+		emberEventControlSetDelayMS(reportControl, sensorReportPeriodMs);
+		return;
+	}
 
-	tiempo_anterior = tiempo_actual;
-	tiempo_actual = RTCDRV_GetWallClockTicks32()/4;							// cojo el tiempo actual, en cada paquete
-
-	//validez = 0x56;
-	int32_t tempData = 0;
-	uint32_t rhData = 0;
-	// For navigation we want high resolution (low range) and LPF with small frequency
-	// For integrity we prefer higher range for detecting spykes, more sampling, and LPF with high frequency.
-	static float acelflo[3]={0,0,0}; 		// imu.c ICM20648_ACCEL_FULLSCALE_2G, ICM20648_ACCEL_BW_6HZ for navigation (for m/s2 *9.81)
-	static float gyroflo[3]={0,0,0};  		// imu.c ICM20648_GYRO_FULLSCALE_250DPS, ICM20648_GYRO_BW_6HZ (deg/s)
-	static int32_t acelint[3] = {0,0,0};
-	static int32_t gyroint[3] = {0,0,0};
-	float Ts1 = 0.001;
-	bool Correct_GPS1 = false;
-
-	float latitud_s = 0;
-	float longitud_s = 0;
-	float altitud_s = 0;
-	float latitud_k = 0;
-	float longitud_k = 0;
-	float altitud_k = 0;
-	float vel_k = 0;
-
-	Ts1 = (float) (tiempo_actual - tiempo_anterior)/1000; 				//tiempo desde mi ultima referencia, en s
-	Ts1_sum = Ts1_sum + Ts1;
-
-	if (mi_panID != 0xFFFF && (mi_rango < 0xFFFF)){   					//solo envio si estoy conectado a algo
-		IMU_getAccelerometerData(acelflo);
-		IMU_getGyroData(gyroflo);
-
-		for (int i = 0; i < 3; i++){
-			acelint[i] = (int32_t) 1000*acelflo[i]; 					//Valor enviado no esta en m/s2
-			gyroint[i] = (int32_t) gyroflo[i];
+	// Advance GNSS constellation selector counter (~4 Hz via sensorReportPeriodMs)
+	if (mode_selector_GNSS > 0) {
+		if (cont_selector_GNSS == 0) {
+			set_GNSS_mode(mode_selector_GNSS);
+			GNSS_mode = mode_selector_GNSS;
 		}
+		cont_selector_GNSS++;
+		if (cont_selector_GNSS > cont_selector_cicles) {
+			cont_selector_GNSS = 0;
+			mode_selector_GNSS++;
+			if (mode_selector_GNSS > n_modes) {
+				mode_selector_GNSS = 0;
+				set_GNSS_mode(best_mode_selector_GNSS);
+				GNSS_mode = best_mode_selector_GNSS;
+				emberAfCorePrint("\nBest Mode %u, Best PDOP %u\n", best_mode_selector_GNSS, PDOP_best);
+				best_mode_selector_GNSS = 7;
+				PDOP_best = 65535;
+			}
+		}
+	}
 
-		// Units Reference rotation
-		acelflo[0] = -acelflo[0]*9.81f;		//conversion a m/s2
-		float aux_acc = acelflo[1];
-		acelflo[1] = -acelflo[2]*9.81f;
-		acelflo[2] = -aux_acc*9.81f;
+	emberEventControlSetDelayMS(reportControl, sensorReportPeriodMs);
 
-		// Units
-		gyroflo[0] = -gyroflo[0]*PI/180; 	//conversion a radianes
-		float aux_gyr = gyroflo[1];
-		gyroflo[1] = -gyroflo[2]*PI/180;
-		gyroflo[2] = -aux_gyr*PI/180;
+	if (mi_panID != 0xFFFF && (mi_rango < 0xFFFF)) {
+		int32_t tempData = 0;
+		uint32_t rhData = 0;
+		float latitud_k = 0.0f, longitud_k = 0.0f, altitud_k = 0.0f, vel_k = 0.0f;
 
-		emberAfCorePrint("\nA = %ld, %ld, %ld;", acelint[0], acelint[1], acelint[2]);
-		emberAfCorePrint("G = %ld, %ld, %ld;", gyroint[0], gyroint[1], gyroint[2]);
-		emberAfCorePrint("Ts1 = %ld; Sum = %ld;", (int32_t)(Ts1*1000), (int32_t)(Ts1_sum*1000));
-
+		// Compute EKF output from latest filter state
 		if (ekf_initialized) {
-			EKF_Predict(&myEKF, acelflo, gyroflo, Ts1);
-			
-			// Update output variables
 			float lla_out[3];
 			ENU_to_LLA(myEKF.pos_enu, myEKF.lla0[0], myEKF.lla0[1], myEKF.lla0[2], lla_out);
-			latitud_k = lla_out[0];
+			latitud_k  = lla_out[0];
 			longitud_k = lla_out[1];
-			altitud_k = lla_out[2];
+			altitud_k  = lla_out[2];
 			vel_k = sqrtf(myEKF.vel_enu[0]*myEKF.vel_enu[0] + myEKF.vel_enu[1]*myEKF.vel_enu[1] + myEKF.vel_enu[2]*myEKF.vel_enu[2]);
 			emberAfCorePrint("\nlat_k: %ld; lon_k: %ld; alt_k: %ld;  vel_k: %ld", (int32_t)latitud_k, (int32_t)longitud_k, (int32_t)altitud_k, (int32_t)vel_k);
 		}
 
-		//emberAfPluginWstkSensorsGetSample(&rhData, &tempData); //Dic22 Comentado puesto que consume mucho tiempo y no se utiliza esta info
-		//emberAfCorePrint("\nH = %lu.%lu (%%)\n", rhData/1000, (rhData-1000*(rhData/1000)));
-		//emberAfCorePrint("T = %ld.%ld (�C)\n", tempData/1000, (tempData-1000*(tempData/1000)));
-		//emberAfCorePrint("A = %ld, %ld, %ld (g x10-3)\n", acelint[0], acelint[1], acelint[2]);
-		//emberAfCorePrint("G = %ld, %ld, %ld (deg/s)\n", gyroint[0], gyroint[1], gyroint[2]);
+		// Build tiempo_out ("HHMMSS.mmm") from GPS-synced timestamp
+		if (gps_time_valid) {
+			uint32_t ts = gps_ms_ref + (RTCDRV_GetWallClockTicks32() - rtc_at_gps_fix) / 4;
+			uint32_t h = ts / 3600000UL; ts %= 3600000UL;
+			uint32_t m = ts / 60000UL;   ts %= 60000UL;
+			uint32_t s = ts / 1000UL;    ts %= 1000UL;
+			sprintf((char*)tiempo_out, "%02lu%02lu%02lu.%03lu", h, m, s, ts);
+			// fecha_out is updated in emberAfMainTickCallback when GNSS epoch is parsed
+		}
 
+		// Assemble fixed 75-byte packet (byte offsets are frozen)
+		memcpy(paquete,    &rhData,               sizeof(uint32_t));
+		memcpy(paquete+4,  &tempData,             sizeof(int32_t));
+		memcpy(paquete+8,  &last_acelint[0],      sizeof(int32_t));
+		memcpy(paquete+12, &last_acelint[1],      sizeof(int32_t));
+		memcpy(paquete+16, &last_acelint[2],      sizeof(int32_t));
+		memcpy(paquete+20, &original_data_rssi_init, sizeof(int8_t));
 
-	if(Ts1_sum*1000 >= sensorReportPeriodMs - t_max_ciclo ){ //Si el tiempo de ejecucion supera el tiempo de muestreo menos un offset opcional para no retrasar el envio se mira el gps
+		memcpy(paquete+26, &latitud_k,  sizeof(float));
+		memcpy(paquete+35, &longitud_k, sizeof(float));
+		memcpy(paquete+44, &altitud_k,  sizeof(float));
+		memcpy(paquete+50, &vel_k,      sizeof(float));
+
+		memcpy(paquete+72, &GNSS_mode, sizeof(uint8_t));
+		memcpy(paquete+73, ",",        sizeof(char));
+		memcpy(paquete+74, ",",        sizeof(char));
+
 	#if TENGO_GPS
-		#if PROBANDO == 1
-			  tengo_gps=1;
+		if (tengo_datos_gps) {
+			memcpy(paquete+21, &validez, sizeof(validez));
+			if (validez == 0x41) {
+				memcpy(paquete+22, &latitud_s,  sizeof(float));
+				memcpy(paquete+30, &norte_sur,  sizeof(norte_sur));
+				memcpy(paquete+31, &longitud_s, sizeof(float));
+				memcpy(paquete+39, &este_oeste, sizeof(este_oeste));
+				memcpy(paquete+40, &altitud_s,  sizeof(float));
+				memcpy(paquete+48, &vel_GNSS_u, sizeof(uint16_t));
+				memcpy(paquete+54, &tiempo_out, sizeof(tiempo_out));
+				memcpy(paquete+64, &fecha_out,  sizeof(fecha_out));
+				memcpy(paquete+70, &PDOP_u,     sizeof(uint16_t));
+			}
+		#if (RED_USADA==RED_DEMO2)
+			else {
+				memcpy(paquete+28, ",", sizeof(char));
+				memcpy(paquete+29, ",", sizeof(char));
+				memcpy(paquete+30, ",", sizeof(char));
+				memcpy(paquete+31, ",", sizeof(char));
+				memcpy(paquete+32, ",", sizeof(char));
+				memcpy(paquete+33, ",", sizeof(char));
+			}
 		#endif
-			//memcpy(&tiempo, "000000.000", sizeof(tiempo));
-		tengo_datos_gps = 0;
-		if(tengo_gps){
-			tengo_datos_gps = 1;
-			if (busca2()){			// esto me saca el valor de tiempo en "tiempo", lo volcare a "tiempo ultimo valido". Serial GPS, true cuando hay valor nuevo.
-									// NOTA: estamos tomando tiempo SIEMPRE QUE TENGAMOS UNO, sea valido o no (con 1 satelite ya tenemos tiempo)
-				memcpy(&tiempo_ultimo_valido, &tiempo, sizeof(tiempo));	// solo vuelco el tiempo de GPS al "ultimo valido" cuando tenga un tiempo GPS bueno
-				tiempo_referencia = RTCDRV_GetWallClockTicks32()/4;		// cojo el nuevo tiempo de referencia (ultimo valor de tiempo del gps)
-
-				if (validez == 0x41){
-					Correct_GPS1 = true;											//Feb23 Update del kalman
-					PDOP_u = atof(PDOP)*100;										//Feb23 PDOP*100
-				}
-				  //////////// Algoritmo selector GNSS con PDOP ////////////
-				  if(PDOP_u>0 && PDOP_u<PDOP_best && mode_selector_GNSS>0){ 		//Feb23 selector del mejor durante la busqueda. Se hace cuando hay nuevo valor
-					  PDOP_best=PDOP_u;
-					  best_mode_selector_GNSS=mode_selector_GNSS;
-				  }
-
-				  if(PDOP_u>0 && PDOP_u<PDOP_lim){cont_bad_PDOP=0;}					//Feb23 si valor de PDOP malo n veces supera PDOP_lim, se busca nuevo mejor GNSS
-				  if((PDOP_u==0 || PDOP_u>PDOP_lim) && mode_selector_GNSS==0){		//Si se supera y se esta en modo normal de funcionamiento (sin buscar nueva se�al GNSS)
-					  cont_bad_PDOP++;
-					  if(cont_bad_PDOP>cont_bad_PDOP_lim){
-						  cont_bad_PDOP=0;
-						  mode_selector_GNSS=mode_selector_GNSS_min;
-					  }
-				  }
-				  //////////////////////////////////////////////////////////
-
-			}
-			//emberAfCorePrint("\nValid? = %s\n",validez== 0x41 ? "YES" : "NO");
-
-			////////////     Algoritmo selector GNSS     ////////////
-			if(mode_selector_GNSS>0){												//Feb23. Se hace por numero de ciclos y no por numero de se�ales nuevas por si algun modo no recibe se�al
-				if (cont_selector_GNSS==0){
-					set_GNSS_mode(mode_selector_GNSS);
-					GNSS_mode=mode_selector_GNSS;
-				}
-				cont_selector_GNSS++;
-				if (cont_selector_GNSS>cont_selector_cicles){
-					cont_selector_GNSS=0;
-					mode_selector_GNSS++;
-					if(mode_selector_GNSS>n_modes) {
-						mode_selector_GNSS=0;
-						set_GNSS_mode(best_mode_selector_GNSS);
-						GNSS_mode=best_mode_selector_GNSS;
-						emberAfCorePrint("Best Mode %u, Best PDOP %u\n", best_mode_selector_GNSS, PDOP_best);
-						best_mode_selector_GNSS=7;	//Por defecto 7
-						PDOP_best=65535;
-					}
-				}
-			}
-			//////////////////////////////////////////////////////////
-
-			if (validez == 0x41){									//0x41='A' //Feb23 Los mensajes de GNSS guardan los valores antiguos hasta que hay uno nuevo, por lo tanto validez no significa que haya un dato nuevo. Dato nuevo es en busca2()=true
-
-				  latitud_s = atof(latitud);
-				  longitud_s = atof(longitud);
-				  altitud_s = atof(altitud);
-				  vel_GNSS_u = atof(vel_GNSS)*100/1.94384;			// knots to m/s *100
-				  cog_GNSS_u = atof(cog_GNSS)*100*PI/180;			// deg to rad * 100
-
-				  if(latitud_s==0.0f || longitud_s==0.0f){			//Ene 23. Comprobacion de valor valido. Se puede incluso restringir la zona de operacion a la del pais.
-					  flag_gps0=true; validez=0x41; latitud_s=0.0; longitud_s=0.0; altitud_s=0.0;
-				  }else{
-					  flag_gps0 = false;
-					  cont_invalid_gps = 0;
-					  if(cont_valid_gps<10){cont_valid_gps++;}
-
-					  if(flag_first_gps && cont_valid_gps>=10){		//Kalman Initialization
-						  flag_first_gps = false;
-						  /////////////////////////////////////////////////
-						  //              KALMAN INITIALIZATION         //
-						  ////////////////////////////////////////////////
-
-						  EKF_Init(&myEKF, latitud_s/100.0f, longitud_s/100.0f, altitud_s);
-						  ekf_initialized = true;
-					  }
-
-					  if (ekf_initialized && Correct_GPS1) {
-						  EKF_Update(&myEKF, latitud_s/100.0f, longitud_s/100.0f, altitud_s);
-						  Correct_GPS1 = false;
-						  emberAfCorePrint("\nKUpd; lat_s: %ld; lon_s: %ld; alt_s: %ld;  vel_s: %ld; cog_s: %ld", (int32_t)latitud_s, (int32_t)longitud_s, (int32_t)altitud_s, (int32_t)vel_GNSS_u, (int32_t)cog_GNSS_u);
-					  }
-
-
-				}
-			}else{
-				cont_valid_gps = 0;
-				if(cont_invalid_gps<200){cont_invalid_gps++;}else{flag_first_gps=true;cont_invalid_gps=0;mode_selector_GNSS=mode_selector_GNSS_min;} //200 gps invalidos seguidos reset kalman
-			}
-		}
-		if (!tengo_gps){			// creo que esto es totalmente innecesario, si no tengo gps siempre el tiempo estara a "000000.000"
-			memcpy(&tiempo, "000000.000", sizeof(tiempo));
-		}
-	}
-
-
-	if(Ts1_sum*1000 >= sensorReportPeriodMs - t_max_ciclo ){ //Si el tiempo de ejecucion supera el tiempo de muestreo menos un offset opcional para no retrasar el envio se envian datos
-
-			tiempo_incremento = (RTCDRV_GetWallClockTicks32()/4) - tiempo_referencia;			// esto es el tiempo desde mi ultima referencia, en ms. Tiempo interno
-
-			uint16_t parte_horas, parte_minutos;
-			uint32_t parte_resto, parte_segundos, parte_milisegundos;
-			uint16_t parte_dia, parte_mes, parte_ano;
-			uint8_t strhoras[3] = {0}, strminutos[3] = {0}, strresto[5] = {0}, strsegundos[3] = {0}, strmilisegundos[4] = {0}, strdia[3] = {0}, strmes[3] = {0}, strano[3] = {0};
-
-			memcpy(&strhoras, &tiempo_ultimo_valido[0], 2);
-			memcpy(&strminutos, &tiempo_ultimo_valido[2], 2);
-			memcpy(&strresto[0], &tiempo_ultimo_valido[4] , 2);
-			memcpy(&strresto[2], &tiempo_ultimo_valido[7] , 3);
-			memcpy(&strdia, &fecha[0], 2);
-			memcpy(&strmes, &fecha[2], 2);
-			memcpy(&strano, &fecha[4], 2);
-
-			parte_horas = atoi(strhoras);
-			parte_minutos = atoi(strminutos);
-			parte_resto = atoi(strresto);
-			parte_dia = atoi(strdia);
-			parte_mes = atoi(strmes);
-			parte_ano = atoi(strano);
-
-			parte_resto += tiempo_incremento;				// los segundos + milisegundos ya sumados, en ms
-
-
-			parte_segundos = parte_resto / 1000;
-			parte_milisegundos = parte_resto % 1000;
-			while(parte_segundos >= 60){			// si tengo MAS de 60s, me sumo al minuto y ajusto
-				parte_segundos -= 60;
-				parte_minutos += 1;
-			}
-			while(parte_minutos >= 60){
-				parte_horas += 1;
-				parte_minutos -= 60;
-			}
-			while(parte_horas >= 24){
-				parte_dia += 1;
-				parte_horas -= 24;
-			}
-			if((parte_mes == 2)&&(parte_dia > 28)){
-				parte_dia -= 28;
-				parte_mes += 1;
-			}
-			if(((parte_mes == 4)||(parte_mes == 6)||(parte_mes == 9)||(parte_mes == 11))&&(parte_dia > 30)){
-				parte_dia -= 30;
-				parte_mes += 1;
-			}
-			if(((parte_mes == 1)||(parte_mes == 3)||(parte_mes == 5)||(parte_mes == 7)||(parte_mes == 8)||(parte_mes == 10)||(parte_mes == 12))&&(parte_dia > 31)){
-				parte_dia -= 31;
-				parte_mes += 1;
-			}
-			if (parte_mes > 12){
-				parte_ano += 1;
-				parte_mes -= 12;
-			}
-
-
-			sprintf(strmilisegundos, "%03lu", parte_milisegundos); 	//Mar23 Necesario un byte adicional para '\0' con sprintf
-			sprintf(strsegundos, "%02lu", parte_segundos);
-			sprintf(strminutos, "%02u", parte_minutos);
-			sprintf(strhoras, "%02u", parte_horas);
-			sprintf(strdia, "%02u", parte_dia);
-			sprintf(strmes, "%02u", parte_mes);
-			sprintf(strano, "%02u", parte_ano);
-
-			memcpy(&tiempo_out, "000000.000", 10);
-			memcpy(&fecha_out, "000000", 6);
-			memcpy(&tiempo_out[0], &strhoras, 2);
-			memcpy(&tiempo_out[2], &strminutos, 2);
-			memcpy(&tiempo_out[4], &strsegundos, 2);
-			memcpy(&tiempo_out[7], &strmilisegundos, 3);
-			memcpy(&fecha_out[0], &strano, 2);
-			memcpy(&fecha_out[2], &strmes, 2);
-			memcpy(&fecha_out[4], &strdia, 2);
-
-			//sprintf(tiempo_out, "%02u%02u%02lu.%03lu", parte_horas, parte_minutos, parte_segundos, parte_milisegundos); //lento
-			//sprintf(fecha_out, "%02u%02u%02u", strano, strmes, strdia);
-
-			#if VERBOSEO==1
-				//emberAfCorePrint("Parte horas = %lu\n", parte_horas);
-				//emberAfCorePrint("Parte minutos = %lu\n", parte_minutos);
-				//emberAfCorePrint("Parte dia, numero = %lu\n", parte_dia);
-				//emberAfCorePrint("Parte dia, string = %s\n", strdia);
-				//emberAfCorePrint("Parte mes, numero = %lu\n", parte_mes);
-				//emberAfCorePrint("Parte mes, string = %s\n", strmes);
-				//emberAfCorePrint("Parte a�o, numero = %lu\n", parte_ano);
-				//emberAfCorePrint("Parte a�o, string = %s\n", strano);
-				emberAfCorePrint("Parte dia, numero = %lu\n", parte_dia);
-				emberAfCorePrint("Parte dia, string = %s\n", strdia);
-				emberAfCorePrint("Parte mes, numero = %lu\n", parte_mes);
-				emberAfCorePrint("Parte mes, string = %s\n", strmes);
-				emberAfCorePrint("Parte a�o, numero = %lu\n", parte_ano);
-				emberAfCorePrint("Parte a�o, string = %s\n", strano);
-			#endif
-
-
+		} else {
+			memcpy(paquete+21, "V", sizeof(char));
+		#if (RED_USADA==RED_DEMO2)
+			memcpy(paquete+28, ",", sizeof(char));
+			memcpy(paquete+29, ",", sizeof(char));
+			memcpy(paquete+30, ",", sizeof(char));
+			memcpy(paquete+31, ",", sizeof(char));
+			memcpy(paquete+32, ",", sizeof(char));
+			memcpy(paquete+33, ",", sizeof(char));
 		#endif
+		}
+	#if RED_USADA == RED_DEMO2
+		{
+			uint8_t despl_gyro = (tengo_datos_gps && (validez == 0x41)) ? (72-33) : 0;
+			memcpy(paquete+34 + despl_gyro, &last_gyroint[0], sizeof(last_gyroint[0]));
+			memcpy(paquete+38 + despl_gyro, ",", sizeof(char));
+			memcpy(paquete+39 + despl_gyro, &last_gyroint[1], sizeof(last_gyroint[1]));
+			memcpy(paquete+43 + despl_gyro, ",", sizeof(char));
+			memcpy(paquete+44 + despl_gyro, &last_gyroint[2], sizeof(last_gyroint[2]));
+			memcpy(paquete+48 + despl_gyro, ",", sizeof(char));
+		}
+	#endif
+	#endif
 
-			memcpy(paquete, &rhData, sizeof(uint32_t));
-			memcpy(paquete+4, &tempData, sizeof(int32_t));
-			memcpy(paquete+8, &acelint[0], sizeof(int32_t));
-			memcpy(paquete+12, &acelint[1], sizeof(int32_t));
-			memcpy(paquete+16, &acelint[2], sizeof(int32_t));
-			memcpy(paquete+20, &original_data_rssi_init, sizeof(int8_t));
-
-			memcpy(paquete+26, &latitud_k, sizeof(float));
-			memcpy(paquete+35, &longitud_k,sizeof(float));
-			memcpy(paquete+44, &altitud_k, sizeof(float));
-			memcpy(paquete+50, &vel_k, sizeof(float));
-
-			memcpy(paquete+72, &GNSS_mode, sizeof(uint8_t));
-			memcpy(paquete+73, ",", sizeof(char)); // ",," al final del paquete
-			memcpy(paquete+74, ",", sizeof(char)); // ",," al final del paquete
-
-		#if TENGO_GPS
-					if(tengo_datos_gps){
-						// hasta aqui lo que ira en TODOS los paquetes. ahora, si la lectura GPS es valida, iran mas cosas
-						// termina en una coma pq es mas facil buscar asi en la recepcion (y es menos guarro)
-						memcpy(paquete+21, &validez, sizeof(validez));
-						if (validez == 0x41){	//validez = A (0x41)
-								memcpy(paquete+22, &latitud_s, sizeof(float));
-								memcpy(paquete+30, &norte_sur, sizeof(norte_sur));
-								memcpy(paquete+31, &longitud_s,sizeof(float));
-								memcpy(paquete+39, &este_oeste, sizeof(este_oeste));
-								memcpy(paquete+40, &altitud_s, sizeof(float));
-								memcpy(paquete+48, &vel_GNSS_u, sizeof(uint16_t));
-								memcpy(paquete+54, &tiempo_out, sizeof(tiempo_out));
-								memcpy(paquete+64, &fecha_out, sizeof(fecha_out));
-								memcpy(paquete+70, &PDOP_u, sizeof(uint16_t));
-
-							  if(Correct_GPS1){
-								int32_t print_lat = latitud_s*10000;
-								emberAfCorePrint("{GP:LA=%ld;",print_lat);
-								int32_t print_lon = longitud_s*10000;
-								emberAfCorePrint("LO=%ld;",print_lon);
-								int32_t print_alt = altitud_s*10000;
-								emberAfCorePrint("AL=%ld;",print_alt);
-								emberAfCorePrint("VL=%lu;",vel_GNSS_u);
-								emberAfCorePrint("TS=");
-								for (int i=0;i<sizeof(tiempo_out);i++){
-									if (tiempo_out[i]!='x'){
-										emberAfCorePrint("%c",tiempo_out[i]);
-									}
-								}
-								emberAfCorePrint(";DT=");
-								for (int i=0;i<sizeof(fecha_out); i++){
-									emberAfCorePrint("%c", fecha_out[i]);
-								}
-								emberAfCorePrint(";Mod=%u",GNSS_mode);
-								emberAfCorePrint(";PDOP=%u",PDOP_u);
-								emberAfCorePrint("}\n");
-							  }
-
-						} //else {
-			#if (RED_USADA==RED_DEMO2)
-							memcpy(paquete+28, ",", sizeof(char));
-							memcpy(paquete+29, ",", sizeof(char));
-							memcpy(paquete+30, ",", sizeof(char));
-							memcpy(paquete+31, ",", sizeof(char));
-							memcpy(paquete+32, ",", sizeof(char));
-							memcpy(paquete+33, ",", sizeof(char));
-			#endif
-						//}
-						} else{		//del if tengo gps
-							memcpy(paquete+21, "V", sizeof(char));
-
-			#if (RED_USADA==RED_DEMO2)
-							memcpy(paquete+28, ",", sizeof(char));
-							memcpy(paquete+29, ",", sizeof(char));
-							memcpy(paquete+30, ",", sizeof(char));
-							memcpy(paquete+31, ",", sizeof(char));
-							memcpy(paquete+32, ",", sizeof(char));
-							memcpy(paquete+33, ",", sizeof(char));
-			#endif
-						}
-			#endif
-				#if RED_USADA == RED_DEMO2
-						uint8_t despl_gyro = ((tengo_gps==1)&&(validez == 0x41)) ? (72-33) : 0;
-						memcpy(paquete+34 + despl_gyro, &gyroint[0], sizeof(gyroint[0]));
-						memcpy(paquete+38 + despl_gyro, ",", sizeof(char));
-						memcpy(paquete+39 + despl_gyro, &gyroint[1], sizeof(gyroint[1]));
-						memcpy(paquete+43 + despl_gyro, ",", sizeof(char));
-						memcpy(paquete+44 + despl_gyro, &gyroint[2], sizeof(gyroint[2]));
-						memcpy(paquete+48 + despl_gyro, ",", sizeof(char));
-
-				#endif
-
-		origen = mi_nodeID;		// origen es la var. global que ira dentro del payload, no es lo mismo que el "origen" del envio nodo-a-nodo
+		origen = mi_nodeID;
 		rangorigen = mi_rango;
 		destino = 0x0000;
-		emberAfCorePrint("Sending from %2x to %2x\n", origen, nodo_padre.shortAddress);		//Julio 22, se imprimia el destino pero siempre es 0000, quiero ver a que padre manda
+		emberAfCorePrint("Sending from %2x to %2x\n", origen, nodo_padre.shortAddress);
 		emberAfCorePrint("My range %2x\n", mi_rango);
-		tipo = PQT_DATOS;		// esto es una chapuza enorme
-		manda_datos(mi_nodeID, nodo_padre.shortAddress);	//los paquetes de datos SIEMPRE se envian al nodo padre (con destino el coordinador 0x0000)
-	}
-}
-else{	//Jul22 Si se ha borrado el padre y mi_rango es 0xffff, se deja de enviar y se aumenta la cuenta para volver a intentar reconectarse
-	cuentaDC ++;
-	emberAfCorePrintln("State reset, disconnection count = %lu / %lu", cuentaDC, LIMITE_DC);
-	#if NODO_QUE_ENVIA
-		  if(cuentaDC >= LIMITE_DC){
-			  emberAfCorePrint("\n Deleting parent node, reconnecting to network\n");
-			  //arrancar_red();
-			  borrar_padre();
-			  manda_request();
-			  manda_repair_global();
-			  cuentaDC = 0;
-			  flag_first_gps=true; cont_valid_gps=0;
-		  }
-	#endif
-}
-//if(cuentaDC >= LIMITE_DC){
-	//arrancar_red();
-//} else {
-if(Ts1_sum*1000 >= sensorReportPeriodMs - t_max_ciclo ){ //Resta de tiempo max de ciclo
-	Ts1_sum=0;
-	if (tipo == PQT_DATOS){
-		if(numpaq < 0xffff){
-				emberAfCorePrintln("Packets sent: %lu", numpaq);
-				numpaq++;				// usamos el numpaq para contar los paquetes enviados //es generado pero no mandado
+		tipo = PQT_DATOS;
+		manda_datos(mi_nodeID, nodo_padre.shortAddress);
+
+		if (numpaq < 0xffff) {
+			emberAfCorePrintln("Packets sent: %lu", numpaq);
+			numpaq++;
 		} else {
 			numpaq = 1;
 		}
+	} else {
+		cuentaDC++;
+		emberAfCorePrintln("State reset, disconnection count = %lu / %lu", cuentaDC, LIMITE_DC);
+	#if NODO_QUE_ENVIA
+		if (cuentaDC >= LIMITE_DC) {
+			emberAfCorePrint("\n Deleting parent node, reconnecting to network\n");
+			borrar_padre();
+			manda_request();
+			manda_repair_global();
+			cuentaDC = 0;
+			flag_first_gps = true; cont_valid_gps = 0;
+		}
+	#endif
 	}
-
-	//Dic22. Este delay era fijo sin tener en cuenta el tiempo de ejecucion
-	//emberEventControlSetDelayMS(reportControl, sensorReportPeriodMs);		// al final de un envio (report) programamos el siguiente en 200ms
-	//emberEventControlSetDelayMS(reportControl, 2000);
 }
-}
-
-
 
 void emberAfChildJoinCallback(EmberNodeType nodeType,
                               EmberNodeId nodeId)
@@ -1251,6 +1018,10 @@ void emberAfMainInitCallback(void)
   emberAfCorePrintln("\n%p>", EMBER_AF_DEVICE_NAME);
 
   emberNetworkInit();
+
+#if NODO_QUE_ENVIA
+  IMU_initTimer();   // start 200 Hz IMU sampling timer
+#endif
 }
 
 // This callback is called in each iteration of the main application loop and
@@ -1264,6 +1035,138 @@ void emberAfMainTickCallback(void)
     halClearLed(NETWORK_UP_LED);
   }
   #endif
+
+#if NODO_QUE_ENVIA
+  // --- IMU at 200 Hz (flag set by RTCDRV periodic timer every 5 ms) ---
+  if (imu_sample_pending) {
+    imu_sample_pending = false;
+    float acelflo[3], gyroflo[3];
+    IMU_getAccelerometerData(acelflo);
+    IMU_getGyroData(gyroflo);
+
+    // Cache for packet assembly (raw units, no axis rotation)
+    for (int i = 0; i < 3; i++) {
+      last_acelint[i] = (int32_t)(acelflo[i] * 1000.0f);
+      last_gyroint[i] = (int32_t)(gyroflo[i]);
+    }
+
+    // GPS-synced timestamp (ms)
+    uint32_t rtc_now = RTCDRV_GetWallClockTicks32();
+    uint32_t ts_ms = gps_time_valid
+                     ? (gps_ms_ref + (rtc_now - rtc_at_gps_fix) / 4)
+                     : (rtc_now / 4);
+    emberAfCorePrint("\nIMU t=%lu; A=%ld,%ld,%ld; G=%ld,%ld,%ld",
+        ts_ms,
+        last_acelint[0], last_acelint[1], last_acelint[2],
+        last_gyroint[0], last_gyroint[1], last_gyroint[2]);
+
+    // --- EKF predict at 100 Hz (every 2nd IMU sample = 10 ms) ---
+    // The RTCDRV timer fires at ~200 Hz (5 ms period, 4096 Hz tick clock).
+    // Each firing carries ±0.244 ms jitter, so the IMU does NOT sample at a
+    // perfectly constant 200 Hz. A static counter divides by 2 so that
+    // EKF_Predict runs every ~10 ms ≈ 100 Hz.
+    //
+    // A FIXED Ts = 0.01 s is passed to EKF_Predict rather than measuring the
+    // actual RTC interval between calls. This is required for two reasons:
+    //   1) Measuring the RTC interval would propagate the ±0.244 ms per-tick
+    //      jitter directly into the filter state.
+    //   2) EKF_Predict scales the process noise matrix Q by Ts
+    //      (P = F·P·Fᵀ + Q·Ts). A variable Ts would make Q effectively
+    //      variable each step, breaking the assumption that Q is a tuned
+    //      constant and making the filter inconsistent. The fixed nominal
+    //      Ts = 0.01 s keeps Q well-defined.
+    static uint8_t ekf_div = 0;
+    if (++ekf_div >= 2) {
+      ekf_div = 0;
+      if (ekf_initialized) {
+        // Axis rotation + unit conversion (same convention as original v2)
+        float af[3], gf[3];
+        af[0] = -acelflo[0] * 9.81f;
+        float aux_acc = acelflo[1];
+        af[1] = -acelflo[2] * 9.81f;
+        af[2] = -aux_acc * 9.81f;
+        gf[0] = -gyroflo[0] * PI / 180.0f;
+        float aux_gyr = gyroflo[1];
+        gf[1] = -gyroflo[2] * PI / 180.0f;
+        gf[2] = -aux_gyr * PI / 180.0f;
+        EKF_Predict(&myEKF, af, gf, 0.01f);  // Ts = 10 ms fixed
+      }
+    }
+  }
+
+  // --- GNSS event-driven: process when a full epoch has arrived ---
+  if (gnss_lines_received >= GNSS_LINES_PER_EPOCH) {
+    gnss_lines_received = 0;
+
+    if (parse_nmea_epoch()) {
+      // Anchor GPS-synced timestamp
+      uint32_t gps_h   = (tiempo[0]-'0')*10 + (tiempo[1]-'0');
+      uint32_t gps_min = (tiempo[2]-'0')*10 + (tiempo[3]-'0');
+      uint32_t gps_s   = (tiempo[4]-'0')*10 + (tiempo[5]-'0');
+      uint32_t gps_ms  = (tiempo[7]-'0')*100 + (tiempo[8]-'0')*10 + (tiempo[9]-'0');
+      gps_ms_ref     = gps_h*3600000UL + gps_min*60000UL + gps_s*1000UL + gps_ms;
+      rtc_at_gps_fix = RTCDRV_GetWallClockTicks32();
+      gps_time_valid = true;
+
+      // fecha[] from NMEA is DDMMYY; fecha_out in packet is YYMMDD
+      fecha_out[0] = fecha[4]; fecha_out[1] = fecha[5];  // YY
+      fecha_out[2] = fecha[2]; fecha_out[3] = fecha[3];  // MM
+      fecha_out[4] = fecha[0]; fecha_out[5] = fecha[1];  // DD
+
+      tengo_datos_gps = true;
+
+      if (validez == 0x41) {
+        latitud_s  = atof((char*)latitud);
+        longitud_s = atof((char*)longitud);
+        altitud_s  = atof((char*)altitud);
+        vel_GNSS_u = (uint16_t)(atof((char*)vel_GNSS) / 1.94384f * 100.0f);
+        cog_GNSS_u = (uint16_t)(atof((char*)cog_GNSS) * 100.0f * PI / 180.0f);
+        PDOP_u     = (uint16_t)(atof((char*)PDOP) * 100.0f);
+
+        // PDOP best-mode tracking
+        if (PDOP_u > 0 && PDOP_u < PDOP_best && mode_selector_GNSS > 0) {
+          PDOP_best = PDOP_u; best_mode_selector_GNSS = mode_selector_GNSS;
+        }
+        if (PDOP_u > 0 && PDOP_u < PDOP_lim) { cont_bad_PDOP = 0; }
+        if ((PDOP_u == 0 || PDOP_u > PDOP_lim) && mode_selector_GNSS == 0) {
+          if (++cont_bad_PDOP > cont_bad_PDOP_lim) {
+            cont_bad_PDOP = 0; mode_selector_GNSS = mode_selector_GNSS_min;
+          }
+        }
+
+        if (latitud_s != 0.0f && longitud_s != 0.0f) {
+          cont_invalid_gps = 0;
+          if (cont_valid_gps < 10) cont_valid_gps++;
+          if (flag_first_gps && cont_valid_gps >= 10) {
+            flag_first_gps  = false;
+            EKF_Init(&myEKF, latitud_s / 100.0f, longitud_s / 100.0f, altitud_s);
+            ekf_initialized = true;
+          }
+          if (ekf_initialized) {
+            EKF_Update(&myEKF, latitud_s / 100.0f, longitud_s / 100.0f, altitud_s);
+            emberAfCorePrint("\nGP V=A; lat=%ld; lon=%ld; alt=%ld; vel=%u; PDOP=%u",
+                (int32_t)(latitud_s * 100), (int32_t)(longitud_s * 100),
+                (int32_t)(altitud_s * 100), vel_GNSS_u, PDOP_u);
+          }
+        }
+      } else {
+        cont_valid_gps = 0;
+        if (++cont_invalid_gps >= 200) {
+          flag_first_gps = true; cont_invalid_gps = 0;
+          mode_selector_GNSS = mode_selector_GNSS_min;
+        }
+      }
+    }
+
+    // Overflow safety: reset buffer if >75% full
+    if (indice > (MI_BUFFER_SIZE * 3 / 4)) {
+      INTERRUPTS_OFF();
+      for (int i = 0; i < MI_BUFFER_SIZE; i++) mi_buffer[i] = '0';
+      indice = 0; gnss_lines_received = 0;
+      INTERRUPTS_ON();
+    }
+  }
+#endif
 }
 
 void emberAfStackStatusCallback(EmberStatus status)

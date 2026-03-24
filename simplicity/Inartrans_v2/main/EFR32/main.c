@@ -46,7 +46,7 @@
  *
  * - NODO_QUE_ENVIA 1/0 : marca la diferencia entre nodo sensor y nodo coordinador.
  * - RED_USADA : la panID a la que se va a unir el nodo. Puede ser RED_PRUEBAS o RED_SCOTT1 (o cualquier otra que se quiera crear)
- * - SOLO_RELAY 1/0 si se utiliza solo como nodo router (0) o Sensor también (1)
+ * - SOLO_RELAY 1/0 si se utiliza solo como nodo router (0) o Sensor tambiï¿½n (1)
  *
  *  Ambas definiciones se encuentran en protocolored.h
  *
@@ -56,7 +56,7 @@
  * - TENGO_GPS 1/0 : para deshabilitar directamente el codigo del soporte para el GPS
  *  Se encuentra en flex-callbacks.c,  normalmente fijo a 1 (tengo/puede que tenga GPS, asi que habilito el soporte para ello)
  *
- * Para programar la placa, hay que darle al botón de Flash Programmer, y seleccionar el binario de la carpeta del proyecto (.hex)
+ * Para programar la placa, hay que darle al botï¿½n de Flash Programmer, y seleccionar el binario de la carpeta del proyecto (.hex)
  *
  *
  */
@@ -83,7 +83,7 @@ int MAIN(MAIN_FUNCTION_PARAMETERS)
   GPIO_PinModeSet(gpioPortF, 11, gpioModePushPull, 1);	//inercial
   GPIO_PinOutSet(gpioPortF,11);		//habilito el enable del inercial
   IMU_init();
-  IMU_config(20); //le damos la freq de muestreo del sensor, en Hz
+  IMU_config(200); //le damos la freq de muestreo del sensor, en Hz
 
   emberAfCorePrint("Probando hora: %d\n",  RTCDRV_GetWallClockTicks32()/4);	  // NOTA: esto da el tiempo desde el arranque, en ticks (4 ticks es un milisegundo)
   UTIL_delay(300);
@@ -135,7 +135,7 @@ int MAIN(MAIN_FUNCTION_PARAMETERS)
 	emberAfCorePrint("\nLongitud del envio: %u\n", longitud_simple);
 #endif
 #if NODO_QUE_ENVIA											// el nodo que recibe NO tiene el report periodico
-#if (RED_USADA != RED_JAIME)				// para la prueba de envios de seguridad no queremos reports extraños, simplemente el envio
+#if (RED_USADA != RED_JAIME)				// para la prueba de envios de seguridad no queremos reports extraï¿½os, simplemente el envio
 #if (SOLO_RELAY != 1)
     	emberEventControlSetDelayMS(reportControl, 1000);		// tiempo inicial hasta el primer envio periodico, en ms
 #else

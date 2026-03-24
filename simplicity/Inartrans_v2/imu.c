@@ -192,8 +192,8 @@ void IMU_config(float sampleRate)
   printf("IMU sample rate set to %f Hz (accel), %f Hz (gyro)\r\n", accelSampleRate, gyroSampleRate);
 
   /* Filter bandwidth: 12kHz, otherwise the results may be off */
-  ICM20648_accelBandwidthSet(ICM20648_ACCEL_BW_6HZ);
-  ICM20648_gyroBandwidthSet(ICM20648_GYRO_BW_6HZ);
+  ICM20648_accelBandwidthSet(ICM20648_ACCEL_BW_24HZ);
+  ICM20648_gyroBandwidthSet(ICM20648_GYRO_BW_24HZ);
 
   /* Accel: 2G full scale */
   ICM20648_accelFullscaleSet(ICM20648_ACCEL_FULLSCALE_2G);

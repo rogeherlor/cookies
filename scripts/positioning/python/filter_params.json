@@ -199,6 +199,45 @@
             "2011_09_30_drive_0034_extract"
           ]
         }
+      },
+      "2011_09_30_drive_0020_extract": {
+        "params": {
+          "Qpos": 16.79948421216339,
+          "Qvel": 0.020031197457813486,
+          "QorientXY": 0.0014674631898439312,
+          "QorientZ": 4.670003064111646,
+          "Qacc": 0.0011673796079932164,
+          "QgyrXY": 0.005159250318048338,
+          "QgyrZ": 0.0018278734599023662,
+          "Rpos": 0.13450203116337414,
+          "beta_acc": -2.012414246759425e-06,
+          "beta_gyr": -1.7010430064597615,
+          "P_pos_std": 0.27648523238394657,
+          "P_vel_std": 0.13866609341843697,
+          "P_orient_std": 0.09357270501575775,
+          "P_acc_std": 0.0015597100764186572,
+          "P_gyr_std": 0.002446528019659099
+        },
+        "cost": 5.406612763912948,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 10,
+          "popsize": 8,
+          "timestamp": "20260324_150752",
+          "outage": {
+            "start": 60.0,
+            "duration": 60.0
+          },
+          "held_out_seq": "06",
+          "training_seqs": [
+            "2011_10_03_drive_0042_extract",
+            "2011_09_30_drive_0016_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
       }
     }
   },
@@ -275,6 +314,45 @@
           "training_seqs": [
             "2011_10_03_drive_0042_extract",
             "2011_09_30_drive_0020_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
+      },
+      "2011_09_30_drive_0020_extract": {
+        "params": {
+          "Qpos": 0.018440579823570682,
+          "Qvel": 6.850588014397756,
+          "QorientXY": 3.187123680016535e-05,
+          "QorientZ": 0.012062822008256008,
+          "Qacc": 0.22850473139426145,
+          "QgyrXY": 7.163966687002155e-06,
+          "QgyrZ": 0.08655217565973115,
+          "Rpos": 0.14168884696428916,
+          "beta_acc": -4.057550062272659e-07,
+          "beta_gyr": -0.363259641049225,
+          "P_pos_std": 0.9428499093743099,
+          "P_vel_std": 0.12988246050551513,
+          "P_orient_std": 0.10600507164827025,
+          "P_acc_std": 0.07808657711978896,
+          "P_gyr_std": 0.0021589311113705354
+        },
+        "cost": 6.313574670655742,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 10,
+          "popsize": 8,
+          "timestamp": "20260324_150752",
+          "outage": {
+            "start": 60.0,
+            "duration": 60.0
+          },
+          "held_out_seq": "06",
+          "training_seqs": [
+            "2011_10_03_drive_0042_extract",
+            "2011_09_30_drive_0016_extract",
             "2011_09_30_drive_0027_extract",
             "2011_09_30_drive_0028_extract",
             "2011_09_30_drive_0033_extract",
@@ -363,6 +441,45 @@
             "2011_09_30_drive_0034_extract"
           ]
         }
+      },
+      "2011_09_30_drive_0020_extract": {
+        "params": {
+          "Qpos": 15.659960361718234,
+          "Qvel": 0.06903288869931798,
+          "QorientXY": 0.0003554403618337279,
+          "QorientZ": 1.7657674969329744,
+          "Qacc": 0.001140194891357072,
+          "QgyrXY": 4.0770795168178316e-05,
+          "QgyrZ": 0.010710568567332617,
+          "Rpos": 0.11196952542880968,
+          "beta_acc": -7.719324442853512e-08,
+          "beta_gyr": -0.24289855197507015,
+          "P_pos_std": 13.5402959792078,
+          "P_vel_std": 2.3582096509889166,
+          "P_orient_std": 0.014315416995320164,
+          "P_acc_std": 0.014455317928893058,
+          "P_gyr_std": 0.00018314478012331352
+        },
+        "cost": 4.1393273955665,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 10,
+          "popsize": 8,
+          "timestamp": "20260324_150752",
+          "outage": {
+            "start": 60.0,
+            "duration": 60.0
+          },
+          "held_out_seq": "06",
+          "training_seqs": [
+            "2011_10_03_drive_0042_extract",
+            "2011_09_30_drive_0016_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
       }
     }
   },
@@ -439,6 +556,45 @@
           "training_seqs": [
             "2011_10_03_drive_0042_extract",
             "2011_09_30_drive_0020_extract",
+            "2011_09_30_drive_0027_extract",
+            "2011_09_30_drive_0028_extract",
+            "2011_09_30_drive_0033_extract",
+            "2011_09_30_drive_0034_extract"
+          ]
+        }
+      },
+      "2011_09_30_drive_0020_extract": {
+        "params": {
+          "Qpos": 0.4582967695248419,
+          "Qvel": 0.7583329951175781,
+          "QorientXY": 6.963302179469188e-05,
+          "QorientZ": 0.013293501044968112,
+          "Qacc": 0.12730639994879522,
+          "QgyrXY": 2.5777426133318086e-05,
+          "QgyrZ": 0.001140495653039933,
+          "Rpos": 0.13227576581671902,
+          "beta_acc": -2.2428197481861575e-06,
+          "beta_gyr": -0.5834296100547054,
+          "P_pos_std": 29.260120891257433,
+          "P_vel_std": 0.20873322490468052,
+          "P_orient_std": 0.036845255832527,
+          "P_acc_std": 0.0016410655678894418,
+          "P_gyr_std": 0.00036293049718465117
+        },
+        "cost": 5.710030151476567,
+        "metadata": {
+          "optimiser": "ins_genetic_fast",
+          "maxiter": 10,
+          "popsize": 8,
+          "timestamp": "20260324_150752",
+          "outage": {
+            "start": 60.0,
+            "duration": 60.0
+          },
+          "held_out_seq": "06",
+          "training_seqs": [
+            "2011_10_03_drive_0042_extract",
+            "2011_09_30_drive_0016_extract",
             "2011_09_30_drive_0027_extract",
             "2011_09_30_drive_0028_extract",
             "2011_09_30_drive_0033_extract",
