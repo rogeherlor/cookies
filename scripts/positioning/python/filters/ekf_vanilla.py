@@ -7,9 +7,6 @@ Reference:
     Groves, P.D., "Principles of GNSS, Inertial, and Multisensor Integrated
     Navigation Systems", 2nd ed., Artech House, 2013. Ch. 14.
 
-    Titterton, D.H. & Weston, J.L., "Strapdown Inertial Navigation Technology",
-    2nd ed., IET, 2004.
-
 State vector (15 elements — error state):
     dx[0:3]   — position error  δp  in ENU  [m]
     dx[3:6]   — velocity error  δv  in ENU  [m/s]
@@ -87,6 +84,7 @@ def _euler_to_Rbn(rpy):
 def _euler_rate_matrix(rpy):
     """
     Euler-rate matrix T such that ṙpy = T @ ω_body.
+    Gyro measures at the same time, but euler angles are applied sequentially (ZYX).
     ZYX convention: [roll_dot, pitch_dot, yaw_dot] = T @ [ω_x, ω_y, ω_z].
     """
     roll, pitch, _ = rpy
@@ -216,16 +214,26 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         pIMU   = pIMU + Ts * vIMU + 0.5 * Ts**2 * (accENU + g)
         vIMU   = vIMU + Ts * (accENU + g)
 
-        # 3. Error-state transition matrix F (Groves Ch. 14, nav-frame attitude error)
-        #    δφ̇ = −Rbn @ δb_g  (ignoring Earth rate and transport rate)
-        #    δv̇ = −skew(f^n) @ δφ − Rbn @ δb_a
+        # 3. Error-state transition matrix F  (15-state, flat-Earth ENU — "Groves/ENU" formulation)
+        #
+        #    This is the φ-angle (nav-frame) error model from Groves (2013) Ch. 12,
+        #    simplified for short-range navigation: Earth-rate, transport-rate and
+        #    gravity-gradient terms are dropped, and position error is kept in
+        #    Cartesian ENU metres instead of geodetic (lat/lon/h).
+        #    Sensor biases follow a Gauss-Markov model (Groves eq. 3.3).
+        #
+        #    δṗ = δv                          position error integrates velocity error
+        #    δv̇ = −[f^n ×] δφ + Rbn @ b_a   velocity error from attitude tilt and accel bias
+        #    δφ̇ = −Rbn @ b_g                 attitude error from gyro bias
+        #    ḃ_a = −β_acc · b_a              accel bias decays with time constant 1/β_acc
+        #    ḃ_g = −β_gyr · b_g              gyro  bias decays with time constant 1/β_gyr
         F = np.zeros((15, 15))
-        F[0:3,   3:6]   = np.eye(3)
-        F[3:6,   6:9]   = -_skew(accENU)          # velocity ← nav-frame attitude error
-        F[3:6,   9:12]  = Rbn                      # velocity ← accel bias
-        F[6:9,   12:15] = -Rbn                     # attitude ← gyro bias
-        F[9:12,  9:12]  = beta_acc * np.eye(3)
-        F[12:15, 12:15] = beta_gyr * np.eye(3)
+        F[0:3,   3:6]   = np.eye(3)               # position  ← velocity error
+        F[3:6,   6:9]   = -_skew(accENU)          # velocity  ← attitude error (via skew of nav-frame specific force)
+        F[3:6,   9:12]  = Rbn                      # velocity  ← accel bias (body→nav)
+        F[6:9,   12:15] = -Rbn                     # attitude  ← gyro bias (body→nav)
+        F[9:12,  9:12]  = -beta_acc * np.eye(3)   # accel bias Gauss-Markov decay
+        F[12:15, 12:15] = -beta_gyr * np.eye(3)   # gyro  bias Gauss-Markov decay
 
         Fd = np.eye(15) + F * Ts
 
