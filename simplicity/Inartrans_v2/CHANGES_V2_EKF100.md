@@ -109,10 +109,10 @@ Replaced with the `Inartrans_v2_imu` versions.
 
 **`reportHandler()`** is simplified to:
 - Advance GNSS mode selector counter
-- Compute EKF output (`ENU_to_LLA`, velocity magnitude)
-- Build `tiempo_out` from `gps_ms_ref + elapsed RTC`
-- Assemble 75-byte packet from cached state
-- Transmit via `manda_datos()`
+- Compute EKF output (`ENU_to_LLA`, velocity magnitude) — **unconditionally** (see below)
+- Build `tiempo_out` from `gps_ms_ref + elapsed RTC` — **unconditionally**
+- Assemble 75-byte packet from cached state — only when connected
+- Transmit via `manda_datos()` — only when connected
 
 #### New module-scope variables added
 
@@ -137,6 +137,43 @@ static float   latitud_s       = 0.0f;
 static float   longitud_s      = 0.0f;
 static float   altitud_s       = 0.0f;
 ```
+
+#### Serial log format
+
+All serial prints use integer-scaled values since `emberAfCorePrint` does not support `%f`.
+
+| Print prefix | Source | Condition | Fields and scaling |
+|---|---|---|---|
+| `IMU t=...; A=...; G=...` | `emberAfMainTickCallback` | Every 5 ms (200 Hz) | `t` = ms since UTC midnight (GPS-synced or raw RTC); `A` = accel × 1000 (g); `G` = gyro × 100 (deg/s, 2 dp) |
+| `GP V=A; Mod=...; T=...; D=...; lat=...; lon=...; alt=...; vel=...; COG=...; PDOP=...` or same with `GN` | `emberAfMainTickCallback` | Every GNSS epoch (~1 Hz), valid fix | `Mod` = active `GNSS_mode` (1–7); `T` = ms since UTC midnight; `D` = date as DDMMYY integer; `lat`/`lon` × 10000 (NMEA DDMM.MMMM × 10000); `alt` × 100 (cm); `vel` = cm/s; `COG` × 100 (rad × 100); `PDOP` × 100 |
+| `EKF lat=...; lon=...; alt=...; vel=...` | `reportHandler` | Every 250 ms, once EKF initialised | `lat`/`lon` × 10000 (decimal degrees × 10000); `alt` × 100 (cm); `vel` × 100 (cm/s) |
+
+**GNSS talker detection:** On each epoch, `mi_buffer` is scanned for evidence of
+multi-constellation operation. `gnss_talker` is set to `"GN"` if **any** of the following
+are found in the buffer:
+
+- `$GNRMC` or `$GNGGA` — navigation sentences with the GN talker
+- `$GLGSA` or `$GLGSV` — GLONASS DOP / satellite-in-view sentences
+- `$GAGSA` or `$GAGSV` — Galileo equivalents
+
+If none are found, `gnss_talker` is set to `"GP"` (GPS-only module or single-constellation mode).
+
+The result locks after 3 consecutive agreeing epochs and re-detects automatically whenever
+`GNSS_mode` changes.
+
+**Why not rely solely on the GGA/RMC talker prefix:** Some L86 firmware versions output
+`$GPGGA` / `$GPRMC` (GP-prefixed) even in multi-constellation mode. Scanning those sentences
+alone would always yield `GP` on such firmware. The presence of `$GLGSA`/`$GAGSA`/`$GLGSV`/
+`$GAGSV` is unambiguous — these sentences only appear when GLONASS or Galileo satellites are
+being tracked.
+
+Combined with `Mod=`, the print allows hardware module identification at a glance:
+
+| Print prefix | `Mod` value | Interpretation |
+|---|---|---|
+| `GP` | any | Quectel **L80** (GPS-only hardware) — always `GP` regardless of mode commands |
+| `GP` | 1, 2, 3, 4 | Quectel **L86** in a single-constellation mode — GPS-only sentences expected |
+| `GN` | 5, 6, 7 | Quectel **L86** in multi-constellation mode — confirmed GNSS reception |
 
 #### Variables removed from module scope
 
@@ -185,6 +222,23 @@ invocations. This provided only ~4 prediction steps per second, severely limitin
 dead-reckoning accuracy during GNSS outages.
 
 ---
+
+## EKF output and timestamp are independent of network connection
+
+In `reportHandler()`, the EKF output computation (`ENU_to_LLA`, velocity magnitude) and the
+`tiempo_out` / `fecha_out` timestamp build run **unconditionally for `NODO_QUE_ENVIA = 1`**,
+regardless of whether the node has a parent or is connected to the network.
+
+Only the **packet assembly and `manda_datos()` call** remain gated by
+`mi_panID != 0xFFFF && mi_rango < 0xFFFF`.
+
+This means:
+- The `EKF lat=...` serial print appears as soon as the EKF initialises, even before a parent
+  node is found.
+- `tiempo_out` is kept up to date continuously, so when the node does connect, the first
+  transmitted packet already carries an accurate UTC timestamp.
+- `NODO_QUE_ENVIA = 0` (coordinator): `reportHandler` returns immediately at entry — none of
+  this runs.
 
 ---
 
@@ -304,7 +358,7 @@ Total: 75 bytes
 1. Build in Simplicity Studio — zero new errors/warnings.
 2. Flash sensor node, open serial terminal:
    - `IMU t=...` lines should appear at ~200 Hz (one every ~5 ms).
-   - `GP V=A; ...` lines should appear once per GNSS epoch (~1 Hz when fix active).
+   - `GP V=A; Mod=...; T=...; D=...; lat=...; lon=...; alt=...; vel=...; COG=...; PDOP=...` lines should appear once per GNSS epoch (~1 Hz when fix active). Prefix is `GN` when using L86 in multi-constellation mode (5–7).
 3. With GPS fix held for ≥10 consecutive valid epochs: confirm `ekf_initialized = true`
    (EKF Init print appears once).
 4. On radio receiver: confirm packets arrive at 250 ms intervals, packet size = 90 bytes,

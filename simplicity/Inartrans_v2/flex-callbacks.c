@@ -189,7 +189,7 @@ void reportHandler(void)
 				mode_selector_GNSS = 0;
 				set_GNSS_mode(best_mode_selector_GNSS);
 				GNSS_mode = best_mode_selector_GNSS;
-				emberAfCorePrint("\nBest Mode %u, Best PDOP %u\n", best_mode_selector_GNSS, PDOP_best);
+				emberAfCorePrint("Best Mode %u, Best PDOP %u\n", best_mode_selector_GNSS, PDOP_best);
 				best_mode_selector_GNSS = 7;
 				PDOP_best = 65535;
 			}
@@ -198,31 +198,31 @@ void reportHandler(void)
 
 	emberEventControlSetDelayMS(reportControl, sensorReportPeriodMs);
 
+	// Compute EKF output and timestamp always (independent of network connection)
+	float latitud_k = 0.0f, longitud_k = 0.0f, altitud_k = 0.0f, vel_k = 0.0f;
+	if (ekf_initialized) {
+		float lla_out[3];
+		ENU_to_LLA(myEKF.pos_enu, myEKF.lla0[0], myEKF.lla0[1], myEKF.lla0[2], lla_out);
+		latitud_k  = lla_out[0];
+		longitud_k = lla_out[1];
+		altitud_k  = lla_out[2];
+		vel_k = sqrtf(myEKF.vel_enu[0]*myEKF.vel_enu[0] + myEKF.vel_enu[1]*myEKF.vel_enu[1] + myEKF.vel_enu[2]*myEKF.vel_enu[2]);
+		emberAfCorePrint("EKF lat=%ld; lon=%ld; alt=%ld; vel=%ld\n", (int32_t)(latitud_k * 10000), (int32_t)(longitud_k * 10000), (int32_t)(altitud_k * 100), (int32_t)(vel_k * 100));
+	}
+
+	// Build tiempo_out ("HHMMSS.mmm") from GPS-synced timestamp always
+	if (gps_time_valid) {
+		uint32_t ts = gps_ms_ref + (RTCDRV_GetWallClockTicks32() - rtc_at_gps_fix) / 4;
+		uint32_t h = ts / 3600000UL; ts %= 3600000UL;
+		uint32_t m = ts / 60000UL;   ts %= 60000UL;
+		uint32_t s = ts / 1000UL;    ts %= 1000UL;
+		sprintf((char*)tiempo_out, "%02lu%02lu%02lu.%03lu", h, m, s, ts);
+		// fecha_out is updated in emberAfMainTickCallback when GNSS epoch is parsed
+	}
+
 	if (mi_panID != 0xFFFF && (mi_rango < 0xFFFF)) {
 		int32_t tempData = 0;
 		uint32_t rhData = 0;
-		float latitud_k = 0.0f, longitud_k = 0.0f, altitud_k = 0.0f, vel_k = 0.0f;
-
-		// Compute EKF output from latest filter state
-		if (ekf_initialized) {
-			float lla_out[3];
-			ENU_to_LLA(myEKF.pos_enu, myEKF.lla0[0], myEKF.lla0[1], myEKF.lla0[2], lla_out);
-			latitud_k  = lla_out[0];
-			longitud_k = lla_out[1];
-			altitud_k  = lla_out[2];
-			vel_k = sqrtf(myEKF.vel_enu[0]*myEKF.vel_enu[0] + myEKF.vel_enu[1]*myEKF.vel_enu[1] + myEKF.vel_enu[2]*myEKF.vel_enu[2]);
-			emberAfCorePrint("\nlat_k: %ld; lon_k: %ld; alt_k: %ld;  vel_k: %ld", (int32_t)latitud_k, (int32_t)longitud_k, (int32_t)altitud_k, (int32_t)vel_k);
-		}
-
-		// Build tiempo_out ("HHMMSS.mmm") from GPS-synced timestamp
-		if (gps_time_valid) {
-			uint32_t ts = gps_ms_ref + (RTCDRV_GetWallClockTicks32() - rtc_at_gps_fix) / 4;
-			uint32_t h = ts / 3600000UL; ts %= 3600000UL;
-			uint32_t m = ts / 60000UL;   ts %= 60000UL;
-			uint32_t s = ts / 1000UL;    ts %= 1000UL;
-			sprintf((char*)tiempo_out, "%02lu%02lu%02lu.%03lu", h, m, s, ts);
-			// fecha_out is updated in emberAfMainTickCallback when GNSS epoch is parsed
-		}
 
 		// Assemble fixed 75-byte packet (byte offsets are frozen)
 		memcpy(paquete,    &rhData,               sizeof(uint32_t));
@@ -308,7 +308,7 @@ void reportHandler(void)
 		emberAfCorePrintln("State reset, disconnection count = %lu / %lu", cuentaDC, LIMITE_DC);
 	#if NODO_QUE_ENVIA
 		if (cuentaDC >= LIMITE_DC) {
-			emberAfCorePrint("\n Deleting parent node, reconnecting to network\n");
+			emberAfCorePrint("Deleting parent node, reconnecting to network\n");
 			borrar_padre();
 			manda_request();
 			manda_repair_global();
@@ -888,7 +888,7 @@ uint8_t recepcion[90];	//Feb23 15+75
 				if(message->macFrame.srcAddress.addr.shortAddress == nodo_padre.shortAddress){		//asegurarse cuando solo quiero recibir del padre
 					nodo_padre.rssi = message->rssi;//Actualizar al recibir un mensaje
 					memcpy(&sensorReportPeriodMs, &recepcion[16], sizeof(sensorReportPeriodMs));
-					emberAfCorePrint("Sensor report period ms: %u", sensorReportPeriodMs);
+					emberAfCorePrint("Sensor report period ms: %u\n", sensorReportPeriodMs);
 					flagConfig = 1;
 					manda_config(mi_nodeID, 0xFFFF);
 					flagConfig = 0;		//asegurar
@@ -919,7 +919,7 @@ uint8_t recepcion[90];	//Feb23 15+75
 					memcpy(&conf_rang, &recepcion[18], sizeof(conf_rang));
 					memcpy(&conf_padre, &recepcion[20], sizeof(conf_padre));
 					memcpy(&conf_rssi, &recepcion[22], sizeof(conf_rssi));
-					emberAfCorePrint("\nAuto-pos: Origen = %2x;", conf_orig);
+					emberAfCorePrint("Auto-pos: Origen = %2x;", conf_orig);
 					emberAfCorePrint(" Rango = %lu;", conf_rang);
 					emberAfCorePrint(" Padre = %2x;", conf_padre);
 					emberAfCorePrint(" RSSI = %d;\n", conf_rssi);
@@ -930,7 +930,7 @@ uint8_t recepcion[90];	//Feb23 15+75
 			if (NODO_QUE_ENVIA==1){																	//Asegurar. El coordinador no debe procesarlo
 				if(message->macFrame.srcAddress.addr.shortAddress == nodo_padre.shortAddress){		//asegurarse cuando solo quiero recibir del padre
 					memcpy(&flagStandby, &recepcion[16], sizeof(flagStandby));
-					emberAfCorePrint("Standby set to: %u", flagStandby);
+					emberAfCorePrint("Standby set to: %u\n", flagStandby);
 					flagConfig = 4;
 					manda_config(mi_nodeID, 0xFFFF);
 					flagConfig = 0;	//asegurar
@@ -1000,7 +1000,7 @@ void emberAfMacMessageSentCallback(EmberStatus status,
 #endif
 #if NODO_QUE_ENVIA
       if(cuentaDC >= LIMITE_DC){		// PROBANDO
-    	  emberAfCorePrint("\n Deleting parent node, reconnecting to network\n");
+    	  emberAfCorePrint("Deleting parent node, reconnecting to network\n");
     	  //arrancar_red();
     	  borrar_padre();
     	  manda_request();
@@ -1055,7 +1055,7 @@ void emberAfMainTickCallback(void)
     uint32_t ts_ms = gps_time_valid
                      ? (gps_ms_ref + (rtc_now - rtc_at_gps_fix) / 4)
                      : (rtc_now / 4);
-    emberAfCorePrint("\nIMU t=%lu; A=%ld,%ld,%ld; G=%ld,%ld,%ld",
+    emberAfCorePrint("IMU t=%lu; A=%ld,%ld,%ld; G=%ld,%ld,%ld\n",
         ts_ms,
         last_acelint[0], last_acelint[1], last_acelint[2],
         last_gyroint[0], last_gyroint[1], last_gyroint[2]);
@@ -1098,6 +1098,40 @@ void emberAfMainTickCallback(void)
   if (gnss_lines_received >= GNSS_LINES_PER_EPOCH) {
     gnss_lines_received = 0;
 
+    // Detect talker ID: 'GP' = GPS-only, 'GN' = multi-constellation.
+    // Scans buffer for first '$G?' sentence. Locks after 3 consecutive
+    // agreeing epochs; re-detects automatically when GNSS_mode changes.
+    static char    gnss_talker[3]   = "GN";
+    static uint8_t talker_confirm   = 0;
+    static uint8_t talker_last_mode = 0xFF;
+    #define TALKER_LOCK_COUNT 3
+    if (talker_confirm < TALKER_LOCK_COUNT || GNSS_mode != talker_last_mode) {
+      if (GNSS_mode != talker_last_mode) { talker_confirm = 0; talker_last_mode = GNSS_mode; }
+      // Detect multi-constellation by scanning for GL/GA sentences ($GLGSA, $GAGSA, $GLGSV,
+      // $GAGSV) or a GN navigation sentence ($GNRMC, $GNGGA). These are present ONLY when
+      // non-GPS constellations are active. Some L86 firmware versions output $GPGGA/$GPRMC
+      // (GP-prefix) even in multi-constellation mode, making the talker on navigation sentences
+      // alone unreliable. Presence of GL/GA sentences is unambiguous.
+      bool multi_const = false;
+      for (uint32_t k = 0; k + 5 < indice; k++) {
+        if (mi_buffer[k] == '$' && mi_buffer[k + 1] == 'G') {
+          char t  = mi_buffer[k + 2]; // 'L'=GLONASS 'A'=Galileo 'N'=multi 'P'=GPS-only
+          char s0 = mi_buffer[k + 3], s1 = mi_buffer[k + 4], s2 = mi_buffer[k + 5];
+          // $GNRMC or $GNGGA — navigation sentence with GN talker
+          if (t == 'N' && ((s0=='R' && s1=='M' && s2=='C') || (s0=='G' && s1=='G' && s2=='A'))) {
+            multi_const = true; break;
+          }
+          // $GLGSA, $GAGSA, $GLGSV, $GAGSV — constellation-specific sentences
+          if ((t == 'L' || t == 'A') &&
+              ((s0=='G' && s1=='S' && s2=='A') || (s0=='G' && s1=='S' && s2=='V'))) {
+            multi_const = true; break;
+          }
+        }
+      }
+      gnss_talker[1] = multi_const ? 'N' : 'P';
+      talker_confirm++;
+    }
+
     if (parse_nmea_epoch()) {
       // Anchor GPS-synced timestamp
       uint32_t gps_h   = (tiempo[0]-'0')*10 + (tiempo[1]-'0');
@@ -1107,6 +1141,12 @@ void emberAfMainTickCallback(void)
       gps_ms_ref     = gps_h*3600000UL + gps_min*60000UL + gps_s*1000UL + gps_ms;
       rtc_at_gps_fix = RTCDRV_GetWallClockTicks32();
       gps_time_valid = true;
+
+      // Compact date integer DDMMYY (e.g. 260326 for 26 March 2026), for serial log
+      uint32_t gps_date = (uint32_t)(
+          ((fecha[0]-'0')*10 + (fecha[1]-'0')) * 10000UL +
+          ((fecha[2]-'0')*10 + (fecha[3]-'0')) * 100UL +
+          ((fecha[4]-'0')*10 + (fecha[5]-'0')));
 
       // fecha[] from NMEA is DDMMYY; fecha_out in packet is YYMMDD
       fecha_out[0] = fecha[4]; fecha_out[1] = fecha[5];  // YY
@@ -1134,6 +1174,12 @@ void emberAfMainTickCallback(void)
           }
         }
 
+        emberAfCorePrint("%s V=A; Mod=%u; T=%lu; D=%lu; lat=%ld; lon=%ld; alt=%ld; vel=%u; COG=%ld; PDOP=%u\n",
+            gnss_talker, GNSS_mode, gps_ms_ref, gps_date,
+            (int32_t)(latitud_s * 10000), (int32_t)(longitud_s * 10000),
+            (int32_t)(altitud_s * 100), vel_GNSS_u,
+            (int32_t)(atof((char*)cog_GNSS) * 100.0f), PDOP_u);
+
         if (latitud_s != 0.0f && longitud_s != 0.0f) {
           cont_invalid_gps = 0;
           if (cont_valid_gps < 10) cont_valid_gps++;
@@ -1144,9 +1190,6 @@ void emberAfMainTickCallback(void)
           }
           if (ekf_initialized) {
             EKF_Update(&myEKF, latitud_s / 100.0f, longitud_s / 100.0f, altitud_s);
-            emberAfCorePrint("\nGP V=A; lat=%ld; lon=%ld; alt=%ld; vel=%u; PDOP=%u",
-                (int32_t)(latitud_s * 100), (int32_t)(longitud_s * 100),
-                (int32_t)(altitud_s * 100), vel_GNSS_u, PDOP_u);
           }
         }
       } else {

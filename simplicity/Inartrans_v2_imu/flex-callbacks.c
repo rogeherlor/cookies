@@ -141,7 +141,7 @@ void reportHandler(void)
 				mode_selector_GNSS = 0;
 				set_GNSS_mode(best_mode_selector_GNSS);
 				GNSS_mode = best_mode_selector_GNSS;
-				emberAfCorePrint("\nBest Mode %u, Best PDOP %u\n", best_mode_selector_GNSS, PDOP_best);
+				emberAfCorePrint("Best Mode %u, Best PDOP %u\n", best_mode_selector_GNSS, PDOP_best);
 				best_mode_selector_GNSS = 7;
 				PDOP_best = 65535;
 			}
@@ -205,7 +205,7 @@ void emberAfMainTickCallback(void)
     uint32_t ts = gps_time_valid
                   ? (gps_ms_ref + (rtc_now - rtc_at_gps_fix) / 4)
                   : (rtc_now / 4);  // ms since midnight (GPS-synced) or since boot
-    emberAfCorePrint("\nIMU t=%lu; A=%ld,%ld,%ld; G=%ld,%ld,%ld",
+    emberAfCorePrint("IMU t=%lu; A=%ld,%ld,%ld; G=%ld,%ld,%ld\n",
         ts,
         (int32_t)(acelflo[0] * 1000), (int32_t)(acelflo[1] * 1000), (int32_t)(acelflo[2] * 1000),
         (int32_t)(gyroflo[0] * 100),  (int32_t)(gyroflo[1] * 100),  (int32_t)(gyroflo[2] * 100));
@@ -229,13 +229,29 @@ void emberAfMainTickCallback(void)
         talker_confirm   = 0;                     // mode changed — re-detect
         talker_last_mode = GNSS_mode;
       }
-      for (uint32_t k = 0; k + 2 < indice; k++) {
+      // Detect multi-constellation by scanning for GL/GA sentences ($GLGSA, $GAGSA, $GLGSV,
+      // $GAGSV) or a GN navigation sentence ($GNRMC, $GNGGA). These are present ONLY when
+      // non-GPS constellations are active. Some L86 firmware versions output $GPGGA/$GPRMC
+      // (GP-prefix) even in multi-constellation mode, making the talker on navigation sentences
+      // alone unreliable. Presence of GL/GA sentences is unambiguous.
+      bool multi_const = false;
+      for (uint32_t k = 0; k + 5 < indice; k++) {
         if (mi_buffer[k] == '$' && mi_buffer[k + 1] == 'G') {
-          gnss_talker[1] = mi_buffer[k + 2];      // 'P' or 'N'
-          talker_confirm++;
-          break;
+          char t  = mi_buffer[k + 2]; // 'L'=GLONASS 'A'=Galileo 'N'=multi 'P'=GPS-only
+          char s0 = mi_buffer[k + 3], s1 = mi_buffer[k + 4], s2 = mi_buffer[k + 5];
+          // $GNRMC or $GNGGA — navigation sentence with GN talker
+          if (t == 'N' && ((s0=='R' && s1=='M' && s2=='C') || (s0=='G' && s1=='G' && s2=='A'))) {
+            multi_const = true; break;
+          }
+          // $GLGSA, $GAGSA, $GLGSV, $GAGSV — constellation-specific sentences
+          if ((t == 'L' || t == 'A') &&
+              ((s0=='G' && s1=='S' && s2=='A') || (s0=='G' && s1=='S' && s2=='V'))) {
+            multi_const = true; break;
+          }
         }
       }
+      gnss_talker[1] = multi_const ? 'N' : 'P';
+      talker_confirm++;
     }
 
     if (parse_nmea_epoch()) {
@@ -260,8 +276,8 @@ void emberAfMainTickCallback(void)
       float vel  = atof((char *)vel_GNSS) / 1.94384f;  // knots → m/s
       float cog  = atof((char *)cog_GNSS);
       float pdop = atof((char *)PDOP);
-      emberAfCorePrint("\n%s V=%c; T=%lu; D=%lu; Lat=%ld; Lon=%ld; Alt=%ld; Vel=%ld; COG=%ld; PDOP=%ld",
-          gnss_talker, validez, gps_ms_ref, gps_date,
+      emberAfCorePrint("%s V=%c; Mod=%u; T=%lu; D=%lu; Lat=%ld; Lon=%ld; Alt=%ld; Vel=%ld; COG=%ld; PDOP=%ld\n",
+          gnss_talker, validez, GNSS_mode, gps_ms_ref, gps_date,
           (int32_t)(lat * 10000), (int32_t)(lon * 10000), (int32_t)(alt * 100),
           (int32_t)(vel * 100), (int32_t)(cog * 100), (int32_t)(pdop * 100));
 

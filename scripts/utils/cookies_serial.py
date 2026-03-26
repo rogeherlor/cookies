@@ -59,8 +59,9 @@ def log_usb(port):
                     data = ser.readline()
                     if data:
                         line = data.decode(errors="ignore").rstrip()
-                        ts = precise_timestamp()
-                        f.write(f"[{ts}] {line}\n")
+                        if line:
+                            ts = precise_timestamp()
+                            f.write(f"[{ts}] {line}\n")
 
         except Exception as e:
             print(f"[{port}] error: {e} — reconnecting")
