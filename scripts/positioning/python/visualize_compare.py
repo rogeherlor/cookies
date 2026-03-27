@@ -573,7 +573,7 @@ def _plot_metrics_table(filter_results, output_dir) -> str:
             mets.get('rte_1s',       {}).get('rmse',    float('nan')),
             mets.get('rte_5s',       {}).get('rmse',    float('nan')),
             mets.get('position_rmse',{}).get('2D',      float('nan')),
-            mets.get('outage_analysis', {}).get('max',  float('nan')),
+            (mets.get('outage_analysis') or {}).get('max',  float('nan')),
         ])
 
     data_arr = np.array(data, dtype=float)

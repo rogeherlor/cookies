@@ -91,27 +91,30 @@ def _weight_exists(filter_name, seq, mode='loo'):
 
 # ── Training command builders ─────────────────────────────────────────────────
 
-def _build_cmd_tlio(seq, epochs, mode='loo'):
+def _build_cmd_tlio(seq, epochs, mode='loo', dataset='kitti'):
     cmd = [sys.executable, str(_HERE / 'dl_filters/tlio/train_tlio.py'),
            '--mode', mode, '--epochs', str(epochs),
+           '--dataset', dataset,
            '--output', str(_ARTIFACTS / 'tlio')]
     if mode == 'loo':
         cmd += ['--val-seq', seq]
     return cmd
 
 
-def _build_cmd_deep_kf(seq, epochs, mode='loo'):
+def _build_cmd_deep_kf(seq, epochs, mode='loo', dataset='kitti'):
     cmd = [sys.executable, str(_HERE / 'dl_filters/deep_kf/train_deep_kf.py'),
            '--mode', mode, '--epochs', str(epochs),
+           '--dataset', dataset,
            '--output', str(_ARTIFACTS / 'deep_kf')]
     if mode == 'loo':
         cmd += ['--val-seq', seq]
     return cmd
 
 
-def _build_cmd_tartan(seq, epochs, mode='loo'):
+def _build_cmd_tartan(seq, epochs, mode='loo', dataset='kitti'):
     cmd = [sys.executable, str(_HERE / 'dl_filters/tartan_imu/train_tartan.py'),
            '--mode', mode, '--epochs', str(epochs),
+           '--dataset', dataset,
            '--output', str(_ARTIFACTS / 'tartan_imu')]
     if mode == 'loo':
         cmd += ['--val-seq', seq]
@@ -149,11 +152,15 @@ FILTER_LABELS = {
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Train all DL filter models across KITTI sequences (LOO).')
+        description='Train all DL filter models across KITTI/cookies sequences (LOO).')
     parser.add_argument('filters', nargs='*', default=None,
                         help=f'DL filters to train: {", ".join(ALL_FILTERS)} (default: all)')
-    parser.add_argument('--seqs', nargs='+', default=CLEAN_SEQS,
-                        help=f'LOO validation sequences (default: {" ".join(CLEAN_SEQS)})')
+    parser.add_argument('--dataset', choices=['kitti', 'cookies'], default='kitti',
+                        help='Dataset family (default: kitti). '
+                             'cookies: tlio/deep_kf/tartan_imu supported; ai_imu skipped.')
+    parser.add_argument('--seqs', nargs='+', default=None,
+                        help='LOO validation sequence IDs (default: all clean seqs for the dataset). '
+                             f'kitti default: {" ".join(CLEAN_SEQS)}. cookies default: c01..c06.')
     parser.add_argument('--epochs-tlio',    type=int, default=200)
     parser.add_argument('--epochs-deep-kf', type=int, default=150)
     parser.add_argument('--epochs-tartan',  type=int, default=50)
@@ -172,6 +179,15 @@ def main():
     for f in args.filters:
         if f not in ALL_FILTERS:
             parser.error(f"Unknown filter '{f}'. Choose from: {', '.join(ALL_FILTERS)}")
+
+    # Resolve default sequence list based on dataset
+    if args.seqs is None:
+        if args.dataset == 'cookies':
+            sys.path.insert(0, str(_HERE))
+            from data_loader import COOKIES_CLEAN_SEQS
+            args.seqs = list(COOKIES_CLEAN_SEQS.keys())
+        else:
+            args.seqs = list(CLEAN_SEQS)
 
     epoch_map = {
         'tlio':       args.epochs_tlio,
@@ -219,7 +235,7 @@ def main():
 
     # LOO folds
     for seq in args.seqs:
-        if seq not in KITTI_SEQ_TO_DRIVE:
+        if args.dataset == 'kitti' and seq not in KITTI_SEQ_TO_DRIVE:
             logger.warning(f"Sequence '{seq}' not in KITTI_SEQ_TO_DRIVE, skipping.")
             continue
         for filt in args.filters:
@@ -247,6 +263,12 @@ def main():
         else:
             label = f"{FILTER_LABELS[filt]}  mode=all"
 
+        # Skip AI-IMU for cookies (no CookiesDataset adapter yet)
+        if filt == 'ai_imu' and args.dataset == 'cookies':
+            logger.info(f"[{i}/{n_total}] SKIP (ai_imu cookies not supported) {label}")
+            n_skipped += 1
+            continue
+
         # Skip if weights exist
         if args.skip_existing and seq is not None and _weight_exists(filt, seq, mode):
             logger.info(f"[{i}/{n_total}] SKIP (exists) {label}")
@@ -268,7 +290,7 @@ def main():
         if filt == 'ai_imu':
             cmd = builder(seq, epochs, args.kitti_raw_dir, mode)
         else:
-            cmd = builder(seq, epochs, mode)
+            cmd = builder(seq, epochs, mode, args.dataset)
 
         cmd_str = ' '.join(cmd)
 

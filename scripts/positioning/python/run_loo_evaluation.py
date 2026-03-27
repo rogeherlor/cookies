@@ -179,27 +179,31 @@ def _print_table(fold_results, mode_label):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LOO evaluation: genetic CV + CNN training + comparison for all 7 folds')
-    parser.add_argument('--seqs', nargs='+', default=list(KITTI_CLEAN_SEQS.keys()),
-                        metavar='SEQ', help='KITTI seq IDs to evaluate (default: all 7 clean)')
+        description='LOO evaluation: genetic CV + CNN training + comparison for all LOO folds')
+    parser.add_argument('--dataset', choices=['kitti', 'cookies'], default='kitti',
+                        help='Dataset family to evaluate (default: kitti). '
+                             'kitti and cookies results are never mixed.')
+    parser.add_argument('--seqs', nargs='+', default=None,
+                        metavar='SEQ', help='Seq IDs to evaluate (default: all clean seqs for the dataset). '
+                                            'For kitti: "01".."10". For cookies: "c01".."c06".')
     parser.add_argument('--skip-genetic', action='store_true',
-                        help='Skip genetic CV (use existing filter_params.json)')
+                        help='Skip genetic tuning (use existing filter_params.json)')
     parser.add_argument('--skip-train', action='store_true',
-                        help='Skip CNN training (use existing iekfnets_held_*.p)')
+                        help='Skip CNN training — cookies: always skipped (not yet supported)')
     parser.add_argument('--skip-compare', action='store_true',
                         help='Skip ins_compare; only collect existing JSON results')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print commands without executing them')
 
-    # Genetic CV forwarding
+    # Genetic CV forwarding (kitti only)
     parser.add_argument('--genetic-epochs', type=int, default=None,
                         help='Generations for genetic CV (forwarded to ins_genetic_cv.py --generations)')
     parser.add_argument('--genetic-pop', type=int, default=None,
                         help='Population size for genetic CV (forwarded)')
     parser.add_argument('--genetic-filter', type=str, default=None,
-                        help='Run genetic CV only for this filter key (forwarded)')
+                        help='Run genetic tuning only for this filter key (forwarded)')
 
-    # CNN training forwarding
+    # CNN training forwarding (kitti only)
     parser.add_argument('--train-epochs', type=int, default=400,
                         help='Epochs for CNN training (default: 400, matches paper)')
     parser.add_argument('--kitti-raw-dir', type=str, default=None,
@@ -207,74 +211,106 @@ def main():
 
     args = parser.parse_args()
 
-    seqs = args.seqs
+    # ── Resolve sequence list based on dataset ─────────────────────────────────
+    sys.path.insert(0, str(_HERE))
+    import ins_config
+    from data_loader import COOKIES_CLEAN_SEQS
+
+    if args.dataset == 'cookies':
+        valid_seqs = list(COOKIES_CLEAN_SEQS.keys())
+    else:
+        valid_seqs = list(KITTI_CLEAN_SEQS.keys())
+
+    seqs = args.seqs if args.seqs is not None else valid_seqs
     for s in seqs:
-        if s not in KITTI_CLEAN_SEQS:
-            parser.error(f"Unknown sequence '{s}'. Valid: {list(KITTI_CLEAN_SEQS)}")
+        if s not in valid_seqs:
+            parser.error(f"Unknown sequence '{s}' for dataset '{args.dataset}'. Valid: {valid_seqs}")
+
+    outage_start = ins_config.OUTAGE_START
+    outage_dur   = ins_config.OUTAGE_DURATION
 
     print(f"\n{'='*65}")
-    print(f"LOO EVALUATION — {len(seqs)} folds")
+    print(f"LOO EVALUATION — {len(seqs)} folds  [dataset={args.dataset}]")
     print(f"Sequences : {seqs}")
-    print(f"Skip genetic CV : {args.skip_genetic}")
+    print(f"Skip genetic    : {args.skip_genetic}")
     print(f"Skip CNN train  : {args.skip_train}")
     print(f"Skip compare    : {args.skip_compare}")
     print(f"Dry run         : {args.dry_run}")
     print(f"{'='*65}\n")
 
-    # Load outage config at runtime
-    sys.path.insert(0, str(_HERE))
-    import ins_config
-    outage_start = ins_config.OUTAGE_START
-    outage_dur   = ins_config.OUTAGE_DURATION
-
-    genetic_script = _HERE / 'ins_genetic_cv.py'
-    train_script   = _HERE / 'dl_filters/deep_iekf/train_ai_imu.py'
-    compare_script = _HERE / 'ins_compare.py'
+    genetic_fast_script = _HERE / 'ins_genetic_fast.py'
+    genetic_cv_script   = _HERE / 'ins_genetic_cv.py'
+    train_script        = _HERE / 'dl_filters/deep_iekf/train_ai_imu.py'
+    compare_script      = _HERE / 'ins_compare.py'
 
     gps_fold_results = []   # list of per-fold dicts (GPS-aided mode)
     dr_fold_results  = []   # list of per-fold dicts (DR mode)
 
     for seq_id in seqs:
-        drive = KITTI_CLEAN_SEQS[seq_id]
         print(f"\n{'#'*65}")
-        print(f"# FOLD: held-out = {seq_id}  ({drive})")
+        if args.dataset == 'cookies':
+            print(f"# FOLD [cookies]: held-out = {seq_id}")
+        else:
+            drive = KITTI_CLEAN_SEQS[seq_id]
+            print(f"# FOLD [kitti]: held-out = {seq_id}  ({drive})")
         print(f"{'#'*65}")
 
-        # ── 1. Genetic CV ─────────────────────────────────────────────────────
+        # ── 1. Genetic tuning ──────────────────────────────────────────────────
         if not args.skip_genetic:
-            filters_to_tune = [args.genetic_filter] if args.genetic_filter else CLASSICAL_FILTERS
-            for filt in filters_to_tune:
-                cmd = [sys.executable, str(genetic_script),
-                       '--filter', filt,
-                       '--held-out', drive]
-                if args.genetic_epochs:
-                    cmd += ['--generations', str(args.genetic_epochs)]
-                if args.genetic_pop:
-                    cmd += ['--population', str(args.genetic_pop)]
-                _run(cmd, f"Genetic CV — {filt} (held-out: {seq_id})", args.dry_run)
-
-        # ── 2. CNN training ───────────────────────────────────────────────────
-        if not args.skip_train:
-            if args.kitti_raw_dir is None:
-                print(f"  WARNING: --kitti-raw-dir not provided. Skipping CNN training for fold {seq_id}.")
-                print(f"           Run manually: python {train_script} --mode kitti "
-                      f"--kitti-raw-dir <path> --held-out {drive} --epochs {args.train_epochs}")
+            if args.dataset == 'cookies':
+                # Use ins_genetic_fast.py for cookies LOO
+                filters_to_tune = ([args.genetic_filter] if args.genetic_filter
+                                   else CLASSICAL_FILTERS)
+                for filt in filters_to_tune:
+                    cmd = [sys.executable, str(genetic_fast_script),
+                           '--dataset', 'cookies', '--seq', seq_id, filt]
+                    if args.genetic_epochs:
+                        cmd += ['--maxiter', str(args.genetic_epochs)]
+                    if args.genetic_pop:
+                        cmd += ['--popsize', str(args.genetic_pop)]
+                    _run(cmd, f"Genetic fast — {filt} (held-out: {seq_id})", args.dry_run)
             else:
-                cmd = [sys.executable, str(train_script),
-                       '--mode', 'kitti',
-                       '--kitti-raw-dir', args.kitti_raw_dir,
-                       '--epochs', str(args.train_epochs),
-                       '--held-out', drive]
-                _run(cmd, f"CNN training (held-out: {seq_id})", args.dry_run)
+                # Use ins_genetic_cv.py for kitti LOO (original flow)
+                filters_to_tune = ([args.genetic_filter] if args.genetic_filter
+                                   else CLASSICAL_FILTERS)
+                for filt in filters_to_tune:
+                    cmd = [sys.executable, str(genetic_cv_script),
+                           '--filter', filt,
+                           '--held-out', KITTI_CLEAN_SEQS[seq_id]]
+                    if args.genetic_epochs:
+                        cmd += ['--generations', str(args.genetic_epochs)]
+                    if args.genetic_pop:
+                        cmd += ['--population', str(args.genetic_pop)]
+                    _run(cmd, f"Genetic CV — {filt} (held-out: {seq_id})", args.dry_run)
+
+        # ── 2. CNN training (kitti only) ───────────────────────────────────────
+        if not args.skip_train:
+            if args.dataset == 'cookies':
+                print(f"  INFO: CNN training not yet supported for cookies — skipping fold {seq_id}.")
+            else:
+                drive = KITTI_CLEAN_SEQS[seq_id]
+                if args.kitti_raw_dir is None:
+                    print(f"  WARNING: --kitti-raw-dir not provided. Skipping CNN training for fold {seq_id}.")
+                    print(f"           Run manually: python {train_script} --mode kitti "
+                          f"--kitti-raw-dir <path> --held-out {drive} --epochs {args.train_epochs}")
+                else:
+                    cmd = [sys.executable, str(train_script),
+                           '--mode', 'kitti',
+                           '--kitti-raw-dir', args.kitti_raw_dir,
+                           '--epochs', str(args.train_epochs),
+                           '--held-out', drive]
+                    _run(cmd, f"CNN training (held-out: {seq_id})", args.dry_run)
 
         # ── 3. ins_compare — GPS-aided mode ───────────────────────────────────
         if not args.skip_compare:
-            cmd = [sys.executable, str(compare_script), '--test-seq', seq_id]
+            cmd = [sys.executable, str(compare_script),
+                   '--dataset', args.dataset, '--test-seq', seq_id]
             _run(cmd, f"ins_compare GPS-aided (test seq: {seq_id})", args.dry_run)
 
         # ── 4. ins_compare — Dead-reckoning mode ──────────────────────────────
         if not args.skip_compare:
-            cmd = [sys.executable, str(compare_script), '--test-seq', seq_id, '--dr-mode']
+            cmd = [sys.executable, str(compare_script),
+                   '--dataset', args.dataset, '--test-seq', seq_id, '--dr-mode']
             _run(cmd, f"ins_compare DR mode (test seq: {seq_id})", args.dry_run)
 
         # ── Collect metrics for this fold ─────────────────────────────────────
@@ -298,6 +334,7 @@ def main():
         out_path = _REPO_ROOT / f'outputs/loo_summary_{timestamp}.json'
         out_path.parent.mkdir(parents=True, exist_ok=True)
         summary = {
+            'dataset':  args.dataset,
             'seqs':     seqs,
             'gps_mode': gps_fold_results,
             'dr_mode':  dr_fold_results,

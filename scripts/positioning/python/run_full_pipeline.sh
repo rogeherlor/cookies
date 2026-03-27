@@ -12,7 +12,8 @@
 #   - Evaluation: 1 baseline + 6 outage cells (start 40/60/80 × dur 30/60)
 #
 # Usage:
-#   ./run_full_pipeline.sh                                       # full pipeline
+#   ./run_full_pipeline.sh                                       # full kitti pipeline
+#   ./run_full_pipeline.sh --dataset cookies                     # full cookies pipeline
 #   ./run_full_pipeline.sh --skip-genetic                        # skip step 1
 #   ./run_full_pipeline.sh --skip-dl                             # skip step 2
 #   ./run_full_pipeline.sh --skip-genetic --skip-dl              # evaluation only
@@ -23,9 +24,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-CLEAN_SEQS=(01 04 06 07 08 09 10)
-
 # ── Defaults ──────────────────────────────────────────────────────────────────
+DATASET="kitti"
 SKIP_GENETIC=false
 SKIP_DL=false
 SKIP_EVAL=false
@@ -38,6 +38,7 @@ GENETIC_FILTERS_ARG=""
 # ── Parse arguments ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --dataset)         DATASET="$2"; shift 2 ;;
         --skip-genetic)    SKIP_GENETIC=true; shift ;;
         --skip-dl)         SKIP_DL=true; shift ;;
         --skip-eval)       SKIP_EVAL=true; shift ;;
@@ -50,9 +51,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── Sequence list (per dataset) ───────────────────────────────────────────────
+if [[ "$DATASET" == "cookies" ]]; then
+    CLEAN_SEQS=(c01 c02 c03 c04 c05 c06)
+elif [[ "$DATASET" == "kitti" ]]; then
+    CLEAN_SEQS=(01 04 06 07 08 09 10)
+else
+    echo "Unknown dataset: '$DATASET'. Use 'kitti' or 'cookies'."
+    exit 1
+fi
+
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║              FULL LOO PIPELINE FOR PAPER                   ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
+echo "║  Dataset       : ${DATASET}                                    ║"
 echo "║  Sequences     : ${CLEAN_SEQS[*]}                  ║"
 echo "║  Genetic outage: start=${OUTAGE_START}s, dur=${OUTAGE_DURATION}s                    ║"
 echo "║  DL training   : outage-free                               ║"
@@ -71,6 +83,7 @@ if ! $SKIP_GENETIC; then
     echo "║  STEP 1/3 — GENETIC LOO PARAMETER TUNING                  ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     "$SCRIPT_DIR/run_genetic_loo.sh" \
+        --dataset "$DATASET" \
         --outage-start "$OUTAGE_START" \
         --outage-duration "$OUTAGE_DURATION" \
         $GENETIC_FILTERS_ARG
@@ -84,7 +97,7 @@ if ! $SKIP_DL; then
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║  STEP 2/3 — DL LOO TRAINING (outage-free)                 ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
-    "$SCRIPT_DIR/run_dl_training.sh" $KITTI_RAW_ARG $DL_EXTRA_ARGS
+    "$SCRIPT_DIR/run_dl_training.sh" --dataset "$DATASET" $KITTI_RAW_ARG $DL_EXTRA_ARGS
 else
     echo "── Step 2 skipped (--skip-dl) ──"
 fi
@@ -105,7 +118,7 @@ if ! $SKIP_EVAL; then
         echo "════════════════════════════════════════════════════════════════"
         echo "  Evaluating seq ${seq} [$COUNT/$TOTAL]"
         echo "════════════════════════════════════════════════════════════════"
-        "$SCRIPT_DIR/run_evaluation_grid.sh" --test-seq "$seq"
+        "$SCRIPT_DIR/run_evaluation_grid.sh" --dataset "$DATASET" --test-seq "$seq"
     done
 else
     echo "── Step 3 skipped (--skip-eval) ──"

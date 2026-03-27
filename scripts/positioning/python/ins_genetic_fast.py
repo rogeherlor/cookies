@@ -43,7 +43,8 @@ sys.path.insert(0, str(_HERE))
 
 import ins_config
 import filter_params as fp
-from data_loader import get_kitti_dataset, KITTI_SEQ_TO_DRIVE
+from data_loader import (get_kitti_dataset, KITTI_SEQ_TO_DRIVE,
+                         get_cookies_dataset_by_id, COOKIES_CLEAN_SEQS)
 from filters import (
     ekf_vanilla, ekf_enhanced,
     eskf_vanilla, eskf_enhanced,
@@ -99,6 +100,15 @@ def _get_training_seqs(held_out_seq: str) -> list[str]:
     if held_out_seq in _KITTI_NOT_CLEAN_SEQS:
         return list(_KITTI_CLEAN_SEQS)
     return [s for s in _KITTI_CLEAN_SEQS if s != held_out_seq]
+
+
+# ── Cookies LOO protocol ──────────────────────────────────────────────────────
+_COOKIES_CLEAN_SEQ_IDS = list(COOKIES_CLEAN_SEQS.keys())  # ['c01'..'c06']
+
+
+def _get_cookies_training_seqs(held_out_seq: str) -> list[str]:
+    """LOO: train on all clean cookies sequences except held_out_seq."""
+    return [s for s in _COOKIES_CLEAN_SEQ_IDS if s != held_out_seq]
 
 
 # ── Parameter search bounds (log₁₀) ──────────────────────────────────────────
@@ -282,10 +292,14 @@ def main():
     parser.add_argument('filters', nargs='*',
                         help=f'Filters to run (default: all). '
                              f'Choices: {ALL_FILTERS}')
+    parser.add_argument('--dataset', choices=['kitti', 'cookies'], default='kitti',
+                        help='Dataset family to optimise on (default: kitti). '
+                             'kitti and cookies sequences are never mixed.')
     parser.add_argument('--seq', metavar='SEQ_ID', default=None,
-                        help='KITTI held-out sequence ID (e.g. "02"). '
-                             'Enables LOO training split: optimises on the '
-                             'appropriate training sequences and saves params '
+                        help='Held-out sequence ID. '
+                             'For kitti: "01".."10" (e.g. "02"). '
+                             'For cookies: "c01".."c06". '
+                             'Enables LOO training split and saves params '
                              'under the held-out sequence key. '
                              'If omitted, uses ins_config.NAV_DATA directly.')
     parser.add_argument('--3d',  dest='do_3d', action='store_true',  default=None)
@@ -324,16 +338,29 @@ def main():
     held_out_name = None   # dataset_name key under which to save results
 
     if held_out_seq is not None:
-        if held_out_seq not in KITTI_SEQ_TO_DRIVE:
-            print(f"Unknown sequence: '{held_out_seq}'. "
-                  f"Available: {sorted(KITTI_SEQ_TO_DRIVE.keys())}")
-            sys.exit(1)
-        training_seqs = _get_training_seqs(held_out_seq)
-        held_out_name = KITTI_SEQ_TO_DRIVE[held_out_seq]
-        print(f"LOO mode: held-out seq={held_out_seq}  "
-              f"training seqs={training_seqs}")
-        print("Loading training datasets …", flush=True)
-        nav_data_pool = [get_kitti_dataset(s) for s in training_seqs]
+        if args.dataset == 'cookies':
+            if held_out_seq not in COOKIES_CLEAN_SEQS:
+                print(f"Unknown cookies sequence: '{held_out_seq}'. "
+                      f"Available: {sorted(COOKIES_CLEAN_SEQS.keys())}")
+                sys.exit(1)
+            training_seqs = _get_cookies_training_seqs(held_out_seq)
+            # held_out_name = log file stem (e.g. 'ttyUSB0_2026-03-26_16-57-31')
+            held_out_name = COOKIES_CLEAN_SEQS[held_out_seq][1].split('.')[0]
+            print(f"LOO mode [cookies]: held-out seq={held_out_seq} ({held_out_name})  "
+                  f"training seqs={training_seqs}")
+            print("Loading training datasets …", flush=True)
+            nav_data_pool = [get_cookies_dataset_by_id(s) for s in training_seqs]
+        else:  # kitti
+            if held_out_seq not in KITTI_SEQ_TO_DRIVE:
+                print(f"Unknown kitti sequence: '{held_out_seq}'. "
+                      f"Available: {sorted(KITTI_SEQ_TO_DRIVE.keys())}")
+                sys.exit(1)
+            training_seqs = _get_training_seqs(held_out_seq)
+            held_out_name = KITTI_SEQ_TO_DRIVE[held_out_seq]
+            print(f"LOO mode [kitti]: held-out seq={held_out_seq}  "
+                  f"training seqs={training_seqs}")
+            print("Loading training datasets …", flush=True)
+            nav_data_pool = [get_kitti_dataset(s) for s in training_seqs]
     else:
         nav_data_pool = [ins_config.NAV_DATA]
         held_out_name = ins_config.NAV_DATA.dataset_name

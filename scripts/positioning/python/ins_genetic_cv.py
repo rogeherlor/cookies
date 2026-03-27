@@ -44,7 +44,8 @@ _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE))
 
 import filter_params as fp
-from data_loader import get_kitti_dataset, get_cookies_dataset, NavigationData
+from data_loader import (get_kitti_dataset, get_cookies_dataset,
+                         get_cookies_dataset_by_id, COOKIES_CLEAN_SEQS, NavigationData)
 from filters import (
     ekf_vanilla, ekf_enhanced,
     eskf_vanilla, eskf_enhanced,
@@ -173,7 +174,7 @@ def load_datasets(ids: list, dataset_type: str,
             if dataset_type == 'kitti':
                 nd = get_kitti_dataset(ds_id, sample_rate=sample_rate)
             else:
-                nd = get_cookies_dataset(ds_id, sample_rate=sample_rate)
+                nd = get_cookies_dataset_by_id(ds_id, sample_rate=sample_rate)
             loaded.append(nd)
         except Exception as e:
             print(f"[WARNING] Could not load dataset '{ds_id}': {e}")
@@ -487,9 +488,10 @@ def main():
     parser.add_argument('--workers', type=int, default=-1,
                         help='Parallel workers for DE (-1 = all CPUs, default: -1)')
     parser.add_argument('--held-out', dest='held_out', default=None,
-                        help='LOO: drive name to hold out as test set (e.g. '
-                             '2011_10_03_drive_0042_extract). Restricts training '
-                             'to KITTI_CLEAN_DRIVES minus this sequence.')
+                        help='LOO: sequence to hold out as test set. '
+                             'kitti: full drive name (e.g. 2011_10_03_drive_0042_extract). '
+                             'cookies: short ID (e.g. c01). '
+                             'Restricts training to the clean sequence list minus this entry.')
     args = parser.parse_args()
 
     MAXITER = args.maxiter
@@ -524,7 +526,10 @@ def main():
     if args.type == 'kitti':
         all_ids = list_kitti_datasets(held_out=args.held_out)
     else:
-        all_ids = list_cookies_datasets()
+        # Use the curated clean-sequence list; honour --held-out for cookies LOO
+        all_ids = list(COOKIES_CLEAN_SEQS.keys())   # ['c01'..'c06']
+        if args.held_out and args.held_out in all_ids:
+            all_ids = [s for s in all_ids if s != args.held_out]
 
     if len(all_ids) < 2:
         print(f"Need at least 2 {args.type} datasets for cross-validation. "

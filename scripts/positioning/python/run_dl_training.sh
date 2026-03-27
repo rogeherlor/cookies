@@ -8,7 +8,8 @@
 # (run_evaluation_grid.sh).
 #
 # Usage:
-#   ./run_dl_training.sh                                    # all DL filters, all folds
+#   ./run_dl_training.sh                                    # kitti, all DL filters, all folds
+#   ./run_dl_training.sh --dataset cookies                  # cookies (DL not yet supported — warns)
 #   ./run_dl_training.sh tlio deep_kf                       # specific filters
 #   ./run_dl_training.sh --kitti-raw-dir /path/to/kitti_raw # needed for ai_imu
 #   ./run_dl_training.sh --skip-existing                    # skip already trained folds
@@ -17,14 +18,31 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ── Parse --dataset (pass remaining args through to ins_train.py) ─────────────
+DATASET="kitti"
+PASSTHROUGH_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dataset) DATASET="$2"; shift 2 ;;
+        *)         PASSTHROUGH_ARGS+=("$1"); shift ;;
+    esac
+done
+
+if [[ "$DATASET" == "cookies" ]]; then
+    SEQS="c01 c02 c03 c04 c05 c06"
+else
+    SEQS="01 04 06 07 08 09 10"
+fi
+
 echo "════════════════════════════════════════════════════════════════"
 echo "  DL LOO TRAINING"
+echo "  Dataset: ${DATASET}"
 echo "  Training strategy: OUTAGE-FREE (clean sequences only)"
-echo "  Sequences: 01 04 06 07 08 09 10"
+echo "  Sequences: ${SEQS}"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
 
-python "$SCRIPT_DIR/ins_train.py" --seqs 01 04 06 07 08 09 10 "$@"
+python "$SCRIPT_DIR/ins_train.py" --dataset "$DATASET" --seqs $SEQS "${PASSTHROUGH_ARGS[@]}"
 
 echo ""
 echo "════════════════════════════════════════════════════════════════"

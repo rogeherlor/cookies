@@ -6,8 +6,9 @@
 #   - Table B: outage grid (start: 40s / 60s / 80s × duration: 30s / 60s)
 #
 # Usage:
-#   ./run_evaluation_grid.sh                     # default dataset (ins_config.py)
-#   ./run_evaluation_grid.sh --test-seq 08       # specific KITTI sequence
+#   ./run_evaluation_grid.sh                              # default dataset (ins_config.py)
+#   ./run_evaluation_grid.sh --test-seq 08               # specific KITTI sequence
+#   ./run_evaluation_grid.sh --dataset cookies --test-seq c03  # cookies sequence
 #   ./run_evaluation_grid.sh --test-seq 08 --no-baseline  # skip Table A
 #
 # Outputs land in outputs/comparison/<dataset>_<outage_tag>/
@@ -18,11 +19,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPARE="$SCRIPT_DIR/ins_compare.py"
 
 # ── Parse args ────────────────────────────────────────────────────────────────
+DATASET_ARG=""
 TEST_SEQ_ARG=""
 RUN_BASELINE=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --dataset)     DATASET_ARG="--dataset $2"; shift 2 ;;
         --test-seq)    TEST_SEQ_ARG="--test-seq $2"; shift 2 ;;
         --no-baseline) RUN_BASELINE=false; shift ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
@@ -46,7 +49,7 @@ run_case() {
 # ── Table A: No-outage baseline ───────────────────────────────────────────────
 if $RUN_BASELINE; then
     run_case "TABLE A — No outage (baseline)" \
-        $TEST_SEQ_ARG \
+        $DATASET_ARG $TEST_SEQ_ARG \
         --outage-start 0 --outage-duration 0
 fi
 
@@ -58,7 +61,7 @@ for start in "${STARTS[@]}"; do
     for dur in "${DURATIONS[@]}"; do
         COUNT=$(( COUNT + 1 ))
         run_case "TABLE B [$COUNT/$TOTAL] — Outage: start=${start}s, duration=${dur}s" \
-            $TEST_SEQ_ARG \
+            $DATASET_ARG $TEST_SEQ_ARG \
             --outage-start "$start" --outage-duration "$dur"
     done
 done

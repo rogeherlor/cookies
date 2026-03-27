@@ -53,10 +53,17 @@ OUTAGE_DURATION = 40   # [s] — duration of GPS blackout
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
-# Only KITTI is used.  Change the sequence ID as needed.
-NAV_DATA = data_loader.get_kitti_dataset('01')  # seq 00 = 2011_10_03_drive_0027
-# clean test sequences are 01, 04, 06, 07, 08, 09, 10. Sequences 00, 02, 05 have a ~2-second data gap (logging problem) and 03 has no raw data at all.
-# train on all except for the one being validated
+# Default dataset used when no --test-seq / --dataset is passed on the CLI.
+# Switch between KITTI and COOKIES by commenting/uncommenting one line below.
+# KITTI and COOKIES sequences are never mixed in training or evaluation.
+#
+# KITTI clean sequences: 01, 04, 06, 07, 08, 09, 10
+#   (00, 02, 05 have ~2s data gaps; 03 has no raw data)
+# Cookies clean sequences: c01–c06  (see data_loader.COOKIES_CLEAN_SEQS)
+#   (always loaded at 100 Hz, downsampled from ~200 Hz raw)
+
+NAV_DATA = data_loader.get_kitti_dataset('01')
+# NAV_DATA = data_loader.get_cookies_dataset_by_id('c01')
 
 # ── Dead-reckoning evaluation mode ────────────────────────────────────────────
 # True  → disable GPS for ALL filters; initialize from ground-truth state.

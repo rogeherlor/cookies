@@ -210,18 +210,30 @@ def train(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on device: {device}")
 
+    # Resolve the active sequence list based on dataset
+    if args.dataset == 'cookies':
+        from data_loader import COOKIES_CLEAN_SEQS
+        CLEAN_SEQS_ACTIVE = list(COOKIES_CLEAN_SEQS.keys())
+    else:
+        CLEAN_SEQS_ACTIVE = CLEAN_SEQS
+
     if args.mode == 'loo':
-        if args.val_seq not in CLEAN_SEQS:
-            raise ValueError(f"--val-seq must be one of {CLEAN_SEQS}")
-        train_seqs = [s for s in CLEAN_SEQS if s != args.val_seq]
+        if args.val_seq not in CLEAN_SEQS_ACTIVE:
+            raise ValueError(f"--val-seq must be one of {CLEAN_SEQS_ACTIVE}")
+        train_seqs = [s for s in CLEAN_SEQS_ACTIVE if s != args.val_seq]
         val_seq    = args.val_seq
         out_name   = f'lora_fold_{args.val_seq}.pt'
     else:
-        train_seqs = CLEAN_SEQS
+        train_seqs = CLEAN_SEQS_ACTIVE
         val_seq    = None
         out_name   = 'lora_adapters.pt'
 
-    print(f"Mode={args.mode}  train={train_seqs}  val={val_seq}")
+    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seq}")
+
+    def _load_seq(seq):
+        if args.dataset == 'cookies':
+            return dl.get_cookies_dataset_by_id(seq, sample_rate=100.0)
+        return dl.get_kitti_dataset(seq, sample_rate=100.0)
 
     # ── Load pretrained base model ─────────────────────────────────────────
     weights_path = _find_tartan_weights()
@@ -238,7 +250,7 @@ def train(args):
     for seq in train_seqs:
         print(f"  Loading seq {seq} ...", flush=True)
         try:
-            nav = dl.get_kitti_dataset(seq, sample_rate=100.0)
+            nav = _load_seq(seq)
             imu_t, v_t = build_tartan_dataset(nav)
             if imu_t is not None:
                 train_imu_list.append(imu_t)
@@ -256,7 +268,7 @@ def train(args):
     val_loader = None
     if val_seq is not None:
         try:
-            nav_val = dl.get_kitti_dataset(val_seq, sample_rate=100.0)
+            nav_val = _load_seq(val_seq)
             val_imu, val_v = build_tartan_dataset(nav_val)
             if val_imu is not None:
                 val_ds     = TensorDataset(val_imu, val_v)
@@ -339,9 +351,12 @@ def _save_lora(model, epoch, val_loss, path: Path):
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="Tartan IMU LoRA fine-tuning on KITTI (LOO protocol)")
+        description="Tartan IMU LoRA fine-tuning (LOO protocol)")
+    parser.add_argument('--dataset',    choices=['kitti', 'cookies'], default='kitti',
+                        help="Dataset family (default: kitti)")
     parser.add_argument('--mode',       choices=['loo','all'], default='loo')
-    parser.add_argument('--val-seq',    default='01')
+    parser.add_argument('--val-seq',    default='01',
+                        help="Validation sequence (kitti: '01', cookies: 'c01', …)")
     parser.add_argument('--epochs',     type=int,   default=50)
     parser.add_argument('--batch-size', type=int,   default=32)
     parser.add_argument('--lr',         type=float, default=1e-3)

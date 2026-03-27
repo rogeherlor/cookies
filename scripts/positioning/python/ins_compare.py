@@ -142,8 +142,11 @@ def main():
     # ── CLI arguments ──────────────────────────────────────────────────────────
     parser = argparse.ArgumentParser(
         description='Run all filter variants and generate comparison plots.')
+    parser.add_argument('--dataset', choices=['kitti', 'cookies'], default='kitti',
+                        help='Dataset family to evaluate (default: kitti). '
+                             'kitti and cookies results are never mixed.')
     parser.add_argument('--test-seq', type=str, default=None,
-                        help='Override dataset: KITTI seq ID ("01"–"10") or full drive name')
+                        help='Override dataset: KITTI seq ID ("01"–"10") or cookies ID ("c01"–"c06")')
     parser.add_argument('--dr-mode', action='store_true', default=False,
                         help='Dead-reckoning mode: disable GPS for all filters '
                              '(trel/rrel comparable to Brossard et al. 2020 Table I)')
@@ -158,7 +161,10 @@ def main():
 
     # ── Shared configuration ───────────────────────────────────────────────────
     if args.test_seq is not None:
-        nav_data = data_loader.get_kitti_dataset(args.test_seq)
+        if args.dataset == 'cookies':
+            nav_data = data_loader.get_cookies_dataset_by_id(args.test_seq)
+        else:
+            nav_data = data_loader.get_kitti_dataset(args.test_seq)
     else:
         nav_data = ins_config.NAV_DATA
 
@@ -306,24 +312,38 @@ def main():
             os.environ.pop('AI_IMU_WEIGHTS', None)
 
         _t0 = datetime.now()
-        result = fmod.run(
-            nav_data=nav_data,
-            params=params,
-            outage_config=outage_config,
-            use_3d_rotation=use_3d,
-        )
+        try:
+            result = fmod.run(
+                nav_data=nav_data,
+                params=params,
+                outage_config=outage_config,
+                use_3d_rotation=use_3d,
+            )
+        except Exception as e:
+            logger.warning(f"  FAILED (filter error): {e}")
+            continue
         _elapsed_s = (datetime.now() - _t0).total_seconds()
 
         p = result['p'];  v = result['v'];  r = result['r']
 
+        # Skip if filter diverged (NaN / Inf in position output)
+        if not np.all(np.isfinite(p)):
+            n_bad = int(np.sum(~np.isfinite(p)))
+            logger.warning(f"  FAILED (diverged): {n_bad} NaN/Inf values in position output — skipped.")
+            continue
+
         # Metrics
-        mets = metrics.evaluate_navigation_performance(
-            p_est=p, v_est=v, r_est=r,
-            p_gt=p_gt, v_gt=nav_data.vel_enu, r_gt=nav_data.orient,
-            dataset_name=nav_data.dataset_name,
-            gnss_outage_info=gnss_outage_info,
-            sample_rate=frecIMU,
-        )
+        try:
+            mets = metrics.evaluate_navigation_performance(
+                p_est=p, v_est=v, r_est=r,
+                p_gt=p_gt, v_gt=nav_data.vel_enu, r_gt=nav_data.orient,
+                dataset_name=nav_data.dataset_name,
+                gnss_outage_info=gnss_outage_info,
+                sample_rate=frecIMU,
+            )
+        except Exception as e:
+            logger.warning(f"  FAILED (metrics error): {e}")
+            continue
 
         ate_2d = mets.get('ate', {}).get('rmse_2D', float('nan'))
         pos_rmse_2d = mets.get('position_rmse', {}).get('2D', float('nan'))
@@ -430,7 +450,7 @@ def main():
         ate2d  = mets.get('ate', {}).get('rmse_2D',      float('nan'))
         ate3d  = mets.get('ate', {}).get('rmse_3D',      float('nan'))
         prmse  = mets.get('position_rmse', {}).get('2D', float('nan'))
-        outagm = mets.get('outage_analysis', {}).get('max', float('nan'))
+        outagm = (mets.get('outage_analysis') or {}).get('max', float('nan'))
         trel   = km.get('t_rel', float('nan'))
         rrel   = km.get('r_rel', float('nan'))
         elapsed = entry.get('elapsed_s', float('nan'))

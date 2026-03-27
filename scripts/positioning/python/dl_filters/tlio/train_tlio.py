@@ -93,13 +93,17 @@ def nll_loss(dp_pred, logstd, dp_gt):
 
 # ── Dataset helpers ───────────────────────────────────────────────────────────
 
-def load_sequence_windows(seq_id: str, sample_rate: float = 100.0):
+def load_sequence_windows(seq_id: str, sample_rate: float = 100.0,
+                          dataset: str = 'kitti'):
     """
-    Load a single KITTI sequence and return windowed tensors.
+    Load a single sequence and return windowed tensors.
     Returns (imu_windows, dp_gt_ga) where dp_gt_ga are ground-truth
     displacements in the gravity-aligned frame.
     """
-    nav = dl.get_kitti_dataset(seq_id, sample_rate=sample_rate)
+    if dataset == 'cookies':
+        nav = dl.get_cookies_dataset_by_id(seq_id, sample_rate=sample_rate)
+    else:
+        nav = dl.get_kitti_dataset(seq_id, sample_rate=sample_rate)
     W = int(WINDOW_SECONDS * nav.sample_rate)
     S = int(STRIDE_SECONDS * nav.sample_rate)
 
@@ -116,13 +120,14 @@ def load_sequence_windows(seq_id: str, sample_rate: float = 100.0):
     )
 
 
-def build_dataset(train_seqs: list, val_seq: str = None, sample_rate: float = 100.0):
+def build_dataset(train_seqs: list, val_seq: str = None, sample_rate: float = 100.0,
+                  dataset: str = 'kitti'):
     """Return (train_dataset, val_dataset or None)."""
     train_imu, train_dp = [], []
     for seq in train_seqs:
         print(f"  Loading seq {seq} ...", flush=True)
         try:
-            imu_w, dp_w = load_sequence_windows(seq, sample_rate)
+            imu_w, dp_w = load_sequence_windows(seq, sample_rate, dataset)
             train_imu.append(imu_w)
             train_dp.append(dp_w)
         except Exception as e:
@@ -137,7 +142,7 @@ def build_dataset(train_seqs: list, val_seq: str = None, sample_rate: float = 10
     if val_seq is not None:
         print(f"  Loading val seq {val_seq} ...", flush=True)
         try:
-            val_imu, val_dp = load_sequence_windows(val_seq, sample_rate)
+            val_imu, val_dp = load_sequence_windows(val_seq, sample_rate, dataset)
             val_dataset = TensorDataset(val_imu, val_dp)
         except Exception as e:
             print(f"  WARNING: failed to load val seq {val_seq}: {e}")
@@ -158,26 +163,33 @@ def train(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on device: {device}")
 
+    # Resolve the active sequence list based on dataset
+    if args.dataset == 'cookies':
+        from data_loader import COOKIES_CLEAN_SEQS
+        CLEAN_SEQS_ACTIVE = list(COOKIES_CLEAN_SEQS.keys())   # ['c01'..'c06']
+    else:
+        CLEAN_SEQS_ACTIVE = CLEAN_SEQS   # kitti clean seqs
+
     # Determine sequences
     if args.mode == 'loo':
-        if args.val_seq not in CLEAN_SEQS:
-            raise ValueError(f"--val-seq must be one of {CLEAN_SEQS}")
-        train_seqs = [s for s in CLEAN_SEQS if s != args.val_seq]
+        if args.val_seq not in CLEAN_SEQS_ACTIVE:
+            raise ValueError(f"--val-seq must be one of {CLEAN_SEQS_ACTIVE}")
+        train_seqs = [s for s in CLEAN_SEQS_ACTIVE if s != args.val_seq]
         val_seq    = args.val_seq
         out_name   = f'fold_{args.val_seq}.pt'
     else:  # all
-        train_seqs = CLEAN_SEQS
+        train_seqs = CLEAN_SEQS_ACTIVE
         val_seq    = None
         out_name   = 'tlio_resnet.pt'
 
-    print(f"Mode={args.mode}  train={train_seqs}  val={val_seq}")
+    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seq}")
 
     # Window size (rate-adaptive)
     sample_rate = 100.0
     W = int(WINDOW_SECONDS * sample_rate)
 
     print("Building dataset ...")
-    train_ds, val_ds = build_dataset(train_seqs, val_seq, sample_rate)
+    train_ds, val_ds = build_dataset(train_seqs, val_seq, sample_rate, args.dataset)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=2, pin_memory=True)
     val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
@@ -291,11 +303,13 @@ def train(args):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="TLIO ResNet training on KITTI")
+    parser = argparse.ArgumentParser(description="TLIO ResNet training")
+    parser.add_argument('--dataset',    choices=['kitti', 'cookies'], default='kitti',
+                        help="Dataset family (default: kitti)")
     parser.add_argument('--mode',       choices=['loo', 'all'], default='loo',
                         help="'loo' = LOO fold (requires --val-seq), 'all' = all clean seqs")
     parser.add_argument('--val-seq',    default='01',
-                        help="Validation sequence for LOO (e.g. 01, 04, …)")
+                        help="Validation sequence for LOO (kitti: '01', cookies: 'c01', …)")
     parser.add_argument('--epochs',     type=int, default=200)
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--lr',         type=float, default=1e-3)

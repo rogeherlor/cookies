@@ -196,25 +196,37 @@ def train(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on device: {device}")
 
+    # Resolve the active sequence list based on dataset
+    if args.dataset == 'cookies':
+        from data_loader import COOKIES_CLEAN_SEQS
+        CLEAN_SEQS_ACTIVE = list(COOKIES_CLEAN_SEQS.keys())
+    else:
+        CLEAN_SEQS_ACTIVE = CLEAN_SEQS
+
     if args.mode == 'loo':
-        if args.val_seq not in CLEAN_SEQS:
-            raise ValueError(f"--val-seq must be one of {CLEAN_SEQS}")
-        train_seqs = [s for s in CLEAN_SEQS if s != args.val_seq]
+        if args.val_seq not in CLEAN_SEQS_ACTIVE:
+            raise ValueError(f"--val-seq must be one of {CLEAN_SEQS_ACTIVE}")
+        train_seqs = [s for s in CLEAN_SEQS_ACTIVE if s != args.val_seq]
         val_seqs   = [args.val_seq]
         out_name   = f'fold_{args.val_seq}.pt'
     else:
-        train_seqs = CLEAN_SEQS
+        train_seqs = CLEAN_SEQS_ACTIVE
         val_seqs   = []
         out_name   = 'deep_kf.pt'
 
-    print(f"Mode={args.mode}  train={train_seqs}  val={val_seqs}")
+    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seqs}")
+
+    def _load_seq(seq):
+        if args.dataset == 'cookies':
+            return dl.get_cookies_dataset_by_id(seq, sample_rate=100.0)
+        return dl.get_kitti_dataset(seq, sample_rate=100.0)
 
     # ── Load nav data ─────────────────────────────────────────────────────
     print("Loading sequences ...")
     train_navs = []
     for seq in train_seqs:
         try:
-            train_navs.append(dl.get_kitti_dataset(seq, sample_rate=100.0))
+            train_navs.append(_load_seq(seq))
             print(f"  Loaded seq {seq}")
         except Exception as e:
             print(f"  WARNING: failed to load seq {seq}: {e}")
@@ -222,7 +234,7 @@ def train(args):
     val_navs = []
     for seq in val_seqs:
         try:
-            val_navs.append(dl.get_kitti_dataset(seq, sample_rate=100.0))
+            val_navs.append(_load_seq(seq))
         except Exception as e:
             print(f"  WARNING: failed to load val seq {seq}: {e}")
 
@@ -322,9 +334,12 @@ def train(args):
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="Deep KF LSTM training on KITTI")
+    parser = argparse.ArgumentParser(description="Deep KF LSTM training")
+    parser.add_argument('--dataset',    choices=['kitti', 'cookies'], default='kitti',
+                        help="Dataset family (default: kitti)")
     parser.add_argument('--mode',       choices=['loo', 'all'], default='loo')
-    parser.add_argument('--val-seq',    default='01')
+    parser.add_argument('--val-seq',    default='01',
+                        help="Validation sequence (kitti: '01', cookies: 'c01', …)")
     parser.add_argument('--epochs',     type=int,   default=150)
     parser.add_argument('--lr',         type=float, default=1e-3)
     parser.add_argument('--latent-dim', type=int,   default=128)
