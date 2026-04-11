@@ -6,43 +6,36 @@ Paper : Liu et al., "TLIO: Tight Learned Inertial Odometry", IEEE RA-L 2020
         https://doi.org/10.1109/LRA.2020.3007421  |  arXiv:2007.01867
 Code  : https://github.com/CathIAS/TLIO  (cloned to external/tlio/)
 
-Differences from the original paper / repository:
----------------------------------------------------
-1. IMU rate: 100 Hz (this project) vs 200 Hz (original paper).
-   Window W = int(2.0 * nav_data.sample_rate) = 200 samples @ 100 Hz.
-   net_config["in_dim"] = W // 32 + 1 = 7 @ 100 Hz (matches imu_tracker.py line 118).
+Filter backend: ImuMSCKF (Stochastic Cloning EKF) from
+external/tlio/src/tracker/scekf.py.  This replaces a prior simplified 15-state
+ESKF that diverged during GPS outages because the displacement measurement
+anchor was not in the state vector.  In the SCEKF, both begin and end window
+positions are augmented clones, so H@Sigma@H.T stays bounded during outages.
 
-2. Platform: wheeled vehicle (KITTI) vs pedestrian headset (original).
-   Network is retrained from scratch on KITTI; pedestrian pretrained weights
-   are not used.
+Key design decisions
+---------------------
+* Clone augmentation: every _UPDATE_STRIDE=5 raw IMU steps → 20 Hz.
+* Window: TLIO update fires when a clone at (t_now − 1 s) exists in the state.
+  First fire at step 105 (1.05 s); thereafter every 5 steps (50 ms stride).
+* TLIO measurement: displacement in gravity-aligned frame, shape (3,1).
+  SCEKF.update() rotates internally via Rz(yaw_at_begin).
+* GPS: position-only update on the 15-element evolving state; cross-covariance
+  propagates the fix into all clones.
+* Mahalanobis gate: built into SCEKF.update(), active after 10 s.
 
-3. GPS integration: GPS position updates added to the 15-state ESKF when
-   gps_available[i] is True.  The original paper is IMU-only (no GPS).
-
-4. EKF state: 15-state ESKF [δp, δv, δφ, δb_a, δb_g] in navigation space,
-   reusing the Solà 2017 F matrix (same as eskf_enhanced.py).  The original
-   paper uses a full stochastic-cloning MSCKF with augmented past-pose states.
-
-5. Displacement update: simplified vs the original stochastic-cloning EKF.
-   We treat the predicted displacement as a position innovation w.r.t. the
-   anchor position saved at each stride boundary
-   (H = [I_3 | 0_3×12], standard position-error measurement).
-
-6. Training protocol: Leave-One-Out CV on KITTI clean sequences
-   (01, 04, 06, 07, 08, 09, 10) — see train_tlio.py.
-   Original paper uses a custom pedestrian split.
-
-7. Coordinate frames: FLU body / ENU navigation (this project).
-   Original paper uses a world frame anchored to the first pose.
-   Gravity-aligned preprocessing is identical: R_ga = Ry(pitch) @ Rx(roll).
-
-8. Outage simulation and DR_MODE: added for project compatibility, not in paper.
+Differences from the original paper
+-------------------------------------
+1. IMU rate: 100 Hz (KITTI) vs 200 Hz (paper).  Window W_imu=100 samples is
+   upsampled to W_net=200 before network inference.
+2. GPS integration added (original is IMU-only).
+3. LOO training on KITTI; original uses a pedestrian split.
+4. FLU body / ENU navigation frames.  g = [0,0,−9.81] (ENU Z-up).
 
 Weights search order:
   1. TLIO_WEIGHTS env var
-  2. artifacts/tlio/tlio_resnet.pt
-  3. artifacts/tlio/fold_<seq>.pt  (LOO fold matching current sequence)
-If no weights are found, run() raises RuntimeError with instructions.
+  2. artifacts/tlio/fold_<seq>.pt   (LOO fold)
+  3. artifacts/tlio/tlio_resnet.pt  (all-sequences)
+  4. Any available fold_*.pt        (fallback with warning)
 """
 
 import os
@@ -50,52 +43,99 @@ import sys
 import numpy as np
 from pathlib import Path
 
-# ── Paths ────────────────────────────────────────────────────────────────────
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+
 _HERE      = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent.parent.parent.parent   # cookies/
 _TLIO_SRC  = _REPO_ROOT / 'external/tlio/src'
 _ARTIFACTS = _REPO_ROOT / 'artifacts/tlio'
 
+# Network input: always W=200 samples (1 s at 200 Hz — original TLIO paper).
+_TLIO_NET_WINDOW = 200
+_TLIO_NET_HZ     = 200.0
+
+# Clone schedule (matches imu_tracker.py).
+_IMU_HZ        = 100          # raw KITTI IMU rate [Hz]
+_UPDATE_HZ     = 20           # clone augmentation rate [Hz]
+_UPDATE_STRIDE = _IMU_HZ // _UPDATE_HZ   # = 5 IMU steps between clones
+
 DEFAULT_PARAMS = {
     # GPS measurement noise (σ² [m²])
-    'Rpos': 4.0,
-    # Window and stride in seconds (rate-agnostic)
-    'window_seconds': 2.0,
-    'stride_seconds': 0.5,
-    # Process noise
-    'Qpos':     1e-4,
-    'Qvel':     1e-3,
-    'Qorient':  1e-5,
-    'Qacc':     1e-6,
-    'Qgyr':     1e-7,
-    # Initial covariance (1-σ std, squared inside run())
-    'P_pos_std':    1.0,
-    'P_vel_std':    0.5,
-    'P_orient_std': 0.1,
-    'P_acc_std':    0.05,
-    'P_gyr_std':    0.01,
-    # Gauss-Markov bias decay (set to 0 → random-walk)
-    'beta_acc': 0.0,
-    'beta_gyr': 0.0,
+    'Rpos':              4.0,
+    # Window length in seconds
+    'window_seconds':    1.0,
+    # SCEKF IMU noise parameters
+    'sigma_na':          np.sqrt(1e-3),   # accelerometer noise [m/s² / √Hz]
+    'sigma_ng':          np.sqrt(1e-4),   # gyroscope noise [rad/s / √Hz]
+    'ita_ba':            1e-4,            # accel bias random walk [m/s² / √s]
+    'ita_bg':            1e-6,            # gyro bias random walk [rad/s / √s]
+    # SCEKF initial uncertainty (1-σ std)
+    'init_attitude_sigma': 10.0 / 180.0 * np.pi,
+    'init_yaw_sigma':       0.1 / 180.0 * np.pi,
+    'init_vel_sigma':       1.0,
+    'init_pos_sigma':       0.001,
+    'init_bg_sigma':        0.0001,
+    'init_ba_sigma':        0.2,
+    # Network covariance scale (meascov_scale=10 matches original TLIO repo)
+    'meascov_scale':     10.0,
 }
 
 
-# ── Model loading ─────────────────────────────────────────────────────────────
+# ── ImuMSCKF config object ────────────────────────────────────────────────────
+
+class _TLIOConfig:
+    """Thin wrapper that exposes DEFAULT_PARAMS as attributes for ImuMSCKF."""
+    def __init__(self, p_cfg):
+        self.sigma_na            = p_cfg['sigma_na']
+        self.sigma_ng            = p_cfg['sigma_ng']
+        self.ita_ba              = p_cfg['ita_ba']
+        self.ita_bg              = p_cfg['ita_bg']
+        self.init_attitude_sigma = p_cfg['init_attitude_sigma']
+        self.init_yaw_sigma      = p_cfg['init_yaw_sigma']
+        self.init_vel_sigma      = p_cfg['init_vel_sigma']
+        self.init_pos_sigma      = p_cfg['init_pos_sigma']
+        self.init_bg_sigma       = p_cfg['init_bg_sigma']
+        self.init_ba_sigma       = p_cfg['init_ba_sigma']
+        self.meascov_scale       = p_cfg['meascov_scale']
+        self.mahalanobis_fail_scale = 0   # drop outliers; do not inflate R
+        self.g_norm              = 9.81
+        self.use_const_cov       = False
+        self.add_sim_meas_noise  = False
+
+
+# ── Path helpers ──────────────────────────────────────────────────────────────
 
 def _add_tlio_src():
-    src = str(_TLIO_SRC)
-    if src not in sys.path:
-        sys.path.insert(0, src)
+    # Add external/tlio/src as a package root so that `from utils.from_scipy`
+    # and `from network.model_factory` resolve correctly.
+    # Do NOT add subdirectories (tracker/, utils/) as flat path entries — a
+    # flat `utils/` entry shadows the utils package with 'utils is not a package'.
+    for p in [str(_TLIO_SRC / 'tracker'), str(_TLIO_SRC)]:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    # external/ai-imu-dr/src/utils.py is a flat file (not a package).  If it
+    # was imported earlier (e.g. by iekf_ai_imu runner), evict it from the
+    # module cache so that `import utils` re-resolves to the TLIO utils package.
+    if 'utils' in sys.modules:
+        import importlib
+        utils_mod = sys.modules['utils']
+        utils_file = getattr(utils_mod, '__file__', '') or ''
+        if 'ai-imu-dr' in utils_file or not getattr(utils_mod, '__path__', None):
+            del sys.modules['utils']
+            # Also evict any utils.* submodules that may have been cached wrong
+            for key in list(sys.modules):
+                if key.startswith('utils.'):
+                    del sys.modules[key]
 
 
 def _resolve_seq_id(seq_id):
-    """Convert full KITTI drive name to short seq ID if needed."""
+    """Convert full KITTI drive name to short seq ID (e.g. '01') if needed."""
     if seq_id is None:
         return None
-    # Already a short ID (e.g. '01')
     if len(seq_id) <= 2:
         return seq_id
-    # Reverse lookup: drive name → short ID
     from data_loader import KITTI_SEQ_TO_DRIVE
     _drive_to_seq = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
     return _drive_to_seq.get(seq_id, seq_id)
@@ -103,12 +143,11 @@ def _resolve_seq_id(seq_id):
 
 def _find_weights(seq_id: str = None) -> Path:
     """
-    Locate TLIO weights file.  Search order:
+    Locate TLIO weights.  Search order:
       1. TLIO_WEIGHTS env var
       2. artifacts/tlio/fold_<seq_id>.pt  (LOO fold)
-      3. artifacts/tlio/tlio_resnet.pt    (all-sequences checkpoint)
+      3. artifacts/tlio/tlio_resnet.pt    (all-sequences)
       4. Any available fold_*.pt          (fallback with warning)
-    Raises RuntimeError if nothing found.
     """
     env = os.environ.get('TLIO_WEIGHTS')
     if env and Path(env).exists():
@@ -124,43 +163,36 @@ def _find_weights(seq_id: str = None) -> Path:
     if default.exists():
         return default
 
-    # Fallback: use any available fold (not proper LOO, but functional)
     available = sorted(_ARTIFACTS.glob('fold_*.pt'))
     available = [p for p in available if '_ckpt' not in p.name]
     if available:
-        print(f"WARNING: TLIO fold_{short_id}.pt not found, falling back to {available[0].name}. "
-              f"Train the proper fold with: python ins_train.py tlio --seqs {short_id}")
+        print(f"WARNING: TLIO fold_{short_id}.pt not found, "
+              f"falling back to {available[0].name}. "
+              f"Train the proper fold: python ins_train.py tlio --seqs {short_id}")
         return available[0]
 
     raise RuntimeError(
         "TLIO weights not found.  Train the model first:\n"
-        f"  python ins_train.py tlio\n"
+        "  python ins_train.py tlio\n"
         "or set the TLIO_WEIGHTS environment variable to an existing .pt file."
     )
 
 
 def _load_model(weights_path: Path, window_size: int, device: str = 'cpu'):
-    """Load TLIO ResNet1D model and return it in eval mode."""
+    """Load TLIO ResNet1D and return it in eval mode."""
     import torch
     import importlib.util
 
-    # Load model_factory directly from our local network/ package to avoid
-    # external/tlio/src/network/__init__.py which imports the full TLIO stack
-    # (utils.logging etc.) that conflicts with other packages on sys.path.
     _mf_path = _HERE / 'network/model_factory.py'
     _spec = importlib.util.spec_from_file_location('_tlio_model_factory', _mf_path)
     _mf = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mf)
     get_model = _mf.get_model
 
-    # in_dim formula from imu_tracker.py line 118
-    in_dim = window_size // 32 + 1
+    in_dim = window_size // 32 + 1          # imu_tracker.py line 118
     net_config = {'in_dim': in_dim}
-
-    # output_dim=3: ResNet1D has two FcBlock heads (mean + logstd), each dim=3
     model = get_model('resnet', net_config, input_dim=6, output_dim=3)
     state = torch.load(weights_path, map_location=device)
-    # Support both raw state_dict and checkpoint dicts
     if isinstance(state, dict) and 'model_state_dict' in state:
         state = state['model_state_dict']
     elif isinstance(state, dict) and 'state_dict' in state:
@@ -171,16 +203,7 @@ def _load_model(weights_path: Path, window_size: int, device: str = 'cpu'):
     return model
 
 
-# ── Quaternion / rotation utilities ─────────────────────────────────────────
-# (copied from eskf_enhanced.py to keep this module self-contained)
-
-def _skew(v):
-    return np.array([
-        [ 0.,    -v[2],  v[1]],
-        [ v[2],   0.,   -v[0]],
-        [-v[1],   v[0],  0.  ],
-    ])
-
+# ── Rotation helpers ──────────────────────────────────────────────────────────
 
 def _qnorm(q):
     n = np.linalg.norm(q)
@@ -197,14 +220,6 @@ def _qmul(q1, q2):
     ])
 
 
-def _qfrom_axis_angle(dtheta):
-    angle = np.linalg.norm(dtheta)
-    if angle < 1e-12:
-        return _qnorm(np.array([1., 0.5*dtheta[0], 0.5*dtheta[1], 0.5*dtheta[2]]))
-    axis = dtheta / angle;  s = np.sin(0.5 * angle)
-    return np.array([np.cos(0.5 * angle), axis[0]*s, axis[1]*s, axis[2]*s])
-
-
 def _qfrom_euler(roll, pitch, yaw):
     cr, sr = np.cos(roll/2),  np.sin(roll/2)
     cp, sp = np.cos(pitch/2), np.sin(pitch/2)
@@ -217,20 +232,13 @@ def _qfrom_euler(roll, pitch, yaw):
     ]))
 
 
-def _qto_rpy(q):
-    w, x, y, z = q
-    roll  = np.arctan2(2.*(w*x + y*z), 1. - 2.*(x*x + y*y))
-    pitch = np.arcsin(np.clip(2.*(w*y - z*x), -1., 1.))
-    yaw   = np.arctan2(2.*(w*z + x*y), 1. - 2.*(y*y + z*z))
-    return np.array([roll, pitch, yaw])
-
-
 def _qto_Rbn(q):
+    """Hamilton quaternion [w,x,y,z] → 3×3 body→nav rotation matrix."""
     w, x, y, z = q
     return np.array([
-        [1-2*(y*y+z*z),   2*(x*y-z*w),     2*(x*z+y*w)  ],
-        [2*(x*y+z*w),     1-2*(x*x+z*z),   2*(y*z-x*w)  ],
-        [2*(x*z-y*w),     2*(y*z+x*w),     1-2*(x*x+y*y)],
+        [1-2*(y*y+z*z),  2*(x*y-z*w),    2*(x*z+y*w)  ],
+        [2*(x*y+z*w),    1-2*(x*x+z*z),  2*(y*z-x*w)  ],
+        [2*(x*z-y*w),    2*(y*z+x*w),    1-2*(x*x+y*y)],
     ])
 
 
@@ -244,58 +252,102 @@ def _Rx(a):
     return np.array([[1., 0., 0.], [0., ca, -sa], [0., sa, ca]])
 
 
-def _Rz(a):
-    ca, sa = np.cos(a), np.sin(a)
-    return np.array([[ca, -sa, 0.], [sa, ca, 0.], [0., 0., 1.]])
-
-
-GRAVITY = np.array([0., 0., -9.81])
+def _R_to_rpy(R):
+    """
+    Extract [roll, pitch, yaw] from body→nav rotation R_nb = Rz(yaw)@Ry(pitch)@Rx(roll).
+    ZYX Tait-Bryan / aerospace convention.
+    """
+    pitch = np.arcsin(np.clip(-R[2, 0], -1.0, 1.0))
+    if np.abs(np.cos(pitch)) > 1e-6:
+        roll = np.arctan2(R[2, 1], R[2, 2])
+        yaw  = np.arctan2(R[1, 0], R[0, 0])
+    else:
+        roll = 0.0
+        yaw  = np.arctan2(-R[0, 1], R[1, 1])
+    return np.array([roll, pitch, yaw])
 
 
 # ── Network inference helper ──────────────────────────────────────────────────
 
 def _predict_displacement(model, imu_window: np.ndarray, device: str = 'cpu'):
     """
-    Run one forward pass and decode displacement + covariance.
+    Run one TLIO forward pass and decode displacement + covariance.
 
     Parameters
     ----------
-    imu_window : (6, W) float32 — [gyro_ga | accel_ga_motion]
+    imu_window : (6, W) float32 — [gyro_ga(3) | accel_ga_motion(3)]
 
     Returns
     -------
     dp_ga    : (3,) float64 — predicted displacement in gravity-aligned frame
-    Sigma_ga : (3, 3) float64 — diagonal predicted covariance in GA frame
+    Sigma_ga : (3, 3) float64 — diagonal covariance
     """
     import torch
-    x = torch.from_numpy(imu_window[None]).float().to(device)  # (1, 6, W)
+    x = torch.from_numpy(imu_window[None]).float().to(device)   # (1, 6, W)
     with torch.no_grad():
-        mean, logstd = model(x)   # each (1, 3)
+        mean, logstd = model(x)    # each (1, 3)
     dp_ga   = mean[0].cpu().numpy().astype(np.float64)
     log_std = logstd[0].cpu().numpy().astype(np.float64)
-    # Eq. 3 of the paper: Σ = diag(exp(2·û_i))
-    # Clamp logstd to [-10, 10] to avoid exp overflow/underflow, then
-    # apply a minimum variance floor (0.01 m² ≈ 10 cm std) for filter stability.
+    if not np.all(np.isfinite(dp_ga)):
+        return np.zeros(3), np.eye(3) * 100.0
+    # Eq. 3: Σ = diag(exp(2·logstd)).  Floor: 10 cm or 5% of predicted displacement.
     log_std  = np.clip(log_std, -10.0, 10.0)
-    std2     = np.maximum(np.exp(2.0 * log_std), 1e-4)
+    min_std  = np.maximum(0.05 * np.abs(dp_ga), 0.1)
+    std2     = np.maximum(np.exp(2.0 * log_std), min_std ** 2)
     if not np.all(np.isfinite(std2)):
-        std2 = np.full(3, 1.0)   # safe fallback: 1 m std
-    Sigma_ga = np.diag(std2)
-    return dp_ga, Sigma_ga
+        std2 = np.full(3, 1.0)
+    return dp_ga, np.diag(std2)
+
+
+# ── GPS update (position-only on evolving state) ──────────────────────────────
+
+def _gps_update(filt, gps_pos_enu: np.ndarray, gps_noise_var: float):
+    """
+    GPS position-only Kalman update on the ImuMSCKF evolving state.
+
+    Evolving-state error ordering (last 15 elements of the full state):
+      [dθ(0:3), dv(3:6), dp(6:9), dbg(9:12), dba(12:15)]
+
+    Position is at offset +6 within the evolving block → global column 6*N+6.
+    Cross-covariance propagates the GPS fix into all clone positions.
+
+    Parameters
+    ----------
+    filt          : ImuMSCKF instance
+    gps_pos_enu   : (3,) array — GPS position in ENU [m]
+    gps_noise_var : float — GPS position variance [m²]
+    """
+    N = filt.state.N
+    n = 15 + 6 * N
+    H = np.zeros((3, n))
+    H[:, 6*N + 6 : 6*N + 9] = np.eye(3)
+
+    R_gps = np.eye(3) * gps_noise_var
+    S     = H @ filt.Sigma @ H.T + R_gps
+    K     = filt.Sigma @ H.T @ np.linalg.inv(S)   # (n, 3)
+
+    innov = gps_pos_enu.reshape(3, 1) - filt.state.s_p   # (3, 1)
+    dX    = K @ innov                                      # (n, 1)
+    filt.state.apply_correction(dX)
+
+    I_KH       = np.eye(n) - K @ H
+    filt.Sigma = I_KH @ filt.Sigma @ I_KH.T + K @ R_gps @ K.T   # Joseph form
+    filt.Sigma = 0.5 * (filt.Sigma + filt.Sigma.T)
+    filt.Sigma15 = filt.Sigma[-15:, -15:]
 
 
 # ── Main filter ───────────────────────────────────────────────────────────────
 
 def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     """
-    Run the TLIO filter on nav_data.
+    Run TLIO on nav_data using the original ImuMSCKF (stochastic cloning EKF).
 
     Parameters
     ----------
     nav_data       : NavigationData (data_loader.py)
     params         : Optional dict overriding DEFAULT_PARAMS.
     outage_config  : Optional {'start': t1_s, 'duration': d_s}.
-    use_3d_rotation: True → full 3D strapdown; False → yaw-only (2D).
+    use_3d_rotation: Accepted for API compatibility; SCEKF always uses full 3D.
 
     Returns
     -------
@@ -309,32 +361,36 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     if params:
         p_cfg.update(params)
 
-    # ── Determine torch device ─────────────────────────────────────────────
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    # ── Imports ───────────────────────────────────────────────────────────
+    _add_tlio_src()
+    from scekf import ImuMSCKF   # external/tlio/src/tracker/scekf.py
+
     # ── Data ──────────────────────────────────────────────────────────────
-    accel_flu = nav_data.accel_flu    # (N, 3)
-    gyro_flu  = nav_data.gyro_flu     # (N, 3)
-    orient    = nav_data.orient       # (N, 3) [roll, pitch, yaw]
-    lla       = nav_data.lla
-    vel_enu   = nav_data.vel_enu
+    accel_flu   = nav_data.accel_flu    # (N, 3) body FLU frame
+    gyro_flu    = nav_data.gyro_flu     # (N, 3) body FLU frame
+    orient      = nav_data.orient       # (N, 3) [roll, pitch, yaw] radians
+    lla         = nav_data.lla
+    vel_enu     = nav_data.vel_enu
     sample_rate = nav_data.sample_rate
-    lla0      = nav_data.lla0
+    lla0        = nav_data.lla0
 
     import pymap3d as pm
-    lla0 = nav_data.lla0
-    N = accel_flu.shape[0]
-    Ts = 1.0 / sample_rate
+    N   = accel_flu.shape[0]
 
-    # ── Window parameters ─────────────────────────────────────────────────
-    W = int(p_cfg['window_seconds'] * sample_rate)   # 200 @ 100 Hz
-    S = int(p_cfg['stride_seconds'] * sample_rate)   # 50  @ 100 Hz
+    # IMU window length in raw samples (1 s at sample_rate Hz)
+    W_imu = int(p_cfg['window_seconds'] * sample_rate)   # 100 at 100 Hz
+    # Window length in µs — used to find the begin clone
+    _window_us = int(W_imu * 1e6 / sample_rate)          # 1 000 000 µs
 
-    # ── Weights ───────────────────────────────────────────────────────────
-    seq_id = getattr(nav_data, 'dataset_name', None)
+    # ── Weights and network ───────────────────────────────────────────────
+    seq_id       = getattr(nav_data, 'dataset_name', None)
     weights_path = _find_weights(seq_id)
-    model = _load_model(weights_path, W, device)
-    print(f"TLIO: loaded weights from {weights_path}  (W={W}, S={S}, device={device})")
+    model        = _load_model(weights_path, _TLIO_NET_WINDOW, device)
+    print(f"TLIO: loaded weights from {weights_path}  "
+          f"(W_imu={W_imu}→W_net={_TLIO_NET_WINDOW}, "
+          f"clone every {_UPDATE_STRIDE} steps, device={device})")
 
     # ── GPS outage mask ───────────────────────────────────────────────────
     try:
@@ -354,10 +410,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         gps_avail[:] = False
 
     # ── GPS positions in ENU ──────────────────────────────────────────────
-    e, n, u = pm.geodetic2enu(
+    e, n_arr, u = pm.geodetic2enu(
         lla[:, 0], lla[:, 1], lla[:, 2],
         lla0[0], lla0[1], lla0[2])
-    p_gps_enu = np.column_stack([e, n, u])      # (N, 3)
+    p_gps_enu = np.column_stack([e, n_arr, u])   # (N, 3)
 
     # ── Output arrays ─────────────────────────────────────────────────────
     pos        = np.zeros((N, 3))
@@ -371,186 +427,114 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     std_b_acc  = np.zeros((N, 3))
     std_b_gyr  = np.zeros((N, 3))
 
-    # ── ESKF initialisation ───────────────────────────────────────────────
-    pos[0]     = p_gps_enu[0]
-    vel[0]     = vel_enu[0]
+    # ── ImuMSCKF initialisation ───────────────────────────────────────────
+    config  = _TLIOConfig(p_cfg)
+    filt    = ImuMSCKF(config)
+    R_init  = _qto_Rbn(_qfrom_euler(orient[0, 0], orient[0, 1], orient[0, 2]))
+    v_init  = vel_enu[0].reshape(3, 1)
+    p_init  = p_gps_enu[0].reshape(3, 1)
+    ba_init = np.zeros((3, 1))
+    bg_init = np.zeros((3, 1))
+    filt.initialize_with_state(0, R_init, v_init, p_init, ba_init, bg_init)
+
+    pos[0]     = p_init.flatten()
+    vel[0]     = v_init.flatten()
     rpy_out[0] = orient[0]
 
-    pIMU = pos[0].copy()
-    vIMU = vel[0].copy()
-    q    = _qfrom_euler(orient[0, 0], orient[0, 1], orient[0, 2])
-    b_a  = np.zeros(3)
-    b_g  = np.zeros(3)
-    dx   = np.zeros(15)
+    # ── Upsample helpers (pre-built grids) ────────────────────────────────
+    from scipy.interpolate import interp1d as _interp1d
+    _t_src = np.linspace(0., 1., W_imu)
+    _t_up  = np.linspace(0., 1., _TLIO_NET_WINDOW)
+    _kw    = dict(axis=0, kind='linear', bounds_error=False, fill_value='extrapolate')
 
-    Q = np.zeros((15, 15))
-    Q[0:3,   0:3]   = np.eye(3) * p_cfg['Qpos']
-    Q[3:6,   3:6]   = np.eye(3) * (p_cfg['Qvel'] * Ts**2)
-    Q[6:9,   6:9]   = np.eye(3) * p_cfg['Qorient']
-    Q[9:12,  9:12]  = np.eye(3) * (p_cfg['Qacc']  * Ts)
-    Q[12:15, 12:15] = np.eye(3) * (p_cfg['Qgyr']  * Ts)
+    # ── Counters ──────────────────────────────────────────────────────────
+    _tlio_n_attempts = 0
+    _tlio_n_accepted = 0
+    _gps_updates     = 0
 
-    P = np.diag([
-        p_cfg['P_pos_std'],    p_cfg['P_pos_std'],    p_cfg['P_pos_std'],
-        p_cfg['P_vel_std'],    p_cfg['P_vel_std'],    p_cfg['P_vel_std'],
-        p_cfg['P_orient_std'], p_cfg['P_orient_std'], p_cfg['P_orient_std'],
-        p_cfg['P_acc_std'],    p_cfg['P_acc_std'],    p_cfg['P_acc_std'],
-        p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],
-    ]) ** 2
-    P_init = P.copy()  # keep reference for resets
-
-    R_pos  = np.eye(3) * p_cfg['Rpos']
-
-    beta_acc = p_cfg['beta_acc']
-    beta_gyr = p_cfg['beta_gyr']
-
-    # ── Displacement update book-keeping ──────────────────────────────────
-    # The network predicts displacement over the full window [ws, ws+W].
-    # dp_estimated must span the same W samples: pIMU[now] - pos[ws].
-    # (Using a stride-boundary anchor only covers S samples — 4× too short.)
-    next_update_idx = W   # first network update happens when the window is full
-
-    # Pre-build gravity-aligned windows for every stride boundary
-    # We do this on-the-fly inside the loop for memory efficiency, but we
-    # pre-cache the IMU array views for speed.
-
-    print(f"TLIO: running filter on {N} samples ...")
+    print(f"TLIO (ImuMSCKF): running filter on {N} samples ...")
 
     for i in range(N - 1):
-        # ── A. IMU strapdown propagation ───────────────────────────────
-        acc_b   = accel_flu[i] - b_a
-        omega_b = gyro_flu[i]  - b_g
+        # Target time at end of this integration step [µs]
+        t_us = int((i + 1) * 1e6 / sample_rate)
 
-        if use_3d_rotation:
-            dtheta = omega_b * Ts
-        else:
-            dtheta = np.array([0., 0., omega_b[2] * Ts])
+        # Clone augmentation: every _UPDATE_STRIDE steps (20 Hz)
+        augment  = ((i + 1) % _UPDATE_STRIDE == 0)
+        t_aug_us = t_us if augment else None
 
-        q    = _qnorm(_qmul(q, _qfrom_axis_angle(dtheta)))
-        Rbn  = _qto_Rbn(q)
-        accENU = Rbn @ acc_b
-        pIMU   = pIMU + Ts * vIMU + 0.5 * Ts**2 * (accENU + GRAVITY)
-        vIMU   = vIMU + Ts * (accENU + GRAVITY)
+        # ── A. Propagate (IMU strapdown + covariance; optional clone) ─────
+        acc = accel_flu[i].reshape(3, 1)
+        gyr = gyro_flu[i].reshape(3, 1)
+        filt.propagate(acc, gyr, t_us, t_augmentation_us=t_aug_us)
 
-        # ── B. Covariance propagation (Solà 2017 F matrix) ────────────
-        F = np.zeros((15, 15))
-        F[0:3,   3:6]   = np.eye(3)
-        F[3:6,   6:9]   = -Rbn @ _skew(acc_b)
-        F[3:6,   9:12]  = -Rbn
-        F[6:9,   6:9]   = -_skew(omega_b)
-        F[6:9,   12:15] = -np.eye(3)
-        F[9:12,  9:12]  = beta_acc * np.eye(3)
-        F[12:15, 12:15] = beta_gyr * np.eye(3)
+        # ── B. TLIO displacement update ───────────────────────────────────
+        # Fire when a clone at exactly (t_now − 1 s) exists.
+        # First possible fire: t_begin=50000 µs (step 5) when t_now=1050000 µs (step 105).
+        # Thereafter: every _UPDATE_STRIDE steps = 50 ms stride.
+        if augment:
+            t_begin_us = t_us - _window_us
+            ts_list    = filt.state.si_timestamps_us   # list of augmented clone times
 
-        Fd           = np.eye(15) + F * Ts
-        Fd[6:9, 6:9] = _qto_Rbn(_qfrom_axis_angle(omega_b * Ts)).T
+            if (t_begin_us > 0
+                    and t_begin_us in ts_list
+                    and t_us in ts_list):
 
-        P  = Fd @ P @ Fd.T + Q
-        P  = 0.5 * (P + P.T)   # keep symmetric after propagation
-        np.clip(P, -1e8, 1e8, out=P)   # prevent floating-point overflow
-        # Guard against overflow/NaN (can happen during long outages with
-        # first-order Euler discretization; reset to a safe diagonal if needed)
-        if not np.all(np.isfinite(P)):
-            P = P_init.copy()
-        update_occurred = False
+                _tlio_n_attempts += 1
 
-        # ── C. TLIO displacement update (at stride boundaries) ─────────
-        if (i + 1) == next_update_idx and (i + 1) >= W:
-            # Build gravity-aligned window [i+1-W : i+1]
-            ws  = i + 1 - W
-            roll_ws  = orient[ws, 0]
-            pitch_ws = orient[ws, 1]
-            yaw_ws   = orient[ws, 2]
+                # Build gravity-aligned network input from raw IMU samples [ws:we]
+                ws       = int(t_begin_us * sample_rate / 1e6)   # start index
+                we       = ws + W_imu                             # end index
+                accel_w  = accel_flu[ws:we]    # (W_imu, 3)
+                gyro_w   = gyro_flu[ws:we]     # (W_imu, 3)
 
-            R_ga = _Ry(pitch_ws) @ _Rx(roll_ws)
-            accel_w  = accel_flu[ws:ws + W]     # (W, 3)
-            gyro_w   = gyro_flu[ws:ws + W]      # (W, 3)
-            accel_ga = R_ga @ accel_w.T          # (3, W)
-            gyro_ga  = R_ga @ gyro_w.T           # (3, W)
-            accel_ga[2, :] -= 9.81               # remove gravity
+                roll_ws  = orient[ws, 0]
+                pitch_ws = orient[ws, 1]
+                R_ga     = _Ry(pitch_ws) @ _Rx(roll_ws)
 
-            imu_win = np.vstack([gyro_ga, accel_ga]).astype(np.float32)  # (6, W)
+                accel_up  = _interp1d(_t_src, accel_w, **_kw)(_t_up)   # (W_net, 3)
+                gyro_up   = _interp1d(_t_src, gyro_w,  **_kw)(_t_up)   # (W_net, 3)
+                accel_ga  = R_ga @ accel_up.T                           # (3, W_net)
+                gyro_ga   = R_ga @ gyro_up.T                            # (3, W_net)
+                accel_ga[2, :] -= 9.81                                  # remove gravity
 
-            dp_ga, Sigma_ga = _predict_displacement(model, imu_win, device)
+                imu_win = np.vstack([gyro_ga, accel_ga]).astype(np.float32)  # (6, W_net)
 
-            # Rotate prediction to ENU
-            Rz = _Rz(yaw_ws)
-            dp_enu    = Rz @ dp_ga
-            Sigma_enu = Rz @ Sigma_ga @ Rz.T
+                dp_ga, Sigma_ga = _predict_displacement(model, imu_win, device)
 
-            # Innovation: network predicts displacement over window [ws, ws+W].
-            # dp_estimated must span the same W samples using the stored
-            # corrected position at ws (pos[ws] set in step F at that time).
-            dp_estimated = pIMU - pos[ws]
-            z = dp_enu - dp_estimated
+                # SCEKF update: meas = dp in GA frame; filter computes pred = Rz.T@(p_end−p_begin)
+                # Mahalanobis gate is built-in (active after 10 s).
+                _inno_before = filt.innovation.copy()
+                filt.update(dp_ga.reshape(3, 1), Sigma_ga, t_begin_us, t_us)
+                if not np.array_equal(filt.innovation, _inno_before):
+                    _tlio_n_accepted += 1
 
-            # Outlier gate: skip if innovation is implausibly large
-            # (max plausible W-sample displacement at 30m/s = 30*W/fs ≈ 60m)
-            if np.linalg.norm(z) > 60.0:
-                next_update_idx = i + 1 + S
-                continue
+                # Marginalize the begin clone (and any older ones) unconditionally
+                begin_idx = ts_list.index(t_begin_us)
+                filt.marginalize(begin_idx)
 
-            # Joseph form: P = (I-KH)P(I-KH)^T + K*R*K^T  (numerically stable)
-            # Add min-eigenvalue regularisation so S_innov stays invertible even
-            # when the network gives near-zero covariances after many updates.
-            S_innov = P[0:3, 0:3] + Sigma_enu + 1e-6 * np.eye(3)
-            K    = np.linalg.lstsq(S_innov.T, P[0:3, :], rcond=None)[0].T  # (15, 3)
-            dx   = dx + K @ (z - dx[0:3])
-            IKH  = np.eye(15); IKH[:, 0:3] -= K
-            P    = IKH @ P @ IKH.T + K @ Sigma_enu @ K.T
-            P    = 0.5 * (P + P.T)
-            np.fill_diagonal(P, np.maximum(np.diag(P), 1e-12))
-            update_occurred = True
-
-            next_update_idx = i + 1 + S
-
-        # ── D. GPS position update ─────────────────────────────────────
+        # ── C. GPS position update ─────────────────────────────────────────
         if gps_avail[i + 1]:
-            z_pos = p_gps_enu[i + 1] - pIMU
-            innov = z_pos - dx[0:3]
-            S_gps = P[0:3, 0:3] + R_pos + 1e-6 * np.eye(3)
-            K_gps = np.linalg.lstsq(S_gps.T, P[0:3, :], rcond=None)[0].T  # (15, 3)
-            dx    = dx + K_gps @ innov
-            IKH   = np.eye(15); IKH[:, 0:3] -= K_gps
-            P     = IKH @ P @ IKH.T + K_gps @ R_pos @ K_gps.T
-            P     = 0.5 * (P + P.T)
-            np.fill_diagonal(P, np.maximum(np.diag(P), 1e-12))
-            update_occurred = True
+            _gps_update(filt, p_gps_enu[i + 1], p_cfg['Rpos'])
+            _gps_updates += 1
 
-        # ── E. Error injection (Solà §7.3) ────────────────────────────
-        if update_occurred:
-            pIMU += dx[0:3]
-            vIMU += dx[3:6]
-            b_a  += dx[9:12]
-            b_g  += dx[12:15]
+        # ── D. Store outputs ───────────────────────────────────────────────
+        R, v, p, ba, bg = filt.get_evolving_state()
+        pos[i+1]       = p.flatten()
+        vel[i+1]       = v.flatten()
+        rpy_out[i+1]   = _R_to_rpy(R)
+        b_acc_out[i+1] = ba.flatten()
+        b_gyr_out[i+1] = bg.flatten()
 
-            delta_theta = dx[6:9]
-            q = _qnorm(_qmul(q, _qfrom_axis_angle(delta_theta)))
+        S15 = filt.Sigma15
+        std_pos[i+1]    = np.sqrt(np.maximum(np.diag(S15[6:9,   6:9]),   0.))
+        std_vel[i+1]    = np.sqrt(np.maximum(np.diag(S15[3:6,   3:6]),   0.))
+        std_orient[i+1] = np.sqrt(np.maximum(np.diag(S15[0:3,   0:3]),   0.))
+        std_b_gyr[i+1]  = np.sqrt(np.maximum(np.diag(S15[9:12,  9:12]),  0.))
+        std_b_acc[i+1]  = np.sqrt(np.maximum(np.diag(S15[12:15, 12:15]), 0.))
 
-            G           = np.eye(15)
-            G[6:9, 6:9] = np.eye(3) - 0.5 * _skew(delta_theta)
-            P           = G @ P @ G.T
-            np.clip(P, -1e8, 1e8, out=P)
-            if not np.all(np.isfinite(P)):
-                P = P_init.copy()
-            # Recover state if update produced NaN/Inf
-            if not (np.all(np.isfinite(pIMU)) and np.all(np.isfinite(vIMU))):
-                pIMU = pos[i].copy() if np.all(np.isfinite(pos[i])) else pos[0].copy()
-                vIMU = vel[i].copy() if np.all(np.isfinite(vel[i])) else vel[0].copy()
-                P = P_init.copy()
-            dx[:]       = 0.
-
-        # ── F. Store outputs ──────────────────────────────────────────
-        pos[i+1]       = pIMU
-        vel[i+1]       = vIMU
-        rpy_out[i+1]   = _qto_rpy(q)
-        b_acc_out[i+1] = b_a
-        b_gyr_out[i+1] = b_g
-        std_pos[i+1]      = np.sqrt(np.maximum(np.diag(P[0:3,   0:3]),   0.))
-        std_vel[i+1]      = np.sqrt(np.maximum(np.diag(P[3:6,   3:6]),   0.))
-        std_orient[i+1]   = np.sqrt(np.maximum(np.diag(P[6:9,   6:9]),   0.))
-        std_b_acc[i+1]    = np.sqrt(np.maximum(np.diag(P[9:12,  9:12]),  0.))
-        std_b_gyr[i+1]    = np.sqrt(np.maximum(np.diag(P[12:15, 12:15]), 0.))
+    rate = 100 * _tlio_n_accepted / max(_tlio_n_attempts, 1)
+    print(f"TLIO: {_tlio_n_accepted}/{_tlio_n_attempts} TLIO updates accepted "
+          f"({rate:.1f}%), {_gps_updates} GPS updates")
 
     return {
         'p':            pos,

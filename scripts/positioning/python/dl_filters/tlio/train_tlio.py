@@ -50,7 +50,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, TensorDataset
 
 # ── Path setup ───────────────────────────────────────────────────────────────
@@ -64,16 +64,29 @@ for p in [str(_TLIO_SRC), str(_SCRIPTS)]:
         sys.path.insert(0, p)
 
 import data_loader as dl
-from tlio_dataset import build_windows
+from tlio_dataset import build_windows, TARGET_HZ
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 CLEAN_SEQS = ['01', '04', '06', '07', '08', '09', '10']
 
-WINDOW_SECONDS = 2.0   # 2 s — matches original paper
-STRIDE_SECONDS = 0.5   # 0.5 s stride during training
+WINDOW_SECONDS = 1.0   # 1 s — matches original TLIO paper (200 Hz × 1 s = W=200)
+STRIDE_SECONDS = 0.05  # 50 ms stride — matches original 20 Hz training sample rate
 
 
 # ── Loss functions ────────────────────────────────────────────────────────────
+
+def _augment_imu(imu_w, accel_range=0.2, gyro_range=0.05):
+    """
+    Add per-batch random bias offsets to simulate IMU sensor error.
+    Matches the original TLIO paper's data augmentation (accel_bias_range=0.2,
+    gyro_bias_range=0.05).
+    """
+    B = imu_w.shape[0]
+    imu_w = imu_w.clone()
+    imu_w[:, 0:3, :] += (torch.rand(B, 3, 1, device=imu_w.device) * 2 - 1) * gyro_range
+    imu_w[:, 3:6, :] += (torch.rand(B, 3, 1, device=imu_w.device) * 2 - 1) * accel_range
+    return imu_w
+
 
 def mse_loss(dp_pred, dp_gt):
     return ((dp_pred - dp_gt) ** 2).mean()
@@ -104,10 +117,11 @@ def load_sequence_windows(seq_id: str, sample_rate: float = 100.0,
         nav = dl.get_cookies_dataset_by_id(seq_id, sample_rate=sample_rate)
     else:
         nav = dl.get_kitti_dataset(seq_id, sample_rate=sample_rate)
-    W = int(WINDOW_SECONDS * nav.sample_rate)
-    S = int(STRIDE_SECONDS * nav.sample_rate)
+    # Window and stride in TARGET_HZ (200 Hz) samples — data is upsampled in build_windows
+    W = int(WINDOW_SECONDS * TARGET_HZ)
+    S = int(STRIDE_SECONDS * TARGET_HZ)
 
-    imu_wins, dp_gt_enu, Rz_list, _ = build_windows(nav, W, S)
+    imu_wins, dp_gt_enu, Rz_list, _ = build_windows(nav, W, S, target_rate=TARGET_HZ)
 
     # Rotate ground-truth displacement to gravity-aligned frame (Rz.T @ dp_enu)
     dp_gt_ga = np.stack([
@@ -184,9 +198,9 @@ def train(args):
 
     print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seq}")
 
-    # Window size (rate-adaptive)
+    # Window size in TARGET_HZ (200 Hz) samples — same as build_windows
     sample_rate = 100.0
-    W = int(WINDOW_SECONDS * sample_rate)
+    W = int(WINDOW_SECONDS * TARGET_HZ)
 
     print("Building dataset ...")
     train_ds, val_ds = build_dataset(train_seqs, val_seq, sample_rate, args.dataset)
@@ -211,9 +225,16 @@ def train(args):
         print(f"Resumed from {args.resume} at epoch {start_epoch}")
 
     optimizer  = Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
-    scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    # LR warmup: 1% → 100% of lr over 5 epochs, then cosine decay to 1e-6
+    _warmup_epochs = 5
+    _warmup = LinearLR(optimizer, start_factor=0.01, end_factor=1.0,
+                       total_iters=_warmup_epochs)
+    _cosine = CosineAnnealingLR(optimizer, T_max=max(args.epochs - _warmup_epochs, 1),
+                                eta_min=1e-6)
+    scheduler = SequentialLR(optimizer, schedulers=[_warmup, _cosine],
+                             milestones=[_warmup_epochs])
 
-    phase_switch = args.epochs // 2   # switch from MSE to NLL at midpoint
+    phase_switch = args.mse_epochs    # MSE pre-training for fixed N epochs, then NLL
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +247,7 @@ def train(args):
         model.train()
         total_loss = 0.
         for imu_w, dp_target in train_loader:
-            imu_w     = imu_w.to(device)
+            imu_w     = _augment_imu(imu_w.to(device))
             dp_target = dp_target.to(device)
 
             optimizer.zero_grad()
@@ -245,6 +266,8 @@ def train(args):
         scheduler.step()
         avg_train = total_loss / len(train_ds)
         phase = 'MSE' if epoch < phase_switch else 'NLL'
+        # Print every epoch for first 50, then every 10th, always print last
+        _should_print = (epoch < 50) or ((epoch + 1) % 10 == 0) or (epoch == args.epochs - 1)
 
         # ── Validation ─────────────────────────────────────────────────
         if val_loader is not None:
@@ -261,9 +284,10 @@ def train(args):
                         loss = nll_loss(mean_pred, logstd_pred, dp_target)
                     val_loss += loss.item() * imu_w.size(0)
             avg_val = val_loss / len(val_ds)
-            print(f"Epoch {epoch+1:4d}/{args.epochs} [{phase}]  "
-                  f"train={avg_train:.4f}  val={avg_val:.4f}  "
-                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+            if _should_print:
+                print(f"Epoch {epoch+1:4d}/{args.epochs} [{phase}]  "
+                      f"train={avg_train:.4f}  val={avg_val:.4f}  "
+                      f"lr={scheduler.get_last_lr()[0]:.2e}")
 
             # Save best
             if avg_val < best_val_loss:
@@ -276,9 +300,10 @@ def train(args):
                 }, output_dir / out_name)
                 print(f"  → saved best weights ({out_name})")
         else:
-            print(f"Epoch {epoch+1:4d}/{args.epochs} [{phase}]  "
-                  f"train={avg_train:.4f}  "
-                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+            if _should_print:
+                print(f"Epoch {epoch+1:4d}/{args.epochs} [{phase}]  "
+                      f"train={avg_train:.4f}  "
+                      f"lr={scheduler.get_last_lr()[0]:.2e}")
 
         # Periodic checkpoint (every 20 epochs)
         if (epoch + 1) % 20 == 0:
@@ -297,6 +322,25 @@ def train(args):
         }, output_dir / out_name)
         print(f"Saved final weights → {output_dir / out_name}")
 
+    # ── Convergence diagnostics ────────────────────────────────────────────
+    # A converged model should: (a) show varying dp_pred across windows (not constant),
+    # (b) show logstd that varies per sample (not all identical).
+    print("Computing convergence diagnostics ...")
+    model.eval()
+    all_dp, all_logstd = [], []
+    with torch.no_grad():
+        for imu_w, _ in train_loader:
+            mean_pred, logstd_pred = model(imu_w.to(device))
+            all_dp.append(mean_pred.cpu().numpy())
+            all_logstd.append(logstd_pred.cpu().numpy())
+    all_dp     = np.concatenate(all_dp,     axis=0)
+    all_logstd = np.concatenate(all_logstd, axis=0)
+    print(f"  dp_pred  mean  (m) : {all_dp.mean(axis=0)}")
+    print(f"  dp_pred  std   (m) : {all_dp.std(axis=0)}")
+    print(f"  logstd   mean      : {all_logstd.mean(axis=0)}")
+    print(f"  logstd   std       : {all_logstd.std(axis=0)}")
+    print(f"  exp(logstd) mean   : {np.exp(all_logstd).mean(axis=0)}")
+
     print("Training complete.")
 
 
@@ -311,8 +355,12 @@ def _parse_args():
     parser.add_argument('--val-seq',    default='01',
                         help="Validation sequence for LOO (kitti: '01', cookies: 'c01', …)")
     parser.add_argument('--epochs',     type=int, default=200)
-    parser.add_argument('--batch-size', type=int, default=64)
-    parser.add_argument('--lr',         type=float, default=1e-3)
+    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--lr',         type=float, default=1e-4)
+    parser.add_argument('--mse-epochs', type=int, default=20,
+                        help='Number of MSE pre-training epochs before switching to NLL '
+                             '(default: 20 — matches original TLIO paper epoch 10, '
+                             'remaining epochs train calibrated uncertainty)')
     parser.add_argument('--output',     default=str(_REPO_ROOT / 'artifacts/tlio'),
                         help="Directory to save model weights")
     parser.add_argument('--resume',     default=None,

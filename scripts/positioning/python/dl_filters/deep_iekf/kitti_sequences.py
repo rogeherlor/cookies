@@ -35,7 +35,21 @@ import torch
 from pathlib import Path
 
 # Path to AI-IMU source
-_AI_IMU_SRC = Path(__file__).resolve().parent.parent.parent.parent.parent.parent / 'external/ai-imu-dr/src'
+_AI_IMU_SRC  = Path(__file__).resolve().parent.parent.parent.parent.parent.parent / 'external/ai-imu-dr/src'
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent.parent  # scripts/positioning/python/
+
+# Clean KITTI sequences for LOO training — must stay in sync with ins_train.py
+KITTI_CLEAN_SEQS = ['01', '04', '06', '07', '08', '09', '10']
+
+KITTI_SEQ_TO_DRIVE = {
+    '01': '2011_10_03_drive_0042_extract',
+    '04': '2011_09_30_drive_0016_extract',
+    '06': '2011_09_30_drive_0020_extract',
+    '07': '2011_09_30_drive_0027_extract',
+    '08': '2011_09_30_drive_0028_extract',
+    '09': '2011_09_30_drive_0033_extract',
+    '10': '2011_09_30_drive_0034_extract',
+}
 
 
 def _add_aimu_path():
@@ -149,6 +163,107 @@ class SingleSequenceDataset:
 
     def add_noise(self, u):
         """Add small Gaussian noise to IMU for data augmentation during training."""
+        noise = torch.zeros_like(u)
+        noise[:, :3] = self.sigma_gyro * torch.randn_like(u[:, :3])
+        noise[:, 3:] = self.sigma_acc  * torch.randn_like(u[:, 3:])
+        return u + noise
+
+    def load(self, path):
+        import pickle
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+
+    def dump(self, data, path):
+        import pickle
+        with open(path, 'wb') as f:
+            pickle.dump(data, f)
+
+
+class MultiSequenceDataset:
+    """
+    LOO-compatible dataset wrapping multiple KITTI sequences loaded via data_loader.
+
+    Loads each sequence from datasets/raw_kitti/<drive>.p at 100 Hz (matching the
+    AI-IMU paper's raw KITTI setup) without requiring the full KITTI raw dataset.
+
+    Satisfies the same interface as SingleSequenceDataset and KITTIDataset:
+      dataset.datasets_train_filter          → {drive: [0, N]}  (training seqs)
+      dataset.datasets_validatation_filter   → {drive: [0, N]}  (held-out seq)
+      dataset.get_data(drive)                → (t, ang_gt, p_gt, v_gt, u) tensors
+      dataset.normalize_factors              → {'u_loc': tensor(6,), 'u_std': tensor(6,)}
+      dataset.add_noise(u)                   → u + Gaussian noise
+      dataset.load(path) / dataset.dump(data, path)  — pickle helpers
+    """
+
+    sigma_gyro = 1e-4   # rad/s  noise std for data augmentation
+    sigma_acc  = 1e-3   # m/s²   noise std for data augmentation
+
+    def __init__(self, seqs=None, held_out=None, sample_rate=100.0,
+                 min_train_len=6000):
+        """
+        Parameters
+        ----------
+        seqs          : list of KITTI sequence IDs, e.g. ['01', '04', ...].
+                        Defaults to KITTI_CLEAN_SEQS.
+        held_out      : full drive name to exclude from training and use as validation,
+                        e.g. '2011_09_30_drive_0028_extract'.  None → all seqs train.
+        sample_rate   : Hz to load data at (default 100.0, matching AI-IMU paper).
+        min_train_len : sequences shorter than this are skipped from training
+                        (default 6000 = 60 s at 100 Hz, matching train_loo seq_dim).
+                        Short sequences are still loaded for use as held-out/val.
+        """
+        if seqs is None:
+            seqs = KITTI_CLEAN_SEQS
+
+        # Make data_loader importable
+        scripts_str = str(_SCRIPTS_DIR)
+        if scripts_str not in sys.path:
+            sys.path.insert(0, scripts_str)
+        import data_loader as dl
+
+        self.datasets_train_filter        = {}
+        self.datasets_validatation_filter = {}
+        self._data = {}
+
+        train_u_arrays = []
+
+        for seq in seqs:
+            drive = KITTI_SEQ_TO_DRIVE[seq]
+            print(f"  [MultiSequenceDataset] Loading seq {seq} ({drive}) ...", flush=True)
+            nav = dl.get_kitti_dataset(seq, sample_rate=sample_rate)
+            t, ang_gt, p_gt, v_gt, u = nav_data_to_aimu_tensors(nav)
+            self._data[drive] = (t, ang_gt, p_gt, v_gt, u)
+            N = int(t.shape[0])
+
+            # Fuzzy match — upstream LOO code strips _extract too
+            held_variants = set()
+            if held_out is not None:
+                held_variants = {held_out, held_out.replace('_extract', '')}
+            is_held = any(v in drive for v in held_variants)
+
+            if is_held:
+                self.datasets_validatation_filter[drive] = [0, N]
+            elif N < min_train_len:
+                print(f"  WARNING: seq {seq} ({drive}) too short for training "
+                      f"({N} samples < {min_train_len} required) — skipped.", flush=True)
+            else:
+                self.datasets_train_filter[drive] = [0, N]
+                train_u_arrays.append(u.numpy())
+
+        if not train_u_arrays:
+            raise ValueError("MultiSequenceDataset: no training sequences after removing held-out.")
+
+        # Global IMU normalization across all training sequences
+        u_cat = np.concatenate(train_u_arrays, axis=0)
+        u_loc = torch.from_numpy(np.mean(u_cat, axis=0))
+        u_std = torch.from_numpy(np.std(u_cat, axis=0))
+        u_std[u_std < 1e-6] = 1.0
+        self.normalize_factors = {'u_loc': u_loc, 'u_std': u_std}
+
+    def get_data(self, dataset_name):
+        return self._data[dataset_name]
+
+    def add_noise(self, u):
         noise = torch.zeros_like(u)
         noise[:, :3] = self.sigma_gyro * torch.randn_like(u[:, :3])
         noise[:, 3:] = self.sigma_acc  * torch.randn_like(u[:, 3:])

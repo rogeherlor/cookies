@@ -33,6 +33,7 @@ onnx==1.16.0
 onnxruntime==1.18.0
 onnxscript==0.5.0
 onnxsim==0.4.36
+NavPy==1.0
 # CUDA 12.x packages — required for TensorFlow GPU support (used by Hailo DFC).
 # Install AFTER tensorflow. Set XLA_FLAGS (see hailo/README) for libdevice path.
 # hailo-dataflow-compiler and hailort are NOT on PyPI — install from Hailo developer portal.

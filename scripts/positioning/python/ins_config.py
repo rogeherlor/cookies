@@ -38,7 +38,7 @@ import filter_params as fp
 #   "tlio"           — Tight Learned Inertial Odometry (Liu et al. IEEE RA-L 2020)
 #   "deep_kf"        — Deep Kalman Filter GNSS+IMU (Hosseinyalamdary MDPI Sensors 2018)
 #   "tartan_imu"     — Tartan IMU foundation model (Zhao et al. CVPR 2025)
-FILTER = "eskf_enhanced"
+FILTER = "tlio"
 
 
 # ── Rotation mode ──────────────────────────────────────────────────────────────

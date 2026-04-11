@@ -169,6 +169,76 @@ def _save_norm_factors(output_dir, args):
         print(f"Warning: could not save normalization factors: {e}")
 
 
+# ── LOO mode (data_loader pickle files, no raw KITTI needed) ─────────────────
+
+def train_loo(output_dir, epochs, held_out=None):
+    """
+    Train using our preprocessed KITTI pickle files (datasets/raw_kitti/<drive>.p)
+    at 100 Hz — same frequency as the AI-IMU paper — without needing the full raw
+    KITTI dataset directory.
+
+    held_out : full drive name excluded from training and used as validation,
+               e.g. '2011_09_30_drive_0028_extract'.
+               When set, weights are also saved as iekfnets_held_<drive>.p.
+    """
+    import types
+    import shutil
+    _add_paths()
+    from kitti_sequences import MultiSequenceDataset, KITTI_CLEAN_SEQS
+    from main_kitti import KITTIParameters
+    from train_torch_filter import (prepare_filter, prepare_loss_data,
+                                    set_optimizer, train_loop, save_iekf)
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"LOO training: {epochs} epochs")
+    if held_out:
+        print(f"  LOO held-out : {held_out}")
+    print(f"  Output dir   : {output_dir}")
+
+    dataset = MultiSequenceDataset(seqs=KITTI_CLEAN_SEQS, held_out=held_out,
+                                   sample_rate=100.0)
+
+    args = types.SimpleNamespace()
+    args.path_temp         = str(output_dir)
+    args.parameter_class   = KITTIParameters
+    args.epochs            = epochs
+    args.seq_dim           = 60 * 100   # 60 s batches at 100 Hz (matches kitti mode)
+    args.continue_training = False
+
+    iekf      = prepare_filter(args, dataset)
+    prepare_loss_data(args, dataset)
+    optimizer = set_optimizer(iekf)
+
+    for epoch in range(1, epochs + 1):
+        train_loop(args, dataset, epoch, iekf, optimizer, args.seq_dim)
+        save_iekf(args, iekf)
+        if epoch % 50 == 0 or epoch == epochs:
+            print(f"  Epoch {epoch}/{epochs} done")
+
+    if held_out:
+        from kitti_sequences import KITTI_SEQ_TO_DRIVE
+        _drive_to_seq = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
+        seq_id = _drive_to_seq.get(held_out, held_out)
+        stem = f'fold_{seq_id}'
+    else:
+        stem = 'iekfnets'
+
+    if held_out:
+        src = output_dir / 'iekfnets.p'
+        dst = output_dir / f'{stem}.p'
+        if src.exists():
+            shutil.copy2(src, dst)
+            print(f"  Fold weights saved to {dst}")
+
+    norm_path = output_dir / f'{stem}_norm.p'
+    torch.save(dataset.normalize_factors, norm_path)
+    print(f"  Normalization factors saved to {norm_path}")
+
+    _export_onnx(output_dir, weights_stem=stem)
+
+
 # ── Single-sequence mode ───────────────────────────────────────────────────────
 
 def train_single(output_dir, epochs):
@@ -240,12 +310,16 @@ def train_single(output_dir, epochs):
 
 # ── ONNX export ────────────────────────────────────────────────────────────────
 
-def _export_onnx(output_dir):
-    """Export the trained MesNet CNN to ONNX after training completes."""
+def _export_onnx(output_dir, weights_stem='iekfnets'):
+    """Export the trained MesNet CNN to ONNX after training completes.
+
+    weights_stem : filename stem (without extension) for both the source .p
+                   weights and the output .onnx, e.g. 'iekfnets_held_<drive>'.
+    """
     try:
         from export_onnx import export as _export
-        weights_path = Path(output_dir) / 'iekfnets.p'
-        onnx_path    = Path(output_dir) / 'iekfnets.onnx'
+        weights_path = Path(output_dir) / f'{weights_stem}.p'
+        onnx_path    = Path(output_dir) / f'{weights_stem}.onnx'
         _export(weights_path, onnx_path)
     except Exception as e:
         print(f"Warning: ONNX export failed ({e}). "
@@ -257,8 +331,9 @@ def _export_onnx(output_dir):
 def main():
     p = argparse.ArgumentParser(
         description='Train the AI-IMU deep IEKF (Brossard et al. 2020)')
-    p.add_argument('--mode', choices=['kitti', 'single'], default='single',
-                   help='kitti: full training on raw KITTI 100 Hz data (recommended); '
+    p.add_argument('--mode', choices=['kitti', 'single', 'loo'], default='single',
+                   help='loo: LOO training via data_loader pickle files at 100 Hz (default for ins_train.py); '
+                        'kitti: full training on raw KITTI 100 Hz data (requires --kitti-raw-dir); '
                         'single: quick test on one 10 Hz sequence')
     p.add_argument('--kitti-raw-dir', type=str, default=None,
                    help='[kitti mode] Path to KITTI raw data root directory '
@@ -286,6 +361,12 @@ def main():
             output_dir=args.output,
             epochs=args.epochs,
             continue_training=args.continue_training,
+            held_out=args.held_out,
+        )
+    elif args.mode == 'loo':
+        train_loo(
+            output_dir=args.output,
+            epochs=args.epochs,
             held_out=args.held_out,
         )
     else:

@@ -84,7 +84,7 @@ def _weight_exists(filter_name, seq, mode='loo'):
             'tlio':       _ARTIFACTS / 'tlio' / f'fold_{seq}.pt',
             'deep_kf':    _ARTIFACTS / 'deep_kf' / f'fold_{seq}.pt',
             'tartan_imu': _ARTIFACTS / 'tartan_imu' / f'lora_fold_{seq}.pt',
-            'ai_imu':     _ARTIFACTS / 'deep_iekf' / f'iekfnets_held_{drive}.p',
+            'ai_imu':     _ARTIFACTS / 'deep_iekf' / f'fold_{seq}.p',
         }
     return paths[filter_name].exists()
 
@@ -123,11 +123,13 @@ def _build_cmd_tartan(seq, epochs, mode='loo', dataset='kitti'):
 
 def _build_cmd_ai_imu(seq, epochs, kitti_raw_dir, mode='loo'):
     cmd = [sys.executable, str(_HERE / 'dl_filters/deep_iekf/train_ai_imu.py'),
-           '--mode', 'kitti', '--epochs', str(epochs),
+           '--epochs', str(epochs),
            '--output', str(_ARTIFACTS / 'deep_iekf')]
     if kitti_raw_dir:
-        cmd += ['--kitti-raw-dir', str(kitti_raw_dir)]
-    if mode == 'loo':
+        cmd += ['--mode', 'kitti', '--kitti-raw-dir', str(kitti_raw_dir)]
+    else:
+        cmd += ['--mode', 'loo']
+    if mode == 'loo' and seq is not None:
         drive = KITTI_SEQ_TO_DRIVE[seq]
         cmd += ['--held-out', drive]
     return cmd
@@ -161,7 +163,7 @@ def main():
     parser.add_argument('--seqs', nargs='+', default=None,
                         help='LOO validation sequence IDs (default: all clean seqs for the dataset). '
                              f'kitti default: {" ".join(CLEAN_SEQS)}. cookies default: c01..c06.')
-    parser.add_argument('--epochs-tlio',    type=int, default=200)
+    parser.add_argument('--epochs-tlio',    type=int, default=2000)
     parser.add_argument('--epochs-deep-kf', type=int, default=150)
     parser.add_argument('--epochs-tartan',  type=int, default=50)
     parser.add_argument('--epochs-ai-imu',  type=int, default=400)
@@ -196,12 +198,7 @@ def main():
         'ai_imu':     args.epochs_ai_imu,
     }
 
-    # Validate: AI-IMU needs raw KITTI data path
-    if 'ai_imu' in args.filters and not args.dry_run:
-        if args.kitti_raw_dir is None:
-            print("WARNING: ai_imu training requires --kitti-raw-dir pointing to raw KITTI data.\n"
-                  "         AI-IMU folds will be skipped unless --kitti-raw-dir is provided.\n"
-                  "         (Use --dry-run to see planned commands without this check.)")
+    # AI-IMU falls back to --mode loo (data_loader pickle files) when --kitti-raw-dir is absent.
 
     # ── Logging ───────────────────────────────────────────────────────────────
     _LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -276,12 +273,6 @@ def main():
             continue
         if args.skip_existing and mode == 'all' and _weight_exists(filt, '', mode):
             logger.info(f"[{i}/{n_total}] SKIP (exists) {label}")
-            n_skipped += 1
-            continue
-
-        # Skip AI-IMU if no raw dir
-        if filt == 'ai_imu' and args.kitti_raw_dir is None and not args.dry_run:
-            logger.info(f"[{i}/{n_total}] SKIP (no --kitti-raw-dir) {label}")
             n_skipped += 1
             continue
 
