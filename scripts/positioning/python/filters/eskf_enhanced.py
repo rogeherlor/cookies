@@ -182,6 +182,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     beta_gyr = p_cfg['beta_gyr']
 
     Q = np.zeros((15, 15))
+    Q[0:3,   0:3]   = np.eye(3) * (p_cfg['Qpos'] * Ts**2)
     Q[3:6,   3:6]   = np.eye(3) * (p_cfg['Qvel'] * Ts**2)
     Q[6:9,   6:9]   = np.diag([p_cfg['QorientXY'], p_cfg['QorientXY'], p_cfg['QorientZ']])
     Q[9:12,  9:12]  = np.eye(3) * (p_cfg['Qacc'] * Ts)

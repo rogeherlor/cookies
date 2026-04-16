@@ -112,18 +112,32 @@ def _find_weights():
 def _find_norm_factors(weights_path):
     """
     Look for saved normalization factors (u_loc, u_std) next to the weights file.
-    Returns dict with torch tensors, or None if not found.
+    Tries, in order:
+      1. sibling <stem>_norm.p   (e.g. fold_01.p → fold_01_norm.p)
+      2. legacy iekfnets_norm.p name in the same directory
+      3. any other *_norm.p sibling in the same directory
+    Returns dict or None if nothing valid is found.
     """
     if weights_path is None:
         return None
-    norm_path = weights_path.parent / 'iekfnets_norm.p'
-    if not norm_path.exists():
-        return None
-    try:
-        import torch
-        return torch.load(norm_path)
-    except Exception:
-        return None
+    wp = Path(weights_path)
+    candidates = [
+        wp.with_name(wp.stem + '_norm.p'),
+        wp.parent / 'iekfnets_norm.p',
+    ]
+    candidates.extend(sorted(wp.parent.glob('*_norm.p')))
+    seen = set()
+    for norm_path in candidates:
+        if norm_path in seen or not norm_path.exists():
+            seen.add(norm_path)
+            continue
+        seen.add(norm_path)
+        try:
+            import torch
+            return torch.load(norm_path)
+        except Exception:
+            continue
+    return None
 
 
 def _skew(v):

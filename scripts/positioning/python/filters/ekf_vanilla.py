@@ -232,8 +232,8 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         F[3:6,   6:9]   = -_skew(accENU)          # velocity  ← attitude error (via skew of nav-frame specific force)
         F[3:6,   9:12]  = Rbn                      # velocity  ← accel bias (body→nav)
         F[6:9,   12:15] = -Rbn                     # attitude  ← gyro bias (body→nav)
-        F[9:12,  9:12]  = -beta_acc * np.eye(3)   # accel bias Gauss-Markov decay
-        F[12:15, 12:15] = -beta_gyr * np.eye(3)   # gyro  bias Gauss-Markov decay
+        F[9:12,  9:12]  = beta_acc * np.eye(3)    # accel bias Gauss-Markov decay (β already negative)
+        F[12:15, 12:15] = beta_gyr * np.eye(3)    # gyro  bias Gauss-Markov decay (β already negative)
 
         Fd = np.eye(15) + F * Ts
 
