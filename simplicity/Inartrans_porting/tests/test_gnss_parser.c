@@ -1,18 +1,9 @@
-// To compile and run this test, use the following command from the project root:
-// gcc \
-//   simplicity/Inartrans_porting/tests/test_gnss_parser.c \
-//   simplicity/Inartrans_porting/src/gnss/gnss.c \
-//   -I simplicity/Inartrans_porting/src/gnss \
-//   -o simplicity/Inartrans_porting/tests/test_gnss_parser
-
-// Then execute the test binary:
-// ./simplicity/Inartrans_porting/tests/test_gnss_parser
-
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 
 #include "../src/gnss/gnss.h"
+#include "../src/gnss/gnss_converter.h"
 
 int main(void)
 {
@@ -30,12 +21,26 @@ int main(void)
         return 1;
     }
 
+    float latitude_deg = 0.0f;
+    float longitude_deg = 0.0f;
+
+    bool converted = CookieGNSS_ConvertToDecimalDegrees(&fix,
+                                                        &latitude_deg,
+                                                        &longitude_deg);
+
+    if (!converted) {
+        printf("GNSS coordinate conversion failed\n");
+        return 1;
+    }
+
     printf("GNSS epoch parsed successfully\n");
     printf("Valid: %s\n", fix.valid ? "true" : "false");
     printf("Time UTC: %s\n", fix.time_utc);
     printf("Date DDMMYY: %s\n", fix.date_ddmmyy);
     printf("Latitude raw: %.3f %c\n", fix.latitude_raw, fix.latitude_dir);
     printf("Longitude raw: %.3f %c\n", fix.longitude_raw, fix.longitude_dir);
+    printf("Latitude deg: %.6f\n", latitude_deg);
+    printf("Longitude deg: %.6f\n", longitude_deg);
     printf("Altitude: %.2f m\n", fix.altitude_m);
     printf("Speed: %u cm/s\n", fix.speed_cm_s);
     printf("COG: %u cdeg\n", fix.cog_cdeg);
