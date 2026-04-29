@@ -36,4 +36,4 @@ simplicity/**/*.mk
 *.pt
 *.csv
 *.log
-*.npz
+*.npzsimplicity/Inartrans_porting/tests/test_*

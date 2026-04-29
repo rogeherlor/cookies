@@ -1,3 +1,12 @@
+//Compile with:
+
+// gcc \
+//   simplicity/Inartrans_porting/tests/test_gnss_parser.c \
+//   simplicity/Inartrans_porting/src/gnss/gnss.c \
+//   simplicity/Inartrans_porting/src/gnss/gnss_converter.c \
+//   -I simplicity/Inartrans_porting/src/gnss \
+//   -o simplicity/Inartrans_porting/tests/test_gnss_parser
+
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
