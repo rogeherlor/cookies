@@ -12,24 +12,6 @@
 
 #include "../src/navigation/navigation.h"
 
-// cookie_ekf
-// gcc \
-//   simplicity/Inartrans_porting/tests/test_application.c \
-//   simplicity/Inartrans_porting/src/gnss/gnss.c \
-//   simplicity/Inartrans_porting/src/gnss/gnss_converter.c \
-//   simplicity/Inartrans_porting/src/sensors/imu_sample.c \
-//   simplicity/Inartrans_porting/src/sensors/imu_converter.c \
-//   simplicity/Inartrans_porting/src/sensors/imu_preprocessor.c \
-//   simplicity/Inartrans_porting/src/navigation/navigation.c \
-//   simplicity/Inartrans_v2/ekf/cookie_ekf.c \
-//   -I simplicity/Inartrans_porting/src/gnss \
-//   -I simplicity/Inartrans_porting/src/sensors \
-//   -I simplicity/Inartrans_porting/src/navigation \
-//   -I simplicity/Inartrans_v2/ekf \
-//   -lm \
-//   -o simplicity/Inartrans_porting/tests/test_application
-
-// mock
 // gcc \
 //   simplicity/Inartrans_porting/tests/test_application.c \
 //   simplicity/Inartrans_porting/src/gnss/gnss.c \
@@ -45,9 +27,19 @@
 //   -lm \
 //   -o simplicity/Inartrans_porting/tests/test_application
 
+// ./simplicity/Inartrans_porting/tests/test_application
+
+
+/*
+ * Integration test using a mock EKF.
+ *
+ * This test validates the data flow between modules:
+ * GNSS parser/converter, IMU sample/converter/preprocessor, and navigation.
+ *
+ * It does not validate the physical correctness of the real EKF.
+ */
 
 #define IMU_FREQ_HZ 100
-#define GNSS_FREQ_HZ 1
 #define SIM_TIME_SEC 12
 
 int main(void)
@@ -61,43 +53,41 @@ int main(void)
 
     for (int step = 0; step < SIM_TIME_SEC * IMU_FREQ_HZ; step++)
     {
-        // ---------------------------
-        // 1. IMU (fake data)
-        // ---------------------------
         CookieImuSample imu_raw;
 
-        int32_t accel_mg[3] = {0, 0, 0};   // static, gravity only
-        int32_t gyro_dps[3] = {0, 0, 0};      // no rotation
+        /*
+         * Before navigation is initialised, keep IMU acceleration at zero.
+         * After EKF initialisation, inject a small fake acceleration to verify
+         * that IMU prediction is actually reaching the navigation layer.
+         */
+        int32_t accel_mg[3] = {0, 0, 0};
+        int32_t gyro_dps[3] = {0, 0, 0};
+
+        if (CookieNavigation_IsInitialized()) {
+            accel_mg[0] = 100;  // Fake acceleration used only to test PredictWithImu()
+        }
 
         CookieIMU_SetSample(&imu_raw, accel_mg, gyro_dps, timestamp_ms);
 
         CookieImuConvertedSample imu_conv;
         CookieImuNavigationInput imu_nav;
 
-        if (CookieIMU_ConvertSample(&imu_raw, &imu_conv))
-        {
-            if (CookieIMU_PreprocessForNavigation(&imu_conv, &imu_nav))
-            {
+        if (CookieIMU_ConvertSample(&imu_raw, &imu_conv)) {
+            if (CookieIMU_PreprocessForNavigation(&imu_conv, &imu_nav)) {
                 CookieNavigation_PredictWithImu(&imu_nav);
             }
         }
 
-        // ---------------------------
-        // 2. GNSS (1 Hz)
-        // ---------------------------
         if (step % IMU_FREQ_HZ == 0)
         {
             CookieGnssFix fix;
             memset(&fix, 0, sizeof(fix));
 
             fix.valid = true;
-
             fix.latitude_raw = 4807.038f;
             fix.latitude_dir = 'N';
-
             fix.longitude_raw = 1131.000f;
             fix.longitude_dir = 'E';
-
             fix.altitude_m = 545.4f;
 
             CookieNavigation_UpdateWithGnss(&fix);
@@ -105,9 +95,6 @@ int main(void)
             printf("[GNSS] Update\n");
         }
 
-        // ---------------------------
-        // 3. Estado
-        // ---------------------------
         CookieNavigationState state;
 
         if (CookieNavigation_GetState(&state))
@@ -119,7 +106,7 @@ int main(void)
                    state.velocity_m_s);
         }
 
-        timestamp_ms += 10; // 100 Hz → 10 ms
+        timestamp_ms += 10;
     }
 
     printf("Test finished.\n");
