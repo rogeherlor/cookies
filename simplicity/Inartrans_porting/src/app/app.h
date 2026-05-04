@@ -28,6 +28,23 @@ typedef struct {
     CookieNavigationState navigation_state;
 } CookieAppContext;
 
+typedef struct {
+    bool converted;
+    bool first_sample;
+    bool preprocessed;
+    bool navigation_initialized;
+    bool navigation_predicted;
+
+    float dt_s;
+
+    float accel_m_s2[3];
+    float gyro_rad_s[3];
+
+    float navigation_accel_m_s2[3];
+    float navigation_gyro_rad_s[3];
+} CookieAppImuProcessDebug;
+
+
 void CookieApp_Init(CookieAppContext *app,
                     const CookieAppConfig *config);
 
@@ -39,6 +56,12 @@ bool CookieApp_ProcessImuSample(CookieAppContext *app,
                                 const int32_t accel_mg[3],
                                 const int32_t gyro_dps[3],
                                 uint32_t timestamp_ms);
+
+bool CookieApp_ProcessImuSampleWithDebug(CookieAppContext *app,
+                                         const int32_t accel_mg[3],
+                                         const int32_t gyro_dps[3],
+                                         uint32_t timestamp_ms,
+                                         CookieAppImuProcessDebug *debug);
 
 bool CookieApp_BuildDataMessage(CookieAppContext *app,
                                 uint8_t *message,

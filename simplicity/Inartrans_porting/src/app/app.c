@@ -119,6 +119,23 @@ bool CookieApp_ProcessImuSample(CookieAppContext *app,
                                 const int32_t gyro_dps[3],
                                 uint32_t timestamp_ms)
 {
+    return CookieApp_ProcessImuSampleWithDebug(app,
+                                               accel_mg,
+                                               gyro_dps,
+                                               timestamp_ms,
+                                               NULL);
+}
+
+bool CookieApp_ProcessImuSampleWithDebug(CookieAppContext *app,
+                                         const int32_t accel_mg[3],
+                                         const int32_t gyro_dps[3],
+                                         uint32_t timestamp_ms,
+                                         CookieAppImuProcessDebug *debug)
+{
+    if (debug != NULL) {
+        memset(debug, 0, sizeof(*debug));
+    }
+
     if (app == NULL || accel_mg == NULL || gyro_dps == NULL) {
         return false;
     }
@@ -136,11 +153,28 @@ bool CookieApp_ProcessImuSample(CookieAppContext *app,
         return false;
     }
 
+    if (debug != NULL) {
+        debug->converted = true;
+        debug->dt_s = converted.dt_s;
+
+        memcpy(debug->accel_m_s2,
+               converted.accel_m_s2,
+               sizeof(debug->accel_m_s2));
+
+        memcpy(debug->gyro_rad_s,
+               converted.gyro_rad_s,
+               sizeof(debug->gyro_rad_s));
+    }
+
     /*
      * The first IMU sample after reset only initializes the timestamp.
      * It has dt_s = 0 and should not trigger EKF prediction.
      */
     if (converted.dt_s <= 0.0f) {
+        if (debug != NULL) {
+            debug->first_sample = true;
+        }
+
         return true;
     }
 
@@ -152,14 +186,38 @@ bool CookieApp_ProcessImuSample(CookieAppContext *app,
         return false;
     }
 
-    if (CookieNavigation_IsInitialized()) {
-        (void)CookieNavigation_PredictWithImu(&navigation_input);
+    if (debug != NULL) {
+        debug->preprocessed = true;
 
-        CookieNavigationState state = {0};
+        memcpy(debug->navigation_accel_m_s2,
+               navigation_input.accel_m_s2,
+               sizeof(debug->navigation_accel_m_s2));
 
-        if (CookieNavigation_GetState(&state)) {
-            app->navigation_state = state;
-            app->has_navigation = state.valid;
+        memcpy(debug->navigation_gyro_rad_s,
+               navigation_input.gyro_rad_s,
+               sizeof(debug->navigation_gyro_rad_s));
+    }
+
+    bool navigation_ready = CookieNavigation_IsInitialized();
+
+    if (debug != NULL) {
+        debug->navigation_initialized = navigation_ready;
+    }
+
+    if (navigation_ready) {
+        bool predicted = CookieNavigation_PredictWithImu(&navigation_input);
+
+        if (debug != NULL) {
+            debug->navigation_predicted = predicted;
+        }
+
+        if (predicted) {
+            CookieNavigationState state = {0};
+
+            if (CookieNavigation_GetState(&state)) {
+                app->navigation_state = state;
+                app->has_navigation = state.valid;
+            }
         }
     }
 
