@@ -126,9 +126,6 @@ bool CookiePlatformImu_ReadSample(CookiePlatformImuSample *sample)
    * Gyroscope:
    *   deg/s -> integer deg/s for now.
    *
-   * Later, if the navigation pipeline needs finer gyro resolution, we can
-   * switch to centi-dps or milli-dps, but for now we keep the same style as
-   * the old debug output.
    */
   for (uint8_t i = 0; i < 3; i++) {
     sample->accel_mg[i] = (int32_t)(accel_g[i] * 1000.0f);

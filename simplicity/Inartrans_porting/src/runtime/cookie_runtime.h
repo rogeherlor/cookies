@@ -9,9 +9,6 @@
  * This module connects the hardware-specific platform adapters
  * with the portable CookieApp logic.
  *
- * The goal is to keep app_init.c and app_process.c small:
- * they should only call Runtime_Init() and Runtime_Process(),
- * not contain IMU/GNSS/packet logic directly.
  */
 
 /*
