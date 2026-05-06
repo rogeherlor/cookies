@@ -22,13 +22,13 @@ x_t^+ which is more trustworthy than the DNN prediction.
 
 Differences from the original paper
 ------------------------------------
-1. F matrix: Solà 2017 ESKF linearized F matrix (same as eskf_enhanced.py)
+1. F matrix: Solà 2017 ESKF linearized F matrix (same as esekfs_enhanced.py)
    is used for error-state covariance propagation.  The original paper learns
    a generic W_xx matrix via gradient descent (Eqs. 24-32).  Solà's F is
    more numerically stable and leverages the established kinematic model.
 
-2. State space: 15-state ESKF [δp, δv, δφ, δb_a, δb_g] in navigation space,
-   identical to eskf_enhanced.py.  The original paper uses a generic latent
+2. State space: 15-state ESKF [δp, δv, δα, δb_a, δb_g] in navigation space,
+   identical to esekfs_enhanced.py.  The original paper uses a generic latent
    vector state.
 
 3. GPS update: standard ESKF position update (H = [I_3 | 0_3×12]) applied
@@ -65,7 +65,7 @@ DEFAULT_PARAMS = {
     # LSTM architecture
     'latent_dim': 128,
     'num_layers':  2,
-    # Process noise — same structure as eskf_enhanced.py
+    # Process noise — same structure as esekfs_enhanced.py
     'Qpos':      1e-4,
     'Qvel':      1e-3,
     'QorientXY': 1e-5,
@@ -156,7 +156,7 @@ def _load_model(weights_path: Path, latent_dim: int, num_layers: int,
     return model
 
 
-# ── Quaternion utilities (copied from eskf_enhanced.py) ───────────────────────
+# ── Quaternion utilities (copied from esekfs_enhanced.py) ───────────────────────
 
 def _skew(v):
     return np.array([
@@ -414,11 +414,11 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             b_a  += dx[9:12]
             b_g  += dx[12:15]
 
-            delta_theta = dx[6:9]
-            q = _qnorm(_qmul(q, _qfrom_axis_angle(delta_theta)))
+            delta_alpha = dx[6:9]
+            q = _qnorm(_qmul(q, _qfrom_axis_angle(delta_alpha)))
 
             G           = np.eye(15)
-            G[6:9, 6:9] = np.eye(3) - 0.5 * _skew(delta_theta)
+            G[6:9, 6:9] = np.eye(3) - 0.5 * _skew(delta_alpha)
             P           = G @ P @ G.T
             dx[:]       = 0.
 

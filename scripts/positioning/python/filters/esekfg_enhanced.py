@@ -1,16 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-EKF Vanilla — Euler-angle Error-State Extended Kalman Filter.
-GPS position update only.
+EKF Enhanced — Euler-angle EKF with Non-Holonomic Constraints (NHC) and
+Zero-Velocity Updates (ZUPT).
 
-Reference:
+GPS position update + NHC + ZUPT.
+
+References:
     Groves, P.D., "Principles of GNSS, Inertial, and Multisensor Integrated
     Navigation Systems", 2nd ed., Artech House, 2013. Ch. 14.
+
+    Dissanayake, G. et al., "The aiding of a low-cost strapdown inertial
+    measurement unit using vehicle model constraints for land vehicle
+    applications", IEEE Transactions on Vehicular Technology, 2001.
+    DOI: 10.1109/25.892572
+
+    Foxlin, E., "Pedestrian Tracking with Shoe-Mounted Inertial Sensors",
+    IEEE Computer Graphics & Applications, vol. 25, no. 6, 2005.
+    DOI: 10.1109/MCG.2005.140
 
 State vector (15 elements — error state):
     dx[0:3]   — position error  δp  in ENU  [m]
     dx[3:6]   — velocity error  δv  in ENU  [m/s]
-    dx[6:9]   — attitude error  δφ  in navigation frame  [rad]
+    dx[6:9]   — attitude error  δε  in navigation frame  [rad]
     dx[9:12]  — accelerometer bias  b_a  in FLU body frame  [m/s²]
     dx[12:15] — gyroscope bias  b_g  in FLU body frame  [rad/s]
 
@@ -18,11 +29,10 @@ Conventions:
     IMU       : FLU frame (Forward, Left, Up)
     Navigation: ENU frame (East, North, Up)
     Euler angles: ZYX convention, stored as [roll, pitch, yaw]  [rad]
-    Attitude error δφ: defined in the navigation frame (Groves convention)
 """
 import numpy as np
 import pymap3d as pm
-from math import sin, cos, tan
+from math import sin, cos
 
 # ── Physical constants ─────────────────────────────────────────────────────────
 GRAVITY = np.array([0.0, 0.0, -9.81])   # ENU [m/s²]
@@ -51,13 +61,22 @@ DEFAULT_PARAMS = {
     'P_orient_std': 0.239,
     'P_acc_std':    0.01,
     'P_gyr_std':    0.001,
+
+    # NHC — Non-Holonomic Constraints (Dissanayake 2001)
+    # Vehicle cannot slide sideways or fly: v_lateral ≈ v_vertical ≈ 0 in body frame.
+    'Rnhc': 0.1,      # measurement noise [(m/s)²]
+
+    # ZUPT — Zero-Velocity Update (Foxlin 2005)
+    # When the vehicle is stationary the ENU velocity should be ~0.
+    'Rzupt':                0.01,    # measurement noise [(m/s)²]
+    'zupt_accel_threshold': 0.3,     # |‖acc_b‖ − 9.81| threshold [m/s²]
+    'zupt_gyro_threshold':  0.05,    # ‖ω_b‖ threshold [rad/s]
 }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _skew(v):
-    """3×3 skew-symmetric matrix of vector v."""
     return np.array([
         [ 0.0,   -v[2],  v[1]],
         [ v[2],   0.0,  -v[0]],
@@ -66,10 +85,6 @@ def _skew(v):
 
 
 def _euler_to_Rbn(rpy):
-    """
-    Rotation matrix R_bn (body→navigation) from ZYX Euler angles [roll, pitch, yaw].
-    Maps FLU body vectors to ENU navigation vectors.
-    """
     roll, pitch, yaw = rpy
     cr, sr = cos(roll),  sin(roll)
     cp, sp = cos(pitch), sin(pitch)
@@ -82,19 +97,14 @@ def _euler_to_Rbn(rpy):
 
 
 def _euler_rate_matrix(rpy):
-    """
-    Euler-rate matrix T such that ṙpy = T @ ω_body.
-    Gyro measures at the same time, but euler angles are applied sequentially (ZYX).
-    ZYX convention: [roll_dot, pitch_dot, yaw_dot] = T @ [ω_x, ω_y, ω_z].
-    """
     roll, pitch, _ = rpy
     sr, cr = sin(roll), cos(roll)
     cp = cos(pitch)
-    tp = sin(pitch) / cp if abs(cp) > 1e-6 else 0.0
-    rcp = 1.0 / cp if abs(cp) > 1e-6 else 0.0
+    tp  = sin(pitch) / cp if abs(cp) > 1e-6 else 0.0
+    rcp = 1.0 / cp         if abs(cp) > 1e-6 else 0.0
     return np.array([
-        [1.0,  sr * tp,   cr * tp],
-        [0.0,  cr,        -sr    ],
+        [1.0,  sr * tp,   cr * tp ],
+        [0.0,  cr,        -sr     ],
         [0.0,  sr * rcp,  cr * rcp],
     ])
 
@@ -103,18 +113,17 @@ def _euler_rate_matrix(rpy):
 
 def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     """
-    Run the vanilla Euler-angle EKF (GPS position update only).
+    Run EKF with NHC + ZUPT enhancements.
 
     Args:
         nav_data       : NavigationData dataclass (data_loader.py).
         params         : Optional dict overriding DEFAULT_PARAMS.
         outage_config  : Optional {'start': t1_s, 'duration': d_s} for GPS blackout.
-        use_3d_rotation: True → full roll/pitch/yaw; False → yaw-only (2D flat-earth).
+        use_3d_rotation: True → full roll/pitch/yaw; False → yaw-only (2D).
 
     Returns:
         dict with keys: p, v, r, bias_acc, bias_gyr,
                         std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr.
-        All arrays are Nx3, ENU/FLU where applicable.
     """
     p_cfg = dict(DEFAULT_PARAMS)
     if params:
@@ -132,7 +141,6 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     Ts = 1.0 / frecIMU
     NN = lla.shape[0]
 
-    # GPS outage window [samples]
     if outage_config is None:
         A, B = 0, 0
     else:
@@ -158,15 +166,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
     pIMU = pos[0, :].copy()
     vIMU = vel[0, :].copy()
-    rpy  = orient[0, :].copy()   # [roll, pitch, yaw]
+    rpy  = orient[0, :].copy()
     b_a  = np.zeros(3)
     b_g  = np.zeros(3)
-    dx   = np.zeros(15)          # error state (stays ~0 between updates)
+    dx   = np.zeros(15)
 
     beta_acc = p_cfg['beta_acc']
     beta_gyr = p_cfg['beta_gyr']
 
-    # ── Process noise ──────────────────────────────────────────────────────────
     Q = np.zeros((15, 15))
     Q[0:3,   0:3]   = np.eye(3) * (p_cfg['Qpos'] * Ts**2)
     Q[3:6,   3:6]   = np.eye(3) * (p_cfg['Qvel'] * Ts**2)
@@ -174,7 +181,6 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     Q[9:12,  9:12]  = np.eye(3) * (p_cfg['Qacc'] * Ts)
     Q[12:15, 12:15] = np.diag([p_cfg['QgyrXY'], p_cfg['QgyrXY'], p_cfg['QgyrZ']]) * Ts
 
-    # ── Initial covariance ─────────────────────────────────────────────────────
     P = np.diag([
         p_cfg['P_pos_std'],    p_cfg['P_pos_std'],    p_cfg['P_pos_std'],
         p_cfg['P_vel_std'],    p_cfg['P_vel_std'],    p_cfg['P_vel_std'],
@@ -183,84 +189,120 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],
     ]) ** 2
 
-    # ── Measurement model (GPS position) ───────────────────────────────────────
-    R_pos = np.eye(3) * p_cfg['Rpos']
-    H = np.zeros((3, 15))
-    H[0:3, 0:3] = np.eye(3)    # observe δp directly
+    R_pos  = np.eye(3) * p_cfg['Rpos']
+    R_nhc  = np.eye(2) * p_cfg['Rnhc']
+    R_zupt = np.eye(3) * p_cfg['Rzupt']
+
+    H_pos = np.zeros((3, 15))
+    H_pos[0:3, 0:3] = np.eye(3)
 
     # ── Main loop ──────────────────────────────────────────────────────────────
     for i in range(NN - 1):
 
-        # 1. Bias-corrected IMU measurements
         acc_b   = accel_flu[i, :] - b_a
         omega_b = gyro_flu[i, :]  - b_g
 
-        # 2. Nominal-state propagation (Euler angle mechanization)
+        # Nominal-state propagation
         if use_3d_rotation:
             Rbn = _euler_to_Rbn(rpy)
             T   = _euler_rate_matrix(rpy)
             rpy = rpy + Ts * (T @ omega_b)
         else:
-            # 2D mode: yaw-only rotation, flat-earth
             yaw = rpy[2]
             cy, sy = cos(yaw), sin(yaw)
             Rbn = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
             rpy[2] = rpy[2] + Ts * omega_b[2]
 
-        # Wrap yaw to (−π, π]
         rpy[2] = (rpy[2] + np.pi) % (2.0 * np.pi) - np.pi
 
         accENU = Rbn @ acc_b
         pIMU   = pIMU + Ts * vIMU + 0.5 * Ts**2 * (accENU + g)
         vIMU   = vIMU + Ts * (accENU + g)
 
-        # 3. Error-state transition matrix F  (15-state, flat-Earth ENU — "Groves/ENU" formulation)
-        #
-        #    This is the φ-angle (nav-frame) error model from Groves (2013) Ch. 12,
-        #    simplified for short-range navigation: Earth-rate, transport-rate and
-        #    gravity-gradient terms are dropped, and position error is kept in
-        #    Cartesian ENU metres instead of geodetic (lat/lon/h).
-        #    Sensor biases follow a Gauss-Markov model (Groves eq. 3.3).
-        #
-        #    δṗ = δv                          position error integrates velocity error
-        #    δv̇ = −[f^n ×] δφ + Rbn @ b_a   velocity error from attitude tilt and accel bias
-        #    δφ̇ = −Rbn @ b_g                 attitude error from gyro bias
-        #    ḃ_a = −β_acc · b_a              accel bias decays with time constant 1/β_acc
-        #    ḃ_g = −β_gyr · b_g              gyro  bias decays with time constant 1/β_gyr
+        # Error-state transition matrix F (nav-frame attitude error, Groves Ch. 14)
         F = np.zeros((15, 15))
-        F[0:3,   3:6]   = np.eye(3)               # position  ← velocity error
-        F[3:6,   6:9]   = -_skew(accENU)          # velocity  ← attitude error (via skew of nav-frame specific force)
-        F[3:6,   9:12]  = Rbn                      # velocity  ← accel bias (body→nav)
-        F[6:9,   12:15] = -Rbn                     # attitude  ← gyro bias (body→nav)
-        F[9:12,  9:12]  = beta_acc * np.eye(3)    # accel bias Gauss-Markov decay (β already negative)
-        F[12:15, 12:15] = beta_gyr * np.eye(3)    # gyro  bias Gauss-Markov decay (β already negative)
+        F[0:3,   3:6]   = np.eye(3)
+        F[3:6,   6:9]   = -_skew(accENU)
+        F[3:6,   9:12]  = Rbn
+        F[6:9,   12:15] = -Rbn
+        F[9:12,  9:12]  = beta_acc * np.eye(3)
+        F[12:15, 12:15] = beta_gyr * np.eye(3)
 
         Fd = np.eye(15) + F * Ts
-
-        # Prediction step
         P  = Fd @ P @ Fd.T + Q
         dx = Fd @ dx
 
-        # 4. GPS position update (sparse: 3 observations)
-        gps_ok    = nav_data.gps_available[i]
+        update_occurred = False
+
+        # ── A. GPS Position Update ─────────────────────────────────────────────
+        gps_ok     = nav_data.gps_available[i]
         not_outage = ((i + 1) < A) or ((i + 1) > B)
 
         if gps_ok and not_outage:
             p_gps = np.array(pm.geodetic2enu(
                 lla[i, 0], lla[i, 1], lla[i, 2], lla0[0], lla0[1], lla0[2]))
             z     = p_gps - pIMU
-            innov = z - H @ dx
+            innov = z - H_pos @ dx
 
-            S     = H @ P @ H.T + R_pos
+            S     = H_pos @ P @ H_pos.T + R_pos
             S_reg = S + 1e-9 * np.eye(3)
-            K     = np.linalg.solve(S_reg, H @ P).T   # stable solve, 15×3
+            K     = np.linalg.solve(S_reg, H_pos @ P).T   # 15×3, stable solve
+            dx    = dx + K @ innov
+            IKH   = np.eye(15) - K @ H_pos
+            P     = IKH @ P @ IKH.T + K @ R_pos @ K.T    # Joseph form
+            P     = 0.5 * (P + P.T)
+            update_occurred = True
 
-            dx = dx + K @ innov
-            IKH = np.eye(15) - K @ H
-            P   = IKH @ P @ IKH.T + K @ R_pos @ K.T  # Joseph form
-            P   = 0.5 * (P + P.T)
+        # ── B. Non-Holonomic Constraints (NHC) ────────────────────────────────
+        # Vehicle cannot slide sideways or fly vertically.
+        # Measurement: v_lateral = v_vertical = 0  in body frame.
+        # H maps [δv(nav), δε(nav)] to [δv_lateral, δv_vertical] in body frame.
+        # (Dissanayake 2001; H derivation: δv_body = Rnb @ δv + skew(v_body) @ δε)
+        Rnb    = Rbn.T
+        v_body = Rnb @ vIMU
+        z_nhc  = -v_body[1:3]   # target: lateral and vertical body speed = 0
 
-            # Error injection (nav-frame attitude error added directly to rpy)
+        H_v_nhc     = Rnb[1:3, :]            # 2×3 velocity block
+        H_theta_nhc = _skew(v_body)[1:3, :]  # 2×3 attitude block
+        H_nhc       = np.hstack((H_v_nhc, H_theta_nhc))  # 2×6
+
+        innov_nhc = z_nhc - H_nhc @ dx[3:9]
+        P_36      = P[3:9, 3:9]
+        S_nhc     = H_nhc @ P_36 @ H_nhc.T + R_nhc
+        S_nhc_reg = S_nhc + 1e-9 * np.eye(2)
+        K_nhc     = np.linalg.solve(S_nhc_reg, H_nhc @ P[3:9, :]).T  # 15×2
+
+        dx = dx + K_nhc @ innov_nhc
+        H_nhc_full = np.zeros((2, 15)); H_nhc_full[:, 3:9] = H_nhc
+        IKH_nhc    = np.eye(15) - K_nhc @ H_nhc_full
+        P  = IKH_nhc @ P @ IKH_nhc.T + K_nhc @ R_nhc @ K_nhc.T      # Joseph form
+        P  = 0.5 * (P + P.T)
+        update_occurred = True
+
+        # ── C. Zero-Velocity Update (ZUPT) ────────────────────────────────────
+        # Trigger: near-zero specific force deviation and near-zero gyro.
+        accel_dev = abs(np.linalg.norm(acc_b) - 9.81)
+        gyro_mag  = np.linalg.norm(omega_b)
+        speed     = np.linalg.norm(vIMU)
+
+        if (accel_dev < p_cfg['zupt_accel_threshold'] and
+                gyro_mag  < p_cfg['zupt_gyro_threshold'] and
+                speed < 1.0):
+            z_zupt = -vIMU
+            innov_zupt = z_zupt - dx[3:6]
+
+            S_zupt     = P[3:6, 3:6] + R_zupt
+            S_zupt_reg = S_zupt + 1e-9 * np.eye(3)
+            K_zupt     = np.linalg.solve(S_zupt_reg, P[3:6, :]).T     # 15×3
+            dx = dx + K_zupt @ innov_zupt
+            H_zupt = np.zeros((3, 15)); H_zupt[:, 3:6] = np.eye(3)
+            IKH_zupt = np.eye(15) - K_zupt @ H_zupt
+            P  = IKH_zupt @ P @ IKH_zupt.T + K_zupt @ R_zupt @ K_zupt.T  # Joseph form
+            P  = 0.5 * (P + P.T)
+            update_occurred = True
+
+        # ── Error injection and reset ──────────────────────────────────────────
+        if update_occurred:
             pIMU   += dx[0:3]
             vIMU   += dx[3:6]
             rpy    += dx[6:9]
@@ -269,7 +311,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             rpy[2]  = (rpy[2] + np.pi) % (2.0 * np.pi) - np.pi
             dx[:]   = 0.0
 
-        # 5. Store outputs
+        # Store outputs
         pos[i+1, :]       = pIMU
         vel[i+1, :]       = vIMU
         rpy_out[i+1, :]   = rpy

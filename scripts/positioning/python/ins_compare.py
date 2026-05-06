@@ -43,8 +43,8 @@ import visualize
 import visualize_state
 import visualize_compare
 from filters import (
-    ekf_vanilla, ekf_enhanced,
-    eskf_vanilla, eskf_enhanced,
+    esekfg_vanilla, esekfg_enhanced,
+    esekfs_vanilla, esekfs_enhanced,
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
@@ -69,13 +69,13 @@ def _load_tuned_params(nav_data, mode_3d):
     DL filters (tlio, deep_kf, tartan_imu) share the same classical-filter
     parameter names (Qpos, Qvel, Rpos, P_pos_std, …) as the ESKF/EKF.  When
     no DL-specific tuned params exist, derive them from the best available
-    classical filter (eskf_enhanced → eskf_vanilla → ekf_enhanced → ekf_vanilla).
+    classical filter (esekfs_enhanced → esekfs_vanilla → esekfg_enhanced → esekfg_vanilla).
     """
     result = {}
     loo_key = f'__loo_held_{nav_data.dataset_name}__'
     cv_key  = '__cv_kitti__'
 
-    for key in ['ekf_vanilla', 'ekf_enhanced', 'eskf_vanilla', 'eskf_enhanced',
+    for key in ['esekfg_vanilla', 'esekfg_enhanced', 'esekfs_vanilla', 'esekfs_enhanced',
                 'iekf_vanilla', 'iekf_enhanced']:
         p = (fp.get(key, mode_3d, loo_key)
              or fp.get(key, mode_3d, nav_data.dataset_name)
@@ -88,10 +88,10 @@ def _load_tuned_params(nav_data, mode_3d):
     # parameters (Qpos, Qvel, Rpos, P_pos_std …) are identical in name to
     # the ESKF/EKF tuned set.  Use the best available tuned classical filter
     # so DL filters benefit from genetic optimisation without a separate run.
-    _best_classical = (result.get('eskf_enhanced')
-                       or result.get('eskf_vanilla')
-                       or result.get('ekf_enhanced')
-                       or result.get('ekf_vanilla'))
+    _best_classical = (result.get('esekfs_enhanced')
+                       or result.get('esekfs_vanilla')
+                       or result.get('esekfg_enhanced')
+                       or result.get('esekfg_vanilla'))
 
     if _best_classical is not None:
         # Keys shared directly between classical filters and DL filter params
@@ -120,10 +120,10 @@ def _load_tuned_params(nav_data, mode_3d):
 
 # ── Filter configurations ──────────────────────────────────────────────────────
 FILTER_CONFIGS = [
-    {'name': 'EKF Vanilla',    'key': 'ekf_vanilla',   'module': ekf_vanilla},
-    {'name': 'EKF Enhanced',   'key': 'ekf_enhanced',  'module': ekf_enhanced},
-    {'name': 'ESKF Vanilla',   'key': 'eskf_vanilla',  'module': eskf_vanilla},
-    {'name': 'ESKF Enhanced',  'key': 'eskf_enhanced', 'module': eskf_enhanced},
+    {'name': 'ES-EKF Groves',     'key': 'esekfg_vanilla',  'module': esekfg_vanilla},
+    {'name': 'ES-EKF Groves+',    'key': 'esekfg_enhanced', 'module': esekfg_enhanced},
+    {'name': 'ES-EKF Solà',       'key': 'esekfs_vanilla',  'module': esekfs_vanilla},
+    {'name': 'ES-EKF Solà+',      'key': 'esekfs_enhanced', 'module': esekfs_enhanced},
     {'name': 'IEKF Vanilla',   'key': 'iekf_vanilla',  'module': iekf_vanilla},
     {'name': 'IEKF Enhanced',  'key': 'iekf_enhanced', 'module': iekf_enhanced},
     {'name': 'IMU Only',       'key': 'imu_only',      'module': imu_only},
@@ -278,7 +278,7 @@ def main():
         logger.info("Running RTS smoother…")
         rts_result = rts_smoother.run(
             nav_data=nav_data,
-            params=TUNED_PARAMS.get('ekf_enhanced', None),
+            params=TUNED_PARAMS.get('esekfg_enhanced', None),
             use_3d_rotation=use_3d,
         )
         p_rts = rts_result['p']

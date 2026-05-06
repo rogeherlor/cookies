@@ -14,7 +14,7 @@
 #   ./run_genetic_loo.sh                                         # kitti, all folds, default outage
 #   ./run_genetic_loo.sh --dataset cookies                       # cookies, all folds
 #   ./run_genetic_loo.sh --outage-start 80 --outage-duration 40  # custom outage
-#   ./run_genetic_loo.sh --filters eskf_enhanced iekf_enhanced   # specific filters
+#   ./run_genetic_loo.sh --filters esekfs_enhanced iekf_enhanced   # specific filters
 
 set -euo pipefail
 

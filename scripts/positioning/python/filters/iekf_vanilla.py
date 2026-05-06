@@ -16,13 +16,13 @@ Implementation notes:
 
     Error definition: left-invariant error  η = X̂⁻¹ · X.
     At identity the Lie algebra coordinates give:
-        ξ[0:3]  — attitude error  φ      in FLU body frame  [rad]
+        ξ[0:3]  — attitude error  ξ_R    in FLU body frame  [rad]   (δφ in some derivations)
         ξ[3:6]  — velocity error  ξ_v    in FLU body frame  [m/s]
         ξ[6:9]  — position error  ξ_p    in FLU body frame  [m]
         ξ[9:12] — accelerometer bias error  δb_a  [m/s²]
         ξ[12:15]— gyroscope bias error      δb_g  [rad/s]
 
-    Key property: the transition Jacobian for (φ, ξ_v, ξ_p) is
+    Key property: the transition Jacobian for (ξ_R, ξ_v, ξ_p) is
     state-independent (depends only on slowly-varying bias estimates),
     improving linearization robustness vs. the standard EKF/ESKF.
 
@@ -197,7 +197,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     Q[9:12,  9:12]  = np.eye(3) * (p_cfg['Qacc'] * Ts)
     Q[12:15, 12:15] = np.diag([p_cfg['QgyrXY'], p_cfg['QgyrXY'], p_cfg['QgyrZ']]) * Ts
 
-    # ── Initial covariance (same ordering as error-state: φ, ξ_v, ξ_p, b_a, b_g) ──
+    # ── Initial covariance (same ordering as error-state: ξ_R, ξ_v, ξ_p, b_a, b_g) ──
     P = np.diag([
         p_cfg['P_orient_std'], p_cfg['P_orient_std'], p_cfg['P_orient_std'] * 2,
         p_cfg['P_vel_std'],    p_cfg['P_vel_std'],    p_cfg['P_vel_std'],
@@ -227,14 +227,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         vIMU   = vIMU + Ts * (accENU + g)
 
         # ── Left-invariant Jacobian (continuous time, Barrau 2017 Eq. 26) ────
-        # Error state ordering: [φ(3), ξ_v(3), ξ_p(3), δb_a(3), δb_g(3)]
+        # Error state ordering: [ξ_R(3), ξ_v(3), ξ_p(3), δb_a(3), δb_g(3)]
         # Key property: Ajac[0:9, 0:9] depends only on b̂_a, b̂_g, not on R/v/p.
         Ajac = np.zeros((15, 15))
         # Attitude dynamics
-        Ajac[0:3,  0:3 ] = -_skew(b_g)     # φ̇ ~ −b̂_g × φ
-        Ajac[0:3,  12:15] = -np.eye(3)     # φ̇ ~ −δb_g
+        Ajac[0:3,  0:3 ] = -_skew(b_g)     # ξ̇_R ~ −b̂_g × ξ_R
+        Ajac[0:3,  12:15] = -np.eye(3)     # ξ̇_R ~ −δb_g
         # Velocity dynamics (body frame)
-        Ajac[3:6,  0:3 ] = -_skew(b_a)    # ξ̇_v ~ −b̂_a × φ
+        Ajac[3:6,  0:3 ] = -_skew(b_a)    # ξ̇_v ~ −b̂_a × ξ_R
         Ajac[3:6,  3:6 ] = -_skew(b_g)    # ξ̇_v ~ −b̂_g × ξ_v
         Ajac[3:6,  9:12] = -np.eye(3)     # ξ̇_v ~ −δb_a
         # Position dynamics (body frame)
@@ -285,13 +285,13 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             b_g  += xi[12:15]
 
             # Attitude update via quaternion multiplication (same as ESKF)
-            delta_theta = xi[0:3]
-            q = _qnorm(_qmul(q, _qfrom_axis_angle(delta_theta)))
+            xi_R = xi[0:3]
+            q = _qnorm(_qmul(q, _qfrom_axis_angle(xi_R)))
             Rbn = _qto_Rbn(q)   # update Rbn after attitude correction
 
             # Covariance reset (Solà Eq. 288; only attitude block is nonlinear)
             G           = np.eye(15)
-            G[0:3, 0:3] = np.eye(3) - 0.5 * _skew(delta_theta)
+            G[0:3, 0:3] = np.eye(3) - 0.5 * _skew(xi_R)
             P           = G @ P @ G.T
 
             xi[:] = 0.0
@@ -301,7 +301,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         rpy_out[i+1, :]   = _qto_rpy(q)
         b_acc_out[i+1, :] = b_a
         b_gyr_out[i+1, :] = b_g
-        # Map IEKF covariance back to ENU for output (φ, ξ_v, ξ_p → p, v, orient)
+        # Map IEKF covariance back to ENU for output (ξ_R, ξ_v, ξ_p → p, v, orient)
         # For display purposes, multiply body-frame std by Rbn to get nav-frame std
         cov_p_nav   = Rbn @ P[6:9, 6:9] @ Rbn.T
         cov_v_nav   = Rbn @ P[3:6, 3:6] @ Rbn.T

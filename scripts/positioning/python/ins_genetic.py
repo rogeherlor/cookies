@@ -16,7 +16,7 @@ Usage:
 IMPORTANT
 ---------
 Run once per filter variant (6 runs for a fair comparison):
-    ekf_vanilla, ekf_enhanced, eskf_vanilla, eskf_enhanced,
+    esekfg_vanilla, esekfg_enhanced, esekfs_vanilla, esekfs_enhanced,
     iekf_vanilla, iekf_enhanced.
 "imu_only" has no tunable parameters and should not be optimised.
 
@@ -39,8 +39,8 @@ import pymap3d as pm
 import ins_config
 import filter_params as fp
 from filters import (
-    ekf_vanilla, ekf_enhanced,
-    eskf_vanilla, eskf_enhanced,
+    esekfg_vanilla, esekfg_enhanced,
+    esekfs_vanilla, esekfs_enhanced,
     iekf_vanilla, iekf_enhanced,
 )
 
@@ -53,10 +53,10 @@ FILTER_NAME     = ins_config.FILTER
 
 # ── Filter dispatch (imu_only excluded — nothing to optimise) ─────────────────
 FILTERS = {
-    "ekf_vanilla":   ekf_vanilla,
-    "ekf_enhanced":  ekf_enhanced,
-    "eskf_vanilla":  eskf_vanilla,
-    "eskf_enhanced": eskf_enhanced,
+    "esekfg_vanilla":   esekfg_vanilla,
+    "esekfg_enhanced":  esekfg_enhanced,
+    "esekfs_vanilla":  esekfs_vanilla,
+    "esekfs_enhanced": esekfs_enhanced,
     "iekf_vanilla":  iekf_vanilla,
     "iekf_enhanced": iekf_enhanced,
 }

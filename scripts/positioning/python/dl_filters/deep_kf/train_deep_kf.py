@@ -15,7 +15,7 @@ Training objective (Hosseinyalamdary 2018, Eqs. 27-28)
 Two-phase training faithful to the original DKF paper:
 
 Phase 1: Generate ESKF posterior trajectories x_t^+ for each training sequence
-          by running eskf_enhanced with GPS updates.
+          by running esekfs_enhanced with GPS updates.
 
 Phase 2: Teacher-forced sequence training:
     - Input:  x_{t-1}^+ (15D posterior state from ESKF)
@@ -74,9 +74,9 @@ def generate_eskf_posteriors(nav):
     -------
     x_post : (N, 15) float32 — [p(3), v(3), rpy(3), b_acc(3), b_gyr(3)]
     """
-    import eskf_enhanced
+    import esekfs_enhanced
 
-    result = eskf_enhanced.run(nav)
+    result = esekfs_enhanced.run(nav)
     x_post = np.concatenate([
         result['p'],         # (N, 3) position ENU
         result['v'],         # (N, 3) velocity ENU

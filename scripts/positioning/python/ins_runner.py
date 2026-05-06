@@ -35,8 +35,8 @@ import metrics
 import visualize
 import visualize_state
 from filters import (
-    ekf_vanilla, ekf_enhanced,
-    eskf_vanilla, eskf_enhanced,
+    esekfg_vanilla, esekfg_enhanced,
+    esekfs_vanilla, esekfs_enhanced,
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
@@ -48,10 +48,10 @@ from dl_filters.tartan_imu import tartan_runner
 
 # ── Filter / smoother dispatch table ──────────────────────────────────────────
 FILTERS = {
-    "ekf_vanilla":   ekf_vanilla,
-    "ekf_enhanced":  ekf_enhanced,
-    "eskf_vanilla":  eskf_vanilla,
-    "eskf_enhanced": eskf_enhanced,
+    "esekfg_vanilla":   esekfg_vanilla,
+    "esekfg_enhanced":  esekfg_enhanced,
+    "esekfs_vanilla":  esekfs_vanilla,
+    "esekfs_enhanced": esekfs_enhanced,
     "iekf_vanilla":  iekf_vanilla,
     "iekf_enhanced": iekf_enhanced,
     "imu_only":      imu_only,

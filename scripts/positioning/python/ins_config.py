@@ -22,12 +22,12 @@ import filter_params as fp
 
 # ── Filter / smoother selection ────────────────────────────────────────────────
 # Classical filters:
-#   "ekf_vanilla"    — Euler-angle EKF, GPS-only  (Groves 2013)
-#   "ekf_enhanced"   — Euler-angle EKF + NHC + ZUPT
-#   "eskf_vanilla"   — Quaternion ESKF, GPS-only  (Solà 2017)
-#   "eskf_enhanced"  — Quaternion ESKF + NHC + ZUPT
-#   "iekf_vanilla"   — Left-invariant EKF, GPS-only  (Barrau & Bonnabel 2017)
-#   "iekf_enhanced"  — Left-invariant EKF + NHC + ZUPT
+#   "esekfg_vanilla"   — ES-EKF Groves, GPS-only  (Euler nav-frame phi-angle, Groves 2013)
+#   "esekfg_enhanced"  — ES-EKF Groves + NHC + ZUPT
+#   "esekfs_vanilla"   — ES-EKF Solà, GPS-only  (quaternion body-frame error, Solà 2017)
+#   "esekfs_enhanced"  — ES-EKF Solà + NHC + ZUPT
+#   "iekf_vanilla"     — Left-invariant EKF, GPS-only  (Barrau & Bonnabel 2017)
+#   "iekf_enhanced"    — Left-invariant EKF + NHC + ZUPT
 #   "imu_only"       — Pure dead reckoning (no GNSS, no filter)
 # Smoothers (see smoothers/):
 #   "rts_smoother"   — Rauch-Tung-Striebel batch smoother (uses all GPS — not causal)

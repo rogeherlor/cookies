@@ -10,7 +10,7 @@ Reference:
 State vector (15 elements — error state):
     dx[0:3]   — position error  δp  in ENU  [m]
     dx[3:6]   — velocity error  δv  in ENU  [m/s]
-    dx[6:9]   — attitude error  δφ  in FLU body frame  [rad]   (Solà convention)
+    dx[6:9]   — attitude error  δα  in FLU body frame  [rad]   (Solà convention; δθ in the original paper)
     dx[9:12]  — accelerometer bias  b_a  in FLU body frame  [m/s²]
     dx[12:15] — gyroscope bias  b_g  in FLU body frame  [rad/s]
 
@@ -262,12 +262,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             b_a  += dx[9:12]
             b_g  += dx[12:15]
 
-            delta_theta = dx[6:9]
-            q = _qnorm(_qmul(q, _qfrom_axis_angle(delta_theta)))
+            delta_alpha = dx[6:9]
+            q = _qnorm(_qmul(q, _qfrom_axis_angle(delta_alpha)))
 
-            # Covariance reset via G-matrix (Solà Eq. 288)
+            # Covariance reset via G-matrix (Solà Eq. 288): G_α = I − [½ δα]_×
             G           = np.eye(15)
-            G[6:9, 6:9] = np.eye(3) - 0.5 * _skew(delta_theta)
+            G[6:9, 6:9] = np.eye(3) - 0.5 * _skew(delta_alpha)
             P           = G @ P @ G.T
 
             dx[:] = 0.0

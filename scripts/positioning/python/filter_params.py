@@ -18,11 +18,11 @@ Structure of filter_params.json:
 
 Usage (read):
     import filter_params
-    p = filter_params.get('eskf_enhanced', mode_3d=True, dataset='10_03_0027')
+    p = filter_params.get('esekfs_enhanced', mode_3d=True, dataset='10_03_0027')
     # Returns the params dict, or None if not yet tuned.
 
 Usage (write — called automatically by optimisers):
-    filter_params.set('eskf_enhanced', mode_3d=True, dataset='10_03_0027',
+    filter_params.set('esekfs_enhanced', mode_3d=True, dataset='10_03_0027',
                       params={...}, cost=12.3)
 
 Usage (summary):
@@ -75,7 +75,7 @@ def set(filter_name: str, mode_3d: bool, dataset: str,
     Save (or overwrite) the parameter dict for (filter, mode, dataset).
 
     Args:
-        filter_name : e.g. 'eskf_enhanced'
+        filter_name : e.g. 'esekfs_enhanced'
         mode_3d     : True = 3D, False = 2D
         dataset     : e.g. '10_03_0027'
         params      : the parameter dict to store

@@ -22,7 +22,7 @@ Typical use:
     python ins_genetic_fast.py                        # single dataset from ins_config
     python ins_genetic_fast.py --seq 02               # LOO split, test on seq 02
     python ins_genetic_fast.py --seq 01 --3d          # only 3D mode
-    python ins_genetic_fast.py --seq 08 eskf_enhanced # specific filter
+    python ins_genetic_fast.py --seq 08 esekfs_enhanced # specific filter
 
 Tune quality vs. speed with MAXITER and POPSIZE at the top of this file.
 For production-quality parameters, use ins_genetic_cv.py (40 generations,
@@ -46,8 +46,8 @@ import filter_params as fp
 from data_loader import (get_kitti_dataset, KITTI_SEQ_TO_DRIVE,
                          get_cookies_dataset_by_id, COOKIES_CLEAN_SEQS)
 from filters import (
-    ekf_vanilla, ekf_enhanced,
-    eskf_vanilla, eskf_enhanced,
+    esekfg_vanilla, esekfg_enhanced,
+    esekfs_vanilla, esekfs_enhanced,
     iekf_vanilla, iekf_enhanced,
 )
 
@@ -63,10 +63,10 @@ POPSIZE = 8
 #   Rpos, window_seconds/stride_seconds (TLIO), latent_dim (Deep KF), etc.
 # Add them here to include in the genetic sweep.
 ALL_FILTERS = [
-    'ekf_vanilla',
-    'ekf_enhanced',
-    'eskf_vanilla',
-    'eskf_enhanced',
+    'esekfg_vanilla',
+    'esekfg_enhanced',
+    'esekfs_vanilla',
+    'esekfs_enhanced',
     'iekf_vanilla',
     'iekf_enhanced',
     # 'tlio',       # uncomment after training weights are available
@@ -75,10 +75,10 @@ ALL_FILTERS = [
 ]
 
 _FILTER_MODULES = {
-    'ekf_vanilla':   ekf_vanilla,
-    'ekf_enhanced':  ekf_enhanced,
-    'eskf_vanilla':  eskf_vanilla,
-    'eskf_enhanced': eskf_enhanced,
+    'esekfg_vanilla':   esekfg_vanilla,
+    'esekfg_enhanced':  esekfg_enhanced,
+    'esekfs_vanilla':  esekfs_vanilla,
+    'esekfs_enhanced': esekfs_enhanced,
     'iekf_vanilla':  iekf_vanilla,
     'iekf_enhanced': iekf_enhanced,
 }

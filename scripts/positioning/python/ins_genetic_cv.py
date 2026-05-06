@@ -19,7 +19,7 @@ Typical usage:
     python ins_genetic_cv.py --outages 2                # outage configs per dataset
     python ins_genetic_cv.py --3d                       # only 3D mode
     python ins_genetic_cv.py --2d                       # only 2D mode
-    python ins_genetic_cv.py eskf_enhanced iekf_vanilla # specific filters
+    python ins_genetic_cv.py esekfs_enhanced iekf_vanilla # specific filters
     python ins_genetic_cv.py --seed 42                  # random seed
     python ins_genetic_cv.py --maxiter 40 --popsize 15  # DE quality (defaults)
     python ins_genetic_cv.py --workers 8                # parallel workers (-1 = all CPUs)
@@ -47,8 +47,8 @@ import filter_params as fp
 from data_loader import (get_kitti_dataset, get_cookies_dataset,
                          get_cookies_dataset_by_id, COOKIES_CLEAN_SEQS, NavigationData)
 from filters import (
-    ekf_vanilla, ekf_enhanced,
-    eskf_vanilla, eskf_enhanced,
+    esekfg_vanilla, esekfg_enhanced,
+    esekfs_vanilla, esekfs_enhanced,
     iekf_vanilla, iekf_enhanced,
 )
 
@@ -72,16 +72,16 @@ KITTI_CLEAN_DRIVES = [
 
 # ── Filters ───────────────────────────────────────────────────────────────────
 ALL_FILTERS = [
-    'ekf_vanilla', 'ekf_enhanced',
-    'eskf_vanilla', 'eskf_enhanced',
+    'esekfg_vanilla', 'esekfg_enhanced',
+    'esekfs_vanilla', 'esekfs_enhanced',
     'iekf_vanilla', 'iekf_enhanced',
 ]
 
 _FILTER_MODULES = {
-    'ekf_vanilla':   ekf_vanilla,
-    'ekf_enhanced':  ekf_enhanced,
-    'eskf_vanilla':  eskf_vanilla,
-    'eskf_enhanced': eskf_enhanced,
+    'esekfg_vanilla':   esekfg_vanilla,
+    'esekfg_enhanced':  esekfg_enhanced,
+    'esekfs_vanilla':  esekfs_vanilla,
+    'esekfs_enhanced': esekfs_enhanced,
     'iekf_vanilla':  iekf_vanilla,
     'iekf_enhanced': iekf_enhanced,
 }

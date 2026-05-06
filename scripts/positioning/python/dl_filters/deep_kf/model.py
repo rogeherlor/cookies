@@ -109,7 +109,7 @@ class StateDecoder(nn.Module):
 
         Returns
         -------
-        delta_state : (B, 15) — predicted state increment [δp, δv, δθ, δb_a, δb_g]
+        delta_state : (B, 15) — predicted state increment [δp, δv, δα, δb_a, δb_g]
         """
         return self.net(h)
 

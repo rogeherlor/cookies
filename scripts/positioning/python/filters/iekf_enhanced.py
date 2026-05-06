@@ -23,9 +23,9 @@ NHC / ZUPT in the left-invariant error frame:
     The velocity error ξ_v is in the FLU body frame.  The body-frame
     velocity measurement h = Rnb @ v_nav decomposes as:
         δh = δ(Rnb @ v) = Rnb @ δv_nav + δRnb @ v_nav
-           ≈ ξ_v  +  skew(v_body) @ φ
+           ≈ ξ_v  +  skew(v_body) @ ξ_R
     so the H_nhc structure is the same as in the ESKF but now maps
-    columns [φ(0:3), ξ_v(3:6)] of the IEKF state.
+    columns [ξ_R(0:3), ξ_v(3:6)] of the IEKF state.
 
 Conventions:
     IMU       : FLU frame (Forward, Left, Up)
@@ -245,14 +245,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             update_occurred = True
 
         # ── B. Non-Holonomic Constraints (NHC) ────────────────────────────────
-        # In IEKF body-frame error: δv_body = ξ_v + skew(v_body) @ φ
-        # H maps [φ(0:3), ξ_v(3:6)] to [lateral, vertical] body velocity.
+        # In IEKF body-frame error: δv_body = ξ_v + skew(v_body) @ ξ_R
+        # H maps [ξ_R(0:3), ξ_v(3:6)] to [lateral, vertical] body velocity.
         v_body = Rnb @ vIMU
         z_nhc  = -v_body[1:3]
 
-        H_phi_nhc = _skew(v_body)[1:3, :]   # 2×3 attitude block
+        H_xiR_nhc = _skew(v_body)[1:3, :]   # 2×3 attitude block
         H_v_nhc   = np.eye(3)[1:3, :]        # 2×3 velocity block (just picks rows)
-        H_nhc     = np.hstack((H_phi_nhc, H_v_nhc))  # 2×6
+        H_nhc     = np.hstack((H_xiR_nhc, H_v_nhc))  # 2×6
 
         innov_nhc = z_nhc - H_nhc @ xi[0:6]
         S_nhc     = H_nhc @ P[0:6, 0:6] @ H_nhc.T + R_nhc
@@ -295,12 +295,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             b_a  += xi[9:12]
             b_g  += xi[12:15]
 
-            delta_theta = xi[0:3]
-            q   = _qnorm(_qmul(q, _qfrom_axis_angle(delta_theta)))
+            xi_R = xi[0:3]
+            q   = _qnorm(_qmul(q, _qfrom_axis_angle(xi_R)))
             Rbn = _qto_Rbn(q)
 
             G           = np.eye(15)
-            G[0:3, 0:3] = np.eye(3) - 0.5 * _skew(delta_theta)
+            G[0:3, 0:3] = np.eye(3) - 0.5 * _skew(xi_R)
             P           = G @ P @ G.T
             xi[:]       = 0.0
 

@@ -73,8 +73,8 @@ KITTI_CLEAN_SEQS = {
 
 # Classical filters tuned by genetic CV
 CLASSICAL_FILTERS = [
-    'ekf_vanilla', 'ekf_enhanced',
-    'eskf_vanilla', 'eskf_enhanced',
+    'esekfg_vanilla', 'esekfg_enhanced',
+    'esekfs_vanilla', 'esekfs_enhanced',
     'iekf_vanilla', 'iekf_enhanced',
 ]
 
