@@ -7,9 +7,8 @@ dynamics. GPS position update only.
 Lineage / deviations from textbook Groves:
     - Mechanisation in local Cartesian ENU at a fixed origin lla0. Groves
       Ch. 14.2.4 main text uses curvilinear lat/lon/h; the Cartesian-position
-      variant used here is the one developed in Groves Appendix I.2 on the
-      companion CD. Tangent-plane geometric error is sub-cm under ~30 km,
-      sub-metre under ~100 km.
+      variant used here is the one developed in Groves Appendix I.2. 
+      Tangent-plane geometric error is sub-cm under ~30 km, sub-metre under ~100 km.
     - Gravity-gradient term ∂g/∂p in F is dropped (negligible for short
       range; reduces F to a constant once Earth-rate is fixed).
     - Attitude parametrised as Euler ZYX angles Θ = [φ, θ, ψ] integrated
@@ -316,9 +315,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
         F[9:12,  9:12]  = beta_acc * np.eye(3)                   # accel bias Gauss-Markov decay
         F[12:15, 12:15] = beta_gyr * np.eye(3)                   # gyro  bias Gauss-Markov decay
 
-        # Second-order discretisation Φ = I + F·Ts + ½ F²·Ts² (van Loan / standard).
-        # Groves eq. 14.72 is first-order; higher-order forms appear only in Appendix I.1 (CD).
-        Fd = np.eye(15) + F * Ts + 0.5 * (F @ F) * Ts**2
+        # First-order discretisation Φ = I + F·Ts (Groves eq. 14.72).
+        # Sufficient at IMU rates: ‖F·Ts‖ is dominated by [f^n]× ≈ g, giving a
+        # second-order correction ½(F·Ts)² ≲ 1e-3 at 100 Hz — well below Q.
+        Fd = np.eye(15) + F * Ts
 
         # Prediction step
         P  = Fd @ P @ Fd.T + Q
@@ -351,11 +351,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
             b_g    += dx[12:15]
             rpy[2]  = (rpy[2] + np.pi) % (2.0 * np.pi) - np.pi
 
-            # Reset Jacobian on the attitude block: G_ε = I − [½ δε]_×  (Solà 2017)
-            G_eps = np.eye(3) - _skew(0.5 * dx[6:9])
-            P[6:9, :] = G_eps @ P[6:9, :]
-            P[:, 6:9] = P[:, 6:9] @ G_eps.T
-
+            # Reset error state (no covariance reset Jacobian: Groves §3.2.6 / §14.2.5
+            # treats the closed-loop reset as identity. Solà's G_α = I − [½ δα]_× is
+            # derived for body-frame right-multiplicative axis-angle errors and does
+            # not apply to the nav-frame phi-angle convention used here.)
             dx[:] = 0.0
 
         # 6. Store outputs

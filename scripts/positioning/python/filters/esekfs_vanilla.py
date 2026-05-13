@@ -216,7 +216,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         pIMU   = pIMU + Ts * vIMU + 0.5 * Ts**2 * (accENU + g)
         vIMU   = vIMU + Ts * (accENU + g)
 
-        # Error-state transition matrix F (Solà §7, body-frame attitude error)
+        # Error-state transition matrix F (Solà §5.3.3 / §5.4.2 eq. 270 — local/body-frame angular error)
         F = np.zeros((15, 15))
         F[0:3,   3:6]   = np.eye(3)
         F[3:6,   6:9]   = -Rbn @ _skew(acc_b)

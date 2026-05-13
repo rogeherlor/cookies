@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Shared configuration for ins_runner.py, ins_genetic.py, and ins_compare.py.
+Shared configuration for ins_runner.py, ins_genetic_cv.py, and ins_compare.py.
 
 All scripts read from here so they always operate on the same dataset,
 outage window, rotation mode, and filter selection.
@@ -8,7 +8,7 @@ outage window, rotation mode, and filter selection.
 IMPORTANT — performance conclusions
 ------------------------------------
 Do NOT compare filter outputs from a first run.  The default parameters
-here are generic starting points.  Run ins_genetic.py for each filter
+here are generic starting points.  Run ins_genetic_cv.py for each filter
 variant to obtain tuned FILTER_PARAMS before drawing any conclusions.
 """
 import sys
@@ -84,7 +84,7 @@ USE_RTS_AS_GT = (GT_SOURCE == 'rts')   # backward-compat alias
 
 # ── Filter parameters ──────────────────────────────────────────────────────────
 # Set to None to use each filter's built-in DEFAULT_PARAMS.
-# After running ins_genetic.py, paste the optimised dict here.
+# After running ins_genetic_cv.py, paste the optimised dict here.
 #
 # Example (ESKF enhanced, KITTI 3D, optimised):
 # FILTER_PARAMS = {

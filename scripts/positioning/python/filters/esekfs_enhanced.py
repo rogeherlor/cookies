@@ -7,16 +7,17 @@ GPS position update + NHC + ZUPT using sparse Kalman gain updates.
 
 References:
     Solà, J., "Quaternion kinematics for the error-state Kalman filter",
-    arXiv:1711.02508, 2017.  https://arxiv.org/abs/1711.02508
-
-    Dissanayake, G. et al., "The aiding of a low-cost strapdown inertial
-    measurement unit using vehicle model constraints for land vehicle
-    applications", IEEE Transactions on Vehicular Technology, 2001.
-    DOI: 10.1109/25.892572
-
-    Foxlin, E., "Pedestrian Tracking with Shoe-Mounted Inertial Sensors",
-    IEEE Computer Graphics & Applications, vol. 25, no. 6, 2005.
-    DOI: 10.1109/MCG.2005.140
+        arXiv:1711.02508, 2017. https://arxiv.org/abs/1711.02508 — base
+        ESKF derivation (quaternion, body-frame angular error, F matrix,
+        Joseph-form update, reset Jacobian I − [½ δα]_×).
+    Dissanayake, G., Sukkarieh, S., Nebot, E., Durrant-Whyte, H., "The
+        aiding of a low-cost strapdown inertial measurement unit using
+        vehicle model constraints for land vehicle applications",
+        IEEE Trans. Robotics and Automation 17 (5), 2001 — original NHC
+        formulation.
+    (Solà 2017 does not cover NHC or ZUPT. The ZUPT constraint and
+    detector follow the textbook treatment in Groves §15.4.1, applied
+    here within Solà's quaternion ESKF framework.)
 
 State vector (15 elements — error state, body-frame attitude):
     dx[0:3]   — position error  δp  in ENU  [m]
@@ -51,9 +52,9 @@ DEFAULT_PARAMS = {
     'P_orient_std': 0.239,
     'P_acc_std':    0.01,
     'P_gyr_std':    0.001,
-    # NHC (Dissanayake 2001)
+    # NHC — Non-Holonomic Constraints (Dissanayake 2001)
     'Rnhc': 0.1,
-    # ZUPT (Foxlin 2005)
+    # ZUPT — Zero-Velocity Update (Groves §15.4.1)
     'Rzupt':                0.01,
     'zupt_accel_threshold': 0.3,
     'zupt_gyro_threshold':  0.05,
@@ -252,7 +253,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             update_occurred = True
 
         # ── B. Non-Holonomic Constraints (NHC) ────────────────────────────────
-        # H derivation: δv_body = Rnb @ δv + skew(v_body) @ δα
+        # NHC originates with Dissanayake 2001 — Solà 2017 does not cover it.
+        # The H below is derived (not lifted from Solà) by linearising
+        # v_body = R_n^b · v_nav under Solà's body-frame δα convention
+        # (Solà §4.4.1 "Local perturbations" / §5.3.3 / Table 4 local row):
+        #   R_b^n_true = R_b^n · Exp(δα)  ⇒  R_n^b_true ≈ (I − [δα]_×) R_n^b
+        # so  δv_body = R_n^b · δv  +  [v_body]_× · δα.
+        # Compare esekfg_enhanced where δε is in the nav frame and the
+        # attitude block carries an extra trailing R_n^b.
         Rnb    = Rbn.T
         v_body = Rnb @ vIMU
         z_nhc  = -v_body[1:3]
@@ -273,6 +281,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         update_occurred = True
 
         # ── C. Zero-Velocity Update (ZUPT) ────────────────────────────────────
+        # Not in Solà 2017. Constraint v^n = 0 with H = [0, I, 0, 0, 0]
+        # plugs into Solà §6.1's generic correction step. Detector form
+        # (joint thresholds on |‖f^b‖−g|, ‖ω^b‖, ‖v^n‖) follows the
+        # textbook treatment of Groves §15.4.1.
         accel_dev = abs(np.linalg.norm(acc_b) - 9.81)
         gyro_mag  = np.linalg.norm(omega_b)
         speed     = np.linalg.norm(vIMU)

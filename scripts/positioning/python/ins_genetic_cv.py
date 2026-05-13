@@ -44,6 +44,7 @@ _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE))
 
 import filter_params as fp
+import ins_cost
 from data_loader import (get_kitti_dataset, get_cookies_dataset,
                          get_cookies_dataset_by_id, COOKIES_CLEAN_SEQS, NavigationData)
 from filters import (
@@ -53,7 +54,12 @@ from filters import (
 )
 
 # ── Speed / quality ───────────────────────────────────────────────────────────
-# Full quality (same as ins_genetic.py): ~9 000 evals × N_train_pairs filter runs
+# Defaults sized for full DE convergence on the journal-grade three-component
+# normalised cost defined in ins_cost.py. Per-pair fitness call cost is one
+# filter run; CVFitness then averages across all (nav_data × outage) training
+# pairs. With 6 KITTI training drives × 2 random outage windows = 12 pairs per
+# fitness call, a 15 × 40 = 600-evaluation DE run amounts to ~7 200 filter
+# runs per (filter, mode, fold) — long enough for stable convergence.
 MAXITER  = 40
 POPSIZE  = 15
 
@@ -86,45 +92,10 @@ _FILTER_MODULES = {
     'iekf_enhanced': iekf_enhanced,
 }
 
-# ── Parameter search bounds (log₁₀ scale) ─────────────────────────────────────
-BOUNDS = [
-    (-2, 2),     # log10(Qpos):      0.01 – 100
-    (-2, 2),     # log10(Qvel):      0.01 – 100
-    (-5, -1),    # log10(QorientXY): 1e-5 – 0.1
-    (-2, 1),     # log10(QorientZ):  0.01 – 10
-    (-3, 0),     # log10(Qacc):      0.001 – 1
-    (-6, -2),    # log10(QgyrXY):    1e-6 – 0.01
-    (-3, 0),     # log10(QgyrZ):     0.001 – 1
-    (-1, 2),     # log10(Rpos):      0.1 – 100 m²
-    (-8, -5),    # log10(|beta_acc|)
-    (-2, 1),     # log10(|beta_gyr|)
-    (-1, 1.5),   # log10(P_pos_std):  0.1 – 30 m
-    (-1, 0.5),   # log10(P_vel_std):  0.1 – 3 m/s
-    (-2, -0.5),  # log10(P_orient_std)
-    (-3, -1),    # log10(P_acc_std)
-    (-4, -2),    # log10(P_gyr_std)
-]
-
-
-def decode_params(x: np.ndarray) -> dict:
-    """Convert log₁₀ parameter vector → filter parameter dict."""
-    return {
-        'Qpos':         10**x[0],
-        'Qvel':         10**x[1],
-        'QorientXY':    10**x[2],
-        'QorientZ':     10**x[3],
-        'Qacc':         10**x[4],
-        'QgyrXY':       10**x[5],
-        'QgyrZ':        10**x[6],
-        'Rpos':         10**x[7],
-        'beta_acc':    -10**x[8],
-        'beta_gyr':    -10**x[9],
-        'P_pos_std':    10**x[10],
-        'P_vel_std':    10**x[11],
-        'P_orient_std': 10**x[12],
-        'P_acc_std':    10**x[13],
-        'P_gyr_std':    10**x[14],
-    }
+# ── Parameter search bounds + decoder shared via ins_cost ────────────────────
+# (reuse the canonical 15-dimensional log10 search space)
+BOUNDS        = ins_cost.BOUNDS
+decode_params = ins_cost.decode_params
 
 
 # ── Dataset discovery ─────────────────────────────────────────────────────────
@@ -162,9 +133,16 @@ def list_cookies_datasets(base_dir: Path = None) -> list:
 
 
 def load_datasets(ids: list, dataset_type: str,
-                  sample_rate: float = 10.0) -> list:
+                  sample_rate: float = 100.0) -> list:
     """
     Load all datasets of the given type, skipping failures with a warning.
+
+    The default 100 Hz matches the native KITTI pickle rate and the COOKIES
+    downsampling target used everywhere else in the pipeline
+    (see data_loader.load_kitti_pickle / load_cookies_data). Passing 10 Hz
+    here mis-stamps `nav_data.sample_rate` without resampling the arrays,
+    which silently breaks every time-vs-index conversion downstream
+    (outage window generation, single_window_cost A/B indexing, etc.).
 
     Returns list of NavigationData objects (same order as ids).
     """
@@ -249,67 +227,14 @@ def _single_cost(filter_name: str, nd: NavigationData, params: dict,
     """
     Run one filter on one (dataset, outage) pair and return the cost.
 
-    Cost formula (same as ins_genetic.py):
-        5*ate_2d_out + 5*ate_up_out + 5*ate_2d_gps
-      + 5*rmse_roll  + 5*rmse_pitch + 2*rmse_yaw
-      + 1*rmse_vel   + 3*anees_penalty
+    Delegates to `ins_cost.single_window_cost`, which implements the
+    journal-grade three-component normalised cost
+        J = ATE_outage / 1 m  +  t_rel / 1 %  +  r_rel / 1 deg/km
+    plus the ANEES consistency band [0.1, 10] as a hard rejection
+    constraint. See `ins_cost.py` for the rationale.
     """
-    try:
-        module  = _FILTER_MODULES[filter_name]
-        frecIMU = nd.sample_rate
-        A       = int(t1 * frecIMU)
-        B       = int((t1 + d) * frecIMU)
-
-        f    = pm.geodetic2enu(nd.lla[:,0], nd.lla[:,1], nd.lla[:,2],
-                               nd.lla0[0], nd.lla0[1], nd.lla0[2])
-        p_gt = np.column_stack([f[0], f[1], f[2]])
-        N    = len(p_gt)
-
-        res     = module.run(nd, params, {'start': t1, 'duration': d}, use_3d)
-        p       = res['p'];  v = res['v'];  r = res['r']
-        std_pos = res['std_pos']
-        pos_err = p - p_gt
-
-        # Outage errors
-        err_out = np.sqrt(pos_err[A:B, 0]**2 + pos_err[A:B, 1]**2)
-        ate_2d  = float(np.sqrt(np.mean(err_out**2))) if B > A else 0.0
-        ate_up  = float(np.sqrt(np.mean(pos_err[A:B, 2]**2))) if B > A else 0.0
-
-        # GPS-aided errors
-        mask    = np.ones(N, dtype=bool); mask[A:B] = False
-        err_gps = np.sqrt(pos_err[mask, 0]**2 + pos_err[mask, 1]**2)
-        ate_gps = float(np.sqrt(np.mean(err_gps**2))) if mask.any() else 0.0
-
-        # Orientation
-        oe      = (r - nd.orient + np.pi) % (2 * np.pi) - np.pi
-        rmse_r  = float(np.sqrt(np.mean(oe[:, 0]**2)))
-        rmse_p  = float(np.sqrt(np.mean(oe[:, 1]**2)))
-        rmse_y  = float(np.sqrt(np.mean(oe[:, 2]**2)))
-
-        # Velocity
-        rmse_v  = float(np.sqrt(np.mean(
-            (v - nd.vel_enu)[:, 0]**2 + (v - nd.vel_enu)[:, 1]**2)))
-
-        # ANEES consistency (GPS-aided phase, sampled every 10th epoch)
-        eps = 1e-12; ns, nc = 0.0, 0
-        for k in range(0, N, 10):
-            if A <= k < B:
-                continue
-            ns += float(np.sum(pos_err[k]**2 / (std_pos[k]**2 + eps)))
-            nc += 1
-        anees   = ns / max(nc, 1) / 3.0
-        penalty = abs(np.log10(max(anees, 1e-6)))
-
-        cost = (5.0 * ate_2d  + 5.0 * ate_up + 5.0 * ate_gps
-              + 5.0 * rmse_r  + 5.0 * rmse_p + 2.0 * rmse_y
-              + 1.0 * rmse_v  + 3.0 * penalty)
-
-        if np.isnan(cost) or np.isinf(cost) or cost > 10_000:
-            return 1e6
-        return float(cost)
-
-    except Exception:
-        return 1e6
+    module = _FILTER_MODULES[filter_name]
+    return ins_cost.single_window_cost(module, nd, params, t1, d, use_3d)
 
 
 # ── Picklable CV fitness class (required for workers > 1) ────────────────────

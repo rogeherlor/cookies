@@ -424,12 +424,74 @@ def compute_kitti_metrics(p_est, r_est, p_gt, r_gt, lengths=None):
     }
 
 
+def compute_anees_pvalue(pos_err, std_pos, dof=3, stride=10, eps=1e-12):
+    """
+    Compute Average NEES and a chi-squared consistency p-value (diagnostic).
+
+    Treats `pos_err = p_est - p_gt` as a 3-DOF Gaussian residual with diagonal
+    covariance `diag(std_pos**2)` and tests whether the empirical NEES
+    distribution matches `chi²(dof)`. Useful as a *post-hoc* validity check
+    on tuned filter parameters: if the p-value is < 0.01 the filter is
+    statistically inconsistent (covariance estimate is wrong) regardless of
+    how small the ATE looks.
+
+    The GA cost in `ins_cost.py` already enforces ANEES ∈ [0.1, 10] as a
+    hard rejection constraint during tuning; this function is for reporting
+    in the post-tune evaluation tables.
+
+    Args:
+        pos_err  : (N, 3) per-epoch position error in ENU [m].
+        std_pos  : (N, 3) per-axis 1-σ uncertainty from the filter [m].
+        dof      : degrees of freedom (default 3 for position).
+        stride   : sample every `stride`-th epoch (default 10) to keep the
+                   residuals approximately uncorrelated.
+        eps      : floor on variance to avoid division-by-zero.
+
+    Returns:
+        dict {'anees': float, 'p_value': float, 'n_samples': int,
+              'consistent': bool}.
+        `consistent` is True iff p_value > 0.01 AND anees ∈ [0.1, 10].
+        Returns NaN p-value when too few samples are available.
+    """
+    pe  = np.asarray(pos_err)
+    sp2 = np.asarray(std_pos) ** 2 + eps
+
+    # Sub-sample to reduce temporal correlation between residuals.
+    pe_s  = pe[::stride]
+    sp2_s = sp2[::stride]
+
+    nees = np.sum(pe_s ** 2 / sp2_s, axis=1)            # (N/stride,)
+    nees = nees[np.isfinite(nees)]
+    if nees.size < 30:
+        return {'anees': float('nan'), 'p_value': float('nan'),
+                'n_samples': int(nees.size), 'consistent': False}
+
+    anees = float(np.mean(nees) / dof)
+
+    # Kolmogorov-Smirnov against chi²(dof).
+    try:
+        from scipy import stats
+        ks_stat, p_value = stats.kstest(nees, 'chi2', args=(dof,))
+        p_value = float(p_value)
+    except Exception:
+        p_value = float('nan')
+
+    consistent = (np.isfinite(p_value) and p_value > 0.01
+                  and 0.1 <= anees <= 10.0)
+    return {
+        'anees':     anees,
+        'p_value':   p_value,
+        'n_samples': int(nees.size),
+        'consistent': bool(consistent),
+    }
+
+
 def evaluate_navigation_performance(p_est, v_est, r_est, p_gt, v_gt, r_gt,
                                     dataset_name, gnss_outage_info,
-                                    sample_rate=10):
+                                    sample_rate=100):
     """
     Complete evaluation of navigation system performance.
-    
+
     Args:
         p_est: Estimated positions (Nx3) [E, N, U]
         v_est: Estimated velocities (Nx3) [E, N, U]
@@ -439,8 +501,10 @@ def evaluate_navigation_performance(p_est, v_est, r_est, p_gt, v_gt, r_gt,
         r_gt: Ground truth orientations (Nx3) [roll, pitch, yaw]
         dataset_name: Name of the dataset
         gnss_outage_info: Dict with 'start', 'end', 'duration', 'start_idx', 'end_idx'
-        sample_rate: Sampling rate in Hz (default: 10)
-    
+        sample_rate: Sampling rate in Hz (default: 100 — matches KITTI native rate
+            and the COOKIES downsampling target; callers should pass
+            nav_data.sample_rate explicitly)
+
     Returns:
         dict: Comprehensive evaluation results
     """

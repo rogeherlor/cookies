@@ -14,7 +14,7 @@ Configuration:
 
 IMPORTANT — parameter tuning
 ------------------------------
-Default parameters give a rough first look.  Run ins_genetic.py for the
+Default parameters give a rough first look.  Run ins_genetic_cv.py for the
 selected filter to optimise parameters before drawing any conclusions.
 """
 import os
@@ -119,7 +119,7 @@ def main():
     logger.info(f"Sample rate: {nav_data.sample_rate} Hz")
     logger.info(f"GNSS outage: {t1}s – {t1+d}s  ({d}s)")
     logger.info(f"Rotation   : {'3D (roll/pitch/yaw)' if use_3d else '2D (yaw only)'}")
-    logger.info(f"Parameters : {'custom' if filter_params else 'default (run ins_genetic.py to optimise)'}")
+    logger.info(f"Parameters : {'custom' if filter_params else 'default (run ins_genetic_cv.py to optimise)'}")
     logger.info("=" * 60)
 
     # ── Run selected filter ────────────────────────────────────────────────────
