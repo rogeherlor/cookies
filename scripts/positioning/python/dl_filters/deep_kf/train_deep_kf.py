@@ -273,8 +273,50 @@ def train(args):
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    val_metric_path = output_dir / out_name.replace('.pt', '_val_metric.pt')
 
     best_val = float('inf')
+
+    # Journal-metric validation hook (display-only — not used in backprop).
+    _val_hook = None
+    _val_seq_for_hook = args.val_seq if (args.mode == 'loo' and val_seqs) else None
+    if _val_seq_for_hook is not None and args.val_metric_every > 0:
+        try:
+            import os as _os
+            import importlib
+            from dl_filters._validation import (validate_with_journal_metric,
+                                                format_val_line)
+            _dkf_runner = importlib.import_module(
+                'dl_filters.deep_kf.deep_kf_runner')
+
+            def _val_hook(_epoch, _model):
+                _model.eval()
+                torch.save({
+                    'epoch': _epoch,
+                    'model_state_dict': _model.state_dict(),
+                    'config': {
+                        'latent_dim': args.latent_dim,
+                        'num_layers': 2,
+                        'nav_state_dim': 15,
+                    },
+                }, val_metric_path)
+                _prev = _os.environ.get('DEEP_KF_WEIGHTS')
+                _os.environ['DEEP_KF_WEIGHTS'] = str(val_metric_path)
+                try:
+                    _m = validate_with_journal_metric(
+                        filter_module=_dkf_runner, val_seq=_val_seq_for_hook)
+                    print(format_val_line(_epoch, _m))
+                except Exception as _e:
+                    print(f"  [val] journal-metric hook failed: {_e}")
+                finally:
+                    if _prev is None:
+                        _os.environ.pop('DEEP_KF_WEIGHTS', None)
+                    else:
+                        _os.environ['DEEP_KF_WEIGHTS'] = _prev
+                _model.train()
+        except Exception as _e:
+            print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
+            _val_hook = None
 
     print(f"\nPhase 2: Training LSTM (teacher-forced, {args.epochs} epochs) ...")
     for epoch in range(start_epoch, args.epochs):
@@ -319,6 +361,12 @@ def train(args):
                   f"train={train_loss:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
 
+        # Journal-metric validation (display-only; never enters backprop).
+        if _val_hook is not None and (
+                (epoch + 1) % args.val_metric_every == 0
+                or epoch == args.epochs - 1):
+            _val_hook(epoch, model)
+
     if not val_posteriors:
         torch.save({
             'epoch': args.epochs - 1,
@@ -347,6 +395,13 @@ def _parse_args():
                         help="TBPTT segment length (number of IMU steps)")
     parser.add_argument('--output',     default=str(_REPO_ROOT / 'artifacts/deep_kf'))
     parser.add_argument('--resume',     default=None)
+    parser.add_argument('--val-metric-every', type=int, default=10,
+                        help="Every K epochs (and at final epoch), run a "
+                             "display-only validation on the held-out sequence "
+                             "using the journal three-component metric "
+                             "J = ATE_outage + t_rel + r_rel (default 10; "
+                             "0 disables). Original weighted-MSE training loss "
+                             "is unchanged.")
     return parser.parse_args()
 
 

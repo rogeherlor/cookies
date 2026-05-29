@@ -60,10 +60,59 @@ def _add_paths():
             sys.path.insert(0, p)
 
 
+# ── Journal-metric validation hook (display-only) ─────────────────────────────
+
+def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int):
+    """
+    Return a callable hook(epoch) that runs the journal three-component metric
+    on the held-out sequence using the just-saved fold weights. Returns None
+    if validation should be skipped (no held_out, or val_metric_every == 0,
+    or imports unavailable).
+    """
+    if not held_out or not val_metric_every:
+        return None
+    try:
+        from kitti_sequences import KITTI_SEQ_TO_DRIVE
+    except Exception as e:
+        print(f"  [val] AI-IMU hook unavailable ({e}) — skipping journal metric")
+        return None
+    _drive_to_seq = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
+    val_seq = _drive_to_seq.get(held_out, held_out)
+    if val_seq not in {'01', '04', '06', '07', '08', '09', '10'}:
+        return None
+    try:
+        from dl_filters._validation import (validate_with_journal_metric,
+                                            format_val_line)
+        import importlib
+        runner = importlib.import_module('dl_filters.deep_iekf.iekf_ai_imu')
+    except Exception as e:
+        print(f"  [val] AI-IMU hook unavailable ({e}) — skipping journal metric")
+        return None
+    weights_canonical = Path(output_dir) / 'iekfnets.p'
+
+    def _hook(epoch):
+        import os as _os
+        if not weights_canonical.exists():
+            return
+        _prev = _os.environ.get('AI_IMU_WEIGHTS')
+        _os.environ['AI_IMU_WEIGHTS'] = str(weights_canonical)
+        try:
+            m = validate_with_journal_metric(filter_module=runner, val_seq=val_seq)
+            print(format_val_line(epoch, m))
+        except Exception as exc:
+            print(f"  [val] journal-metric hook failed: {exc}")
+        finally:
+            if _prev is None:
+                _os.environ.pop('AI_IMU_WEIGHTS', None)
+            else:
+                _os.environ['AI_IMU_WEIGHTS'] = _prev
+    return _hook
+
+
 # ── KITTI mode ─────────────────────────────────────────────────────────────────
 
 def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training,
-                held_out=None):
+                held_out=None, val_metric_every=0):
     """
     Train using the AI-IMU's own KITTIDataset on raw 100 Hz KITTI data.
     This matches the paper's training setup exactly.
@@ -124,11 +173,15 @@ def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training,
         iekf      = prepare_filter(args, dataset)
         prepare_loss_data(args, dataset)
         optimizer = set_optimizer(iekf)
+        _val_hook = _build_aiimu_val_hook(output_dir, held_out, val_metric_every)
         for epoch in range(1, epochs + 1):
             train_loop(args, dataset, epoch, iekf, optimizer, args.seq_dim)
             save_iekf(args, iekf)
             if epoch % 50 == 0 or epoch == epochs:
                 print(f"  Epoch {epoch}/{epochs} done")
+            if _val_hook is not None and (
+                    epoch % val_metric_every == 0 or epoch == epochs):
+                _val_hook(epoch)
 
         # Copy default iekfnets.p → fold-specific filename
         import shutil
@@ -171,7 +224,7 @@ def _save_norm_factors(output_dir, args):
 
 # ── LOO mode (data_loader pickle files, no raw KITTI needed) ─────────────────
 
-def train_loo(output_dir, epochs, held_out=None):
+def train_loo(output_dir, epochs, held_out=None, val_metric_every=0):
     """
     Train using our preprocessed KITTI pickle files (datasets/raw_kitti/<drive>.p)
     at 100 Hz — same frequency as the AI-IMU paper — without needing the full raw
@@ -210,12 +263,16 @@ def train_loo(output_dir, epochs, held_out=None):
     iekf      = prepare_filter(args, dataset)
     prepare_loss_data(args, dataset)
     optimizer = set_optimizer(iekf)
+    _val_hook = _build_aiimu_val_hook(output_dir, held_out, val_metric_every)
 
     for epoch in range(1, epochs + 1):
         train_loop(args, dataset, epoch, iekf, optimizer, args.seq_dim)
         save_iekf(args, iekf)
         if epoch % 50 == 0 or epoch == epochs:
             print(f"  Epoch {epoch}/{epochs} done")
+        if _val_hook is not None and (
+                epoch % val_metric_every == 0 or epoch == epochs):
+            _val_hook(epoch)
 
     if held_out:
         from kitti_sequences import KITTI_SEQ_TO_DRIVE
@@ -351,6 +408,12 @@ def main():
                         '(e.g. 2011_09_30_drive_0033_extract). Weights saved as '
                         'iekfnets_held_<drive>.p. Use run_loo_evaluation.py to '
                         'run all 7 folds automatically.')
+    p.add_argument('--val-metric-every', type=int, default=50,
+                   help='[kitti/loo modes] Every K epochs (and at final epoch), '
+                        'run a display-only validation on the held-out sequence '
+                        'using the journal three-component metric '
+                        'J = ATE_outage + t_rel + r_rel (default 50; 0 disables). '
+                        'Original Brossard covariance-regression loss is unchanged.')
     args = p.parse_args()
 
     if args.mode == 'kitti':
@@ -362,12 +425,14 @@ def main():
             epochs=args.epochs,
             continue_training=args.continue_training,
             held_out=args.held_out,
+            val_metric_every=args.val_metric_every,
         )
     elif args.mode == 'loo':
         train_loo(
             output_dir=args.output,
             epochs=args.epochs,
             held_out=args.held_out,
+            val_metric_every=args.val_metric_every,
         )
     else:
         train_single(

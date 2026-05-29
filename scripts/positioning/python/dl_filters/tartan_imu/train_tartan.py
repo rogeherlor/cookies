@@ -287,8 +287,41 @@ def train(args):
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    val_metric_path = output_dir / out_name.replace('.pt', '_val_metric.pt')
 
     best_val = float('inf')
+
+    # Journal-metric validation hook (display-only — not used in backprop).
+    _val_hook = None
+    if val_seq is not None and args.val_metric_every > 0:
+        try:
+            import os as _os
+            import importlib
+            from dl_filters._validation import (validate_with_journal_metric,
+                                                format_val_line)
+            _tartan_runner = importlib.import_module(
+                'dl_filters.tartan_imu.tartan_runner')
+
+            def _val_hook(_epoch, _model):
+                _model.eval()
+                _save_lora(_model, _epoch, None, val_metric_path)
+                _prev = _os.environ.get('TARTAN_IMU_LORA')
+                _os.environ['TARTAN_IMU_LORA'] = str(val_metric_path)
+                try:
+                    _m = validate_with_journal_metric(
+                        filter_module=_tartan_runner, val_seq=val_seq)
+                    print(format_val_line(_epoch, _m))
+                except Exception as _e:
+                    print(f"  [val] journal-metric hook failed: {_e}")
+                finally:
+                    if _prev is None:
+                        _os.environ.pop('TARTAN_IMU_LORA', None)
+                    else:
+                        _os.environ['TARTAN_IMU_LORA'] = _prev
+                _model.train()
+        except Exception as _e:
+            print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
+            _val_hook = None
 
     for epoch in range(args.epochs):
         model.train()
@@ -330,6 +363,12 @@ def train(args):
                   f"train={avg_train:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
 
+        # Journal-metric validation (display-only; never enters backprop).
+        if _val_hook is not None and (
+                (epoch + 1) % args.val_metric_every == 0
+                or epoch == args.epochs - 1):
+            _val_hook(epoch, model)
+
     if val_loader is None:
         _save_lora(model, args.epochs - 1, None, output_dir / out_name)
 
@@ -362,6 +401,13 @@ def _parse_args():
     parser.add_argument('--lr',         type=float, default=1e-3)
     parser.add_argument('--lora-rank',  type=int,   default=8)
     parser.add_argument('--output',     default=str(_ARTIFACTS))
+    parser.add_argument('--val-metric-every', type=int, default=10,
+                        help="Every K epochs (and at final epoch), run a "
+                             "display-only validation on the held-out sequence "
+                             "using the journal three-component metric "
+                             "J = ATE_outage + t_rel + r_rel (default 10; "
+                             "0 disables). Original NLL training loss is "
+                             "unchanged.")
     return parser.parse_args()
 
 

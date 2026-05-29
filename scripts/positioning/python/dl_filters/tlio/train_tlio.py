@@ -239,8 +239,45 @@ def train(args):
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = output_dir / out_name.replace('.pt', '_ckpt.pt')
+    val_metric_path = output_dir / out_name.replace('.pt', '_val_metric.pt')
 
     best_val_loss = float('inf')
+
+    # Journal-metric validation hook (display-only — not used in backprop).
+    # Reuses ins_cost.single_window_cost, identical to the genetic pipeline.
+    _val_hook = None
+    if args.mode == 'loo' and val_seq is not None and args.val_metric_every > 0:
+        try:
+            import os as _os
+            import importlib
+            from dl_filters._validation import (validate_with_journal_metric,
+                                                format_val_line)
+            _tlio_runner = importlib.import_module(
+                'dl_filters.tlio.tlio_runner')
+
+            def _val_hook(_epoch, _model):
+                _model.eval()
+                torch.save({'epoch': _epoch,
+                            'model_state_dict': _model.state_dict(),
+                            'args': vars(args)},
+                           val_metric_path)
+                _prev = _os.environ.get('TLIO_WEIGHTS')
+                _os.environ['TLIO_WEIGHTS'] = str(val_metric_path)
+                try:
+                    _m = validate_with_journal_metric(
+                        filter_module=_tlio_runner, val_seq=val_seq)
+                    print(format_val_line(_epoch, _m))
+                except Exception as _e:
+                    print(f"  [val] journal-metric hook failed: {_e}")
+                finally:
+                    if _prev is None:
+                        _os.environ.pop('TLIO_WEIGHTS', None)
+                    else:
+                        _os.environ['TLIO_WEIGHTS'] = _prev
+                _model.train()
+        except Exception as _e:
+            print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
+            _val_hook = None
 
     for epoch in range(start_epoch, args.epochs):
         # ── Training ───────────────────────────────────────────────────
@@ -313,6 +350,12 @@ def train(args):
                 'args':             vars(args),
             }, ckpt_path)
 
+        # Journal-metric validation (display-only; never enters backprop).
+        if _val_hook is not None and (
+                (epoch + 1) % args.val_metric_every == 0
+                or epoch == args.epochs - 1):
+            _val_hook(epoch, model)
+
     # If no validation, save at the end
     if val_loader is None:
         torch.save({
@@ -365,6 +408,13 @@ def _parse_args():
                         help="Directory to save model weights")
     parser.add_argument('--resume',     default=None,
                         help="Path to checkpoint .pt to resume training from")
+    parser.add_argument('--val-metric-every', type=int, default=10,
+                        help="Every K epochs (and at final epoch), run a "
+                             "display-only validation on the held-out sequence "
+                             "using the journal three-component metric "
+                             "J = ATE_outage + t_rel + r_rel (default 10; "
+                             "0 disables). Original MSE/NLL training loss is "
+                             "unchanged.")
     return parser.parse_args()
 
 

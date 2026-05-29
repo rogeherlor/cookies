@@ -392,8 +392,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                     u_std[u_std < 1e-6] = 1.0
                     torch_iekf.u_loc = u_loc
                     torch_iekf.u_std = u_std
-                    print("Warning: normalization factors not found — computed from inference data. "
-                          "For best results, run train_ai_imu.py which saves iekfnets_norm.p.")
+                    _expected_norm = Path(weights_path).with_name(Path(weights_path).stem + '_norm.p')
+                    print(f"[iekf_ai_imu] WARNING: normalisation factors not found at {_expected_norm} — "
+                          f"recomputing from inference data (train-test distribution mismatch risk). "
+                          f"Re-run train_ai_imu.py to regenerate the {_expected_norm.name} sibling file.")
 
                 # Transfer learned Q and initial covariance to numpy IEKF
                 iekf.set_learned_covariance(torch_iekf)
@@ -412,11 +414,23 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
     # ── Fallback: fixed measurement covariances ────────────────────────────────
     if measurements_covs_np is None:
+        if os.environ.get('IEKF_AI_IMU_REQUIRE_WEIGHTS', '') == '1':
+            searched = [
+                os.environ.get('AI_IMU_WEIGHTS', '<AI_IMU_WEIGHTS env unset>'),
+                str(_ARTIFACTS / 'iekfnets.p'),
+                str(_AI_IMU_SRC / 'iekfnets.p'),
+                str(_find_onnx() or _ARTIFACTS / 'iekfnets.onnx'),
+            ]
+            raise RuntimeError(
+                "[iekf_ai_imu] No learned MesNet weights found and "
+                "IEKF_AI_IMU_REQUIRE_WEIGHTS=1 is set. Searched: " + ', '.join(searched)
+            )
         cov_lat = iekf.cov_lat
         cov_up  = iekf.cov_up
         measurements_covs_np = np.tile([cov_lat, cov_up], (N, 1))
-        print(f"AI-IMU: using fixed covariances [cov_lat={cov_lat}, cov_up={cov_up}] "
-              f"(no CNN adapter).")
+        print(f"[iekf_ai_imu] WARNING: using fallback KITTIParameters covariances "
+              f"[cov_lat={cov_lat}, cov_up={cov_up}] (no CNN adapter). "
+              f"Set IEKF_AI_IMU_REQUIRE_WEIGHTS=1 to fail loudly when weights are missing.")
 
     # ── GPS data preparation ───────────────────────────────────────────────────
     # Compute ENU positions from geodetic (round-trip exact for same lla0).

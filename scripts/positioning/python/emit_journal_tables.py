@@ -39,7 +39,10 @@ DEFAULT_FILTERS = [
     'iekf_vanilla',
     'iekf_enhanced',
     'imu_only',
-    # DL filters appear later — append them once their JSON outputs exist.
+    'iekf_ai_imu',
+    'tlio',
+    'deep_kf',
+    'tartan_imu',
 ]
 
 KITTI_SEQS    = ['01', '04', '06', '07', '08', '09', '10']
@@ -99,6 +102,10 @@ def _filter_label(filter_key: str) -> str:
         'iekf_vanilla':    r'IEKF',
         'iekf_enhanced':   r'IEKF +',
         'imu_only':        r'IMU-only (AI-IMU, fixed $N$)',
+        'iekf_ai_imu':     r'Deep IEKF',
+        'tlio':            r'TLIO',
+        'deep_kf':         r'DKF',
+        'tartan_imu':      r'Tartan IMU',
     }
     return pretty.get(filter_key, filter_key.replace('_', r'\_'))
 

@@ -365,10 +365,14 @@ def _resolve_seq_id(seq_id):
 def _find_lora_adapter(seq_id=None):
     """
     Locate LoRA adapter weights.  Search order:
-      1. lora_fold_<seq_id>.pt  (LOO fold)
-      2. lora_adapters.pt       (all-sequences)
-      3. Any available lora_fold_*.pt (fallback with warning)
+      0. TARTAN_IMU_LORA env var       (lets training-time hooks override)
+      1. lora_fold_<seq_id>.pt         (LOO fold)
+      2. lora_adapters.pt              (all-sequences)
+      3. Any available lora_fold_*.pt  (fallback with warning)
     """
+    env = os.environ.get('TARTAN_IMU_LORA')
+    if env and Path(env).exists():
+        return Path(env)
     short_id = _resolve_seq_id(seq_id)
     if short_id is not None:
         fold = _ARTIFACTS / f'lora_fold_{short_id}.pt'

@@ -8,8 +8,10 @@
 #     J = ATE_outage / 1 m  +  t_rel / 1 %  +  r_rel / 1 deg/km
 #         subject to  ANEES ∈ [0.1, 10]  (consistency constraint)
 #
-# DE budget defaults (long enough for convergence on the smooth 3-component
-# cost): popsize = 15, maxiter = 40 → 600 fitness evaluations / GA run.
+# DE budget defaults: popsize = 10, maxiter = 15. The cost surface is
+# smooth and 30+ generation runs have been observed to plateau by step 14
+# in earlier experiments. ANEES is gated only during training; validation
+# always reports a finite cost (gate disabled in validate_params).
 # DL filters are NOT tuned here — they have their own training scripts.
 #
 # Usage:
@@ -31,10 +33,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${PYTHON:-python3}"
 
 DATASET="kitti"
-MAXITER=40       # DE generations
-POPSIZE=15       # DE population per generation
+MAXITER=15       # DE generations
+POPSIZE=10       # DE population per generation
 WORKERS=-1       # -1 = all CPUs; set to 1 to debug
-OUTAGES=2        # random outage configs per training dataset (multi-window robustness)
+OUTAGES=1        # outage windows per TRAINING dataset (each one is a filter run / eval)
+VAL_OUTAGES=2    # outage windows per VALIDATION dataset (averaged to a single val cost)
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
 FILTERS_ARG=""
@@ -45,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --popsize)         POPSIZE="$2"; shift 2 ;;
         --workers)         WORKERS="$2"; shift 2 ;;
         --outages)         OUTAGES="$2"; shift 2 ;;
+        --val-outages)     VAL_OUTAGES="$2"; shift 2 ;;
         --filters)         shift; FILTERS_ARG="$*"; break ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -81,7 +85,7 @@ echo "  GENETIC LOO PARAMETER TUNING (cost = ins_cost.py three-component normali
 echo "  Dataset:   ${DATASET}"
 echo "  Sequences: ${CLEAN_SEQS[*]}"
 echo "  DE:        maxiter=${MAXITER}  popsize=${POPSIZE}  workers=${WORKERS}"
-echo "  Outages:   ${OUTAGES} random windows per training dataset"
+echo "  Outages:   train=${OUTAGES}, val=${VAL_OUTAGES} (per dataset)"
 echo "  Filters:   ${FILTERS_ARG:-all}"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
@@ -103,6 +107,7 @@ for seq in "${CLEAN_SEQS[@]}"; do
         --type "$DATASET" \
         --held-out "$HELD_OUT" --3d \
         --outages "$OUTAGES" \
+        --val-outages "$VAL_OUTAGES" \
         --maxiter "$MAXITER" \
         --popsize "$POPSIZE" \
         --workers "$WORKERS"

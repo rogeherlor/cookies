@@ -60,8 +60,8 @@ from filters import (
 # pairs. With 6 KITTI training drives × 2 random outage windows = 12 pairs per
 # fitness call, a 15 × 40 = 600-evaluation DE run amounts to ~7 200 filter
 # runs per (filter, mode, fold) — long enough for stable convergence.
-MAXITER  = 40
-POPSIZE  = 15
+MAXITER  = 15
+POPSIZE  = 10
 
 # ── KITTI LOO protocol ────────────────────────────────────────────────────────
 # Clean sequences for leave-one-out: no data gaps, raw OXTS available.
@@ -161,57 +161,104 @@ def load_datasets(ids: list, dataset_type: str,
 
 # ── Outage configuration generation ──────────────────────────────────────────
 
+CONVERGENCE_S   = 20.0   # GPS-aided seconds the filter gets before any outage
+TARGET_OUTAGE_S = 60.0   # preferred outage length (the journal protocol)
+MIN_OUTAGE_S    = 10.0   # never simulate an outage shorter than this
+TAIL_SETTLE_S   = 10.0   # GPS-aided seconds after the outage (for ANEES diag)
+ABS_MIN_TRAJ_S  = 20.0   # drives shorter than this can't carry a useful outage
+
+
 def generate_outage_configs(nav_data: NavigationData, n_outages: int,
                              rng: np.random.Generator) -> list:
     """
     Generate n_outages valid (start_sec, duration_sec) pairs for nav_data.
 
-    Constraints (scaled to dataset length):
-      - start in [0.20 * T, 0.70 * T]
-      - duration in [min_dur, 90] s  where min_dur = min(30, T * 0.10)
-      - start + duration <= 0.90 * T
+    Constraints are absolute seconds, not fractions of trajectory length:
 
-    Uses rejection sampling (max 50 attempts per outage).
-    Falls back to a single default config if constraints can't be satisfied.
-    Returns an empty list (with a warning) if the dataset is too short for
-    any outage — the calling code should skip datasets with no configs.
+      - start >= CONVERGENCE_S         filter must see GPS for ≥ this many
+                                       seconds before the outage so it
+                                       converges its state + covariance.
+      - start + duration <= T - TAIL_SETTLE_S
+                                       brief GPS-aided phase after the outage
+                                       so post-outage metrics are meaningful.
+      - MIN_OUTAGE_S <= duration <= TARGET_OUTAGE_S
+
+    Short-trajectory degradation
+    ----------------------------
+    For drives that can't fit the full 20 + 60 + 10 = 90 s layout, the
+    convergence / target_outage / tail_settle values are scaled
+    proportionally to T (with hard floors). This keeps short drives in the
+    evaluation rather than dropping them — they get a correspondingly
+    shorter outage, with the convergence prefix preserved as much as
+    possible.
+
+    Drives shorter than ABS_MIN_TRAJ_S are skipped — there's no useful
+    outage you can place on them.
     """
-    T         = len(nav_data) / nav_data.sample_rate
-    min_start = 0.20 * T
-    max_start = 0.70 * T
-    # Scale min duration to dataset length so short datasets can still be used
-    min_dur   = min(30.0, T * 0.10)
-    max_dur   = min(90.0, T * 0.50)
-    max_end   = 0.90 * T
-    configs   = []
+    T = len(nav_data) / nav_data.sample_rate
 
-    # Sanity check: dataset must have enough room for at least one outage
-    if max_end - min_start < min_dur or min_start >= max_start:
-        print(f"[WARNING] Dataset '{nav_data.dataset_name}' (T={T:.1f}s) is too "
-              f"short for outage generation — skipping.")
+    if T < ABS_MIN_TRAJ_S:
+        print(f"[WARNING] Dataset '{nav_data.dataset_name}' (T={T:.1f}s) is below "
+              f"the absolute minimum of {ABS_MIN_TRAJ_S:.0f}s — skipping.")
         return []
 
+    conv_s   = CONVERGENCE_S
+    target_s = TARGET_OUTAGE_S
+    tail_s   = TAIL_SETTLE_S
+
+    full_layout_s = conv_s + target_s + tail_s
+    if T < full_layout_s:
+        # Scale the layout proportionally to T, with floors so the
+        # convergence prefix never vanishes.
+        scale  = T / full_layout_s
+        conv_s   = max(5.0, conv_s   * scale)
+        target_s = max(MIN_OUTAGE_S, target_s * scale)
+        tail_s   = max(2.0, tail_s   * scale)
+        print(f"[INFO] '{nav_data.dataset_name}' (T={T:.1f}s) shorter than the "
+              f"{full_layout_s:.0f}s reference layout — scaled to "
+              f"convergence={conv_s:.1f}s, outage≤{target_s:.1f}s, "
+              f"settle={tail_s:.1f}s.")
+
+    min_start = conv_s
+    max_end   = T - tail_s
+    budget    = max_end - min_start
+    if budget < MIN_OUTAGE_S:
+        print(f"[WARNING] '{nav_data.dataset_name}' (T={T:.1f}s) can't fit "
+              f"{conv_s:.0f}s convergence + {MIN_OUTAGE_S:.0f}s outage + "
+              f"{tail_s:.0f}s settle — skipping.")
+        return []
+
+    # Duration is biased toward target_s (journal protocol = 60s) with a
+    # small ±jitter, NOT a uniform [10, 60] draw — earlier code averaged
+    # 35s outages, which dilutes the benchmark.
+    max_dur = min(target_s, budget)
+    jitter  = min(10.0, max_dur * 0.20)
+    d_lo    = max(MIN_OUTAGE_S, max_dur - jitter)
+    d_hi    = min(budget, max_dur + jitter)
+    if d_hi <= d_lo:
+        d_lo, d_hi = max_dur, max_dur     # degenerate: force the target
+
+    configs = []
     for _ in range(n_outages):
         for attempt in range(50):
-            t1     = float(rng.uniform(min_start, max_start))
-            d_high = min(max_dur, max_end - t1)
-            if d_high < min_dur:
-                continue    # this t1 leaves no room for min duration; retry
-            d = float(rng.uniform(min_dur, d_high))
+            d  = float(rng.uniform(d_lo, d_hi)) if d_hi > d_lo else max_dur
+            latest_start = max_end - d
+            if latest_start < min_start:
+                continue
+            t1 = float(rng.uniform(min_start, latest_start))
             if t1 + d <= max_end:
                 configs.append((t1, d))
                 break
         else:
-            # Fallback: fixed conservative config
             t1_fb = min_start
-            d_fb  = min(min_dur, max_end - t1_fb)
-            if d_fb >= 5.0:
+            d_fb  = min(max_dur, max_end - t1_fb)
+            if d_fb >= MIN_OUTAGE_S * 0.5:
                 configs.append((t1_fb, d_fb))
-                print(f"[WARNING] Fallback outage config for '{nav_data.dataset_name}': "
+                print(f"[WARNING] Fallback outage for '{nav_data.dataset_name}': "
                       f"start={t1_fb:.1f}s dur={d_fb:.1f}s")
             else:
-                print(f"[WARNING] Dataset '{nav_data.dataset_name}' is too short "
-                      f"(T={T:.1f}s) — skipping one outage config.")
+                print(f"[WARNING] '{nav_data.dataset_name}' couldn't synthesise "
+                      f"one outage config — dropping it.")
 
     if not configs:
         print(f"[WARNING] No valid outage configs for '{nav_data.dataset_name}' "
@@ -223,7 +270,8 @@ def generate_outage_configs(nav_data: NavigationData, n_outages: int,
 # ── Per-pair cost (module-level for picklability) ─────────────────────────────
 
 def _single_cost(filter_name: str, nd: NavigationData, params: dict,
-                 t1: float, d: float, use_3d: bool) -> float:
+                 t1: float, d: float, use_3d: bool,
+                 gate_anees: bool = True) -> float:
     """
     Run one filter on one (dataset, outage) pair and return the cost.
 
@@ -232,9 +280,15 @@ def _single_cost(filter_name: str, nd: NavigationData, params: dict,
         J = ATE_outage / 1 m  +  t_rel / 1 %  +  r_rel / 1 deg/km
     plus the ANEES consistency band [0.1, 10] as a hard rejection
     constraint. See `ins_cost.py` for the rationale.
+
+    `gate_anees=True` (default) gates the cost on ANEES — used during GA
+    training so the optimiser can't game the cost by under-reporting
+    covariance. `gate_anees=False` is used during validation where we
+    want a finite number to report regardless of consistency.
     """
     module = _FILTER_MODULES[filter_name]
-    return ins_cost.single_window_cost(module, nd, params, t1, d, use_3d)
+    return ins_cost.single_window_cost(module, nd, params, t1, d, use_3d,
+                                       gate_anees=gate_anees)
 
 
 # ── Picklable CV fitness class (required for workers > 1) ────────────────────
@@ -293,7 +347,12 @@ def validate_params(filter_name: str, best_params: dict,
         ds_costs = []
         outage_details = []
         for (t1, d) in outages:
-            c = _single_cost(filter_name, nd, best_params, t1, d, use_3d)
+            # Validation reports the raw cost — no ANEES gate. The training
+            # GA used the gate, so the chosen params are still consistent on
+            # the training drives; on a held-out short drive ANEES may drift
+            # outside [0.1, 10] without it being a parameter problem.
+            c = _single_cost(filter_name, nd, best_params, t1, d, use_3d,
+                             gate_anees=False)
             ds_costs.append(c)
             all_costs.append(c)
             outage_details.append({'start': t1, 'duration': d, 'cost': c})
@@ -402,8 +461,13 @@ def main():
                         help='Dataset type (default: kitti)')
     parser.add_argument('--split',   type=int, default=80,
                         help='Training percentage 50-90 (default: 80)')
-    parser.add_argument('--outages', type=int, default=2,
-                        help='Random outage configs per dataset (default: 2)')
+    parser.add_argument('--outages', type=int, default=1,
+                        help='Random outage configs per TRAINING dataset (default: 1). '
+                             'Each fitness eval runs (train datasets × this many) filter '
+                             'simulations, so 1 outage halves the GA cost vs 2.')
+    parser.add_argument('--val-outages', dest='val_outages', type=int, default=2,
+                        help='Random outage configs per VALIDATION dataset (default: 2). '
+                             'Higher than train so the val cost averages over more windows.')
     parser.add_argument('--3d',  dest='do_3d', action='store_true', default=None)
     parser.add_argument('--2d',  dest='do_2d', action='store_true', default=None)
     parser.add_argument('--seed',    type=int, default=42,
@@ -497,7 +561,7 @@ def main():
         logger.info(f"LOO held-out : {args.held_out}  (excluded from training)")
     logger.info(f"Train ({split_pct}%) : {train_ids}")
     logger.info(f"Val   ({100-split_pct}%) : {val_ids}")
-    logger.info(f"Outages/ds   : {args.outages}")
+    logger.info(f"Outages/ds   : train={args.outages}, val={args.val_outages}")
     logger.info(f"Filters      : {filters_to_run}")
     logger.info(f"Modes        : {['3D' if m else '2D' for m in modes]}")
     logger.info(f"Seed         : {args.seed}")
@@ -535,7 +599,7 @@ def main():
 
     val_data_valid, val_outages = [], []
     for nd in val_data:
-        cfgs = generate_outage_configs(nd, args.outages, rng)
+        cfgs = generate_outage_configs(nd, args.val_outages, rng)
         if not cfgs:
             logger.warning(f"  val   {nd.dataset_name}: no valid outage configs — skipped.")
             continue

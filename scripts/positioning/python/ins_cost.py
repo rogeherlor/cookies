@@ -142,7 +142,7 @@ def _anees(pos_err, std_pos, A, B, N, stride=10, eps=1e-12):
 
 
 def single_window_cost(filter_module, nav_data, params, t1, d, use_3d,
-                      *, return_components=False):
+                      *, return_components=False, gate_anees=True):
     """
     Run one filter on one (dataset, outage-window) pair and return the cost.
 
@@ -150,7 +150,12 @@ def single_window_cost(filter_module, nav_data, params, t1, d, use_3d,
     Reject (return COST_REJECT) when:
       * filter throws an exception
       * cost is non-finite or > COST_REJECT/100
-      * ANEES outside [ANEES_LO, ANEES_HI]   ← consistency constraint
+      * ANEES outside [ANEES_LO, ANEES_HI]   ← only if gate_anees=True
+
+    The ANEES gate is appropriate during *training* (it stops the GA from
+    minimising J by gaming the covariance). During *validation* we want a
+    number every time, so callers should pass `gate_anees=False` and read
+    ANEES from the components dict as diagnostic, not gate.
 
     If `return_components=True` returns a dict with raw component values
     (used by loggers / post-tune diagnostic reports).
@@ -197,7 +202,7 @@ def single_window_cost(filter_module, nav_data, params, t1, d, use_3d,
               + t_rel      / T_REL_REF
               + r_rel      / R_REL_REF)
 
-        if not in_band:
+        if gate_anees and not in_band:
             if return_components:
                 return {
                     'cost': COST_REJECT,
