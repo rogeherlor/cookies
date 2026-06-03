@@ -111,7 +111,7 @@ def _load_tuned_params(nav_data, mode_3d):
                 _best_classical.get('QgyrXY', 1e-7) +
                 _best_classical.get('QgyrZ', 1e-7)) / 2.0
 
-        for dl_key in ['tlio', 'deep_kf', 'tartan_imu']:
+        for dl_key in ['tlio', 'deep_kf', 'tartan_imu', 'iekf_ai_imu']:
             if dl_key not in result:   # don't overwrite if already tuned directly
                 result[dl_key] = _dl_base.copy()
 
@@ -238,7 +238,8 @@ def main():
     # Two naming schemes coexist: train_kitti writes iekfnets_held_<drive>.p
     # and train_loo writes fold_<seq>.p. Search both so the right fold weights
     # are used regardless of how the model was trained.
-    _repo_root = _HERE / '../../../..'
+    # _HERE = scripts/positioning/python/, so the repo root is THREE levels up.
+    _repo_root = _HERE / '../../..'
     if args.ai_imu_weights:
         _ai_weights = Path(args.ai_imu_weights)
     else:
