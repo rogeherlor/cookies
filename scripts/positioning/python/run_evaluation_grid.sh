@@ -21,6 +21,7 @@ COMPARE="$SCRIPT_DIR/ins_compare.py"
 # ── Parse args ────────────────────────────────────────────────────────────────
 DATASET_ARG=""
 TEST_SEQ_ARG=""
+FILTERS_ARG=""
 RUN_BASELINE=true
 
 while [[ $# -gt 0 ]]; do
@@ -28,6 +29,10 @@ while [[ $# -gt 0 ]]; do
         --dataset)     DATASET_ARG="--dataset $2"; shift 2 ;;
         --test-seq)    TEST_SEQ_ARG="--test-seq $2"; shift 2 ;;
         --no-baseline) RUN_BASELINE=false; shift ;;
+        --filters)     shift; FILTERS_ARG="--filters"
+                       while [[ $# -gt 0 && "$1" != --* ]]; do
+                           FILTERS_ARG="$FILTERS_ARG $1"; shift
+                       done ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -49,7 +54,7 @@ run_case() {
 # ── Table A: No-outage baseline ───────────────────────────────────────────────
 if $RUN_BASELINE; then
     run_case "TABLE A — No outage (baseline)" \
-        $DATASET_ARG $TEST_SEQ_ARG \
+        $DATASET_ARG $TEST_SEQ_ARG $FILTERS_ARG \
         --outage-start 0 --outage-duration 0
 fi
 
@@ -61,7 +66,7 @@ for start in "${STARTS[@]}"; do
     for dur in "${DURATIONS[@]}"; do
         COUNT=$(( COUNT + 1 ))
         run_case "TABLE B [$COUNT/$TOTAL] — Outage: start=${start}s, duration=${dur}s" \
-            $DATASET_ARG $TEST_SEQ_ARG \
+            $DATASET_ARG $TEST_SEQ_ARG $FILTERS_ARG \
             --outage-start "$start" --outage-duration "$dur"
     done
 done

@@ -43,10 +43,37 @@ DEFAULT_FILTERS = [
     'tlio',
     'deep_kf',
     'tartan_imu',
+    'isam2',
+    'isam2_map',
 ]
 
 KITTI_SEQS    = ['01', '04', '06', '07', '08', '09', '10']
 COOKIES_SEQS  = ['c01', 'c02', 'c03', 'c04', 'c05']
+
+
+# Mirror of data_loader.KITTI_SEQ_TO_DRIVE. Inlined so the emitter does not
+# require pymap3d (which data_loader imports at module load time).
+_KITTI_SEQ_TO_DRIVE = {
+    '00': '2011_10_03_drive_0027_extract',
+    '01': '2011_10_03_drive_0042_extract',
+    '02': '2011_10_03_drive_0034_extract',
+    '04': '2011_09_30_drive_0016_extract',
+    '05': '2011_09_30_drive_0018_extract',
+    '06': '2011_09_30_drive_0020_extract',
+    '07': '2011_09_30_drive_0027_extract',
+    '08': '2011_09_30_drive_0028_extract',
+    '09': '2011_09_30_drive_0033_extract',
+    '10': '2011_09_30_drive_0034_extract',
+}
+
+
+def _resolve_dataset_name(seq_id: str) -> str:
+    """
+    Map a short sequence id ('01' / 'c03') to the dataset_name string
+    ins_compare.py actually uses for KITTI ('2011_10_03_drive_0042_extract').
+    Cookies short ids pass through unchanged.
+    """
+    return _KITTI_SEQ_TO_DRIVE.get(seq_id, seq_id)
 
 
 def _result_json_path(filter_key: str, seq_id: str,
@@ -56,20 +83,23 @@ def _result_json_path(filter_key: str, seq_id: str,
 
     `ins_compare.py` writes to outputs/<fkey>/<traj_subdir>/<run_id>_results.json
     where:
-        traj_subdir = "<dataset_name>_no_outage"          if no outage
-                      "<dataset_name>_outage_<t1>s_<d>s"  otherwise
-        run_id      = "no_outage"                          if no outage
-                      "outage_<t1>s_<d>s"                  otherwise
-    The sequence ID (01, c03, etc.) is part of the dataset_name.
+        traj_subdir = "<dataset_name>_no_outage"            if no outage
+                      "<dataset_name>_outage_<t1>s_<d>s"    otherwise   (t1, d as float)
+        run_id      = "no_outage"                           if no outage
+                      "outage_<t1>s_<d>s"                   otherwise
+    The dataset_name is the FULL KITTI drive name (or the cookies short id),
+    not the short KITTI sequence id.
     """
+    dataset_name = _resolve_dataset_name(seq_id)
     if outage_start == 0 and outage_duration == 0:
-        subdir = f'{seq_id}_no_outage'
+        subdir = f'{dataset_name}_no_outage'
         run_id = 'no_outage'
     else:
-        t1 = int(outage_start)
-        d  = int(outage_duration)
-        subdir = f'{seq_id}_outage_{t1}s_{d}s'
-        run_id = f'outage_{t1}s_{d}s'
+        t1 = float(outage_start)
+        d  = float(outage_duration)
+        tag = f'outage_{t1}s_{d}s'
+        subdir = f'{dataset_name}_{tag}'
+        run_id = tag
     return _REPO_ROOT / f'outputs/{filter_key}/{subdir}/{run_id}_results.json'
 
 
@@ -106,6 +136,8 @@ def _filter_label(filter_key: str) -> str:
         'tlio':            r'TLIO',
         'deep_kf':         r'DKF',
         'tartan_imu':      r'Tartan IMU',
+        'isam2':           r'iSAM2',
+        'isam2_map':       r'iSAM2 Map',
     }
     return pretty.get(filter_key, filter_key.replace('_', r'\_'))
 

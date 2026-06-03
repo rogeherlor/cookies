@@ -157,7 +157,33 @@ def main():
                         help='GNSS outage start time [s] (overrides ins_config.OUTAGE_START)')
     parser.add_argument('--outage-duration', type=float, default=None,
                         help='GNSS outage duration [s] (overrides ins_config.OUTAGE_DURATION)')
+    parser.add_argument('--filters', nargs='+', default=None,
+                        help='Restrict evaluation to a subset of filter keys '
+                             '(e.g. --filters iekf_ai_imu tlio deep_kf tartan_imu). '
+                             'Default: all 13 filters in FILTER_CONFIGS. '
+                             'Useful shortcut: --filters dl runs only the four DL filters.')
     args = parser.parse_args()
+
+    # Resolve the "dl" alias and apply the filter restriction.
+    if args.filters:
+        _DL_KEYS = {'iekf_ai_imu', 'tlio', 'deep_kf', 'tartan_imu'}
+        _CLASSICAL_KEYS = {'esekfg_vanilla', 'esekfg_enhanced',
+                           'esekfs_vanilla', 'esekfs_enhanced',
+                           'iekf_vanilla', 'iekf_enhanced', 'imu_only'}
+        wanted = set()
+        for k in args.filters:
+            if k == 'dl':
+                wanted |= _DL_KEYS
+            elif k == 'classical':
+                wanted |= _CLASSICAL_KEYS
+            else:
+                wanted.add(k)
+        _kept = [cfg for cfg in FILTER_CONFIGS if cfg['key'] in wanted]
+        _unknown = wanted - {cfg['key'] for cfg in FILTER_CONFIGS}
+        if _unknown:
+            parser.error(f"Unknown filter keys: {sorted(_unknown)}. "
+                         f"Available: {[cfg['key'] for cfg in FILTER_CONFIGS]}")
+        FILTER_CONFIGS[:] = _kept
 
     # ── Shared configuration ───────────────────────────────────────────────────
     if args.test_seq is not None:
@@ -209,14 +235,28 @@ def main():
         }
 
     # ── AI-IEKF weights path (LOO fold-specific) ───────────────────────────────
+    # Two naming schemes coexist: train_kitti writes iekfnets_held_<drive>.p
+    # and train_loo writes fold_<seq>.p. Search both so the right fold weights
+    # are used regardless of how the model was trained.
     _repo_root = _HERE / '../../../..'
     if args.ai_imu_weights:
         _ai_weights = Path(args.ai_imu_weights)
     else:
-        _drive = data_loader.KITTI_SEQ_TO_DRIVE.get(
+        _drive  = data_loader.KITTI_SEQ_TO_DRIVE.get(
             nav_data.dataset_name, nav_data.dataset_name)
-        _candidate = _repo_root / f'artifacts/deep_iekf/iekfnets_held_{_drive}.p'
-        _ai_weights = _candidate if _candidate.exists() else None
+        _drive_to_seq = {v: k for k, v in data_loader.KITTI_SEQ_TO_DRIVE.items()}
+        _seq_id = _drive_to_seq.get(_drive, nav_data.dataset_name)
+        _candidates = [
+            _repo_root / f'artifacts/deep_iekf/fold_{_seq_id}.p',           # train_loo
+            _repo_root / f'artifacts/deep_iekf/iekfnets_held_{_drive}.p',   # train_kitti
+        ]
+        _ai_weights = next((p for p in _candidates if p.exists()), None)
+        if _ai_weights is None:
+            logger_msg = (f"  AI-IMU: no fold-specific weights found "
+                          f"(searched {[str(p) for p in _candidates]}); "
+                          f"runner will fall back to generic iekfnets.p — "
+                          f"BEWARE OF FOLD LEAK.")
+            print(logger_msg)
 
     # ── Output directories ─────────────────────────────────────────────────────
     if dr_mode:

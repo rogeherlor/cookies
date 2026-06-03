@@ -78,14 +78,12 @@ def validate_with_journal_metric(
         't_rel_pct'         : float  — KITTI relative translation error [%]
         'r_rel_deg_per_km'  : float  — KITTI relative rotation error [deg/km]
         'anees'             : float  — average NEES on the GNSS-aided phase
-        'ate_no_outage_m'   : float  — RMSE position error on the GNSS-aided phase [m]
         'val_seq'           : str
         'outage_start_s'    : float
         'outage_duration_s' : float
 
     On any failure, 'J' is set to float('inf') and a 'reason' key is included.
     """
-    import numpy as np
     import data_loader
     import ins_cost
 
@@ -104,30 +102,11 @@ def validate_with_journal_metric(
             't_rel_pct':         float('nan'),
             'r_rel_deg_per_km':  float('nan'),
             'anees':             float('nan'),
-            'ate_no_outage_m':   float('nan'),
             'val_seq':           val_seq,
             'outage_start_s':    float(outage_start),
             'outage_duration_s': float(outage_duration),
             'reason':            components.get('reason', 'unknown'),
         }
-
-    # ATE on the GPS-aided phase (i.e. outside the outage window) — useful
-    # diagnostic that distinguishes "good baseline, bad DR" from "bad both".
-    sr = float(nav_data.sample_rate)
-    A = int(outage_start * sr)
-    B = int((outage_start + outage_duration) * sr)
-
-    p_gt = ins_cost._enu_ground_truth(nav_data)
-    res = filter_module.run(nav_data, params or {},
-                            {'start': float(outage_start),
-                             'duration': float(outage_duration)},
-                            use_3d)
-    p = res['p']
-    pos_err = p - p_gt
-    mask = np.ones(len(p_gt), dtype=bool)
-    mask[A:B] = False
-    err_in = np.sqrt(pos_err[mask, 0]**2 + pos_err[mask, 1]**2 + pos_err[mask, 2]**2)
-    ate_no_outage = float(np.sqrt(np.mean(err_in**2))) if err_in.size else float('nan')
 
     return {
         'J':                 float(components['cost']),
@@ -135,7 +114,6 @@ def validate_with_journal_metric(
         't_rel_pct':         float(components['t_rel']),
         'r_rel_deg_per_km':  float(components['r_rel']),
         'anees':             float(components['anees']),
-        'ate_no_outage_m':   ate_no_outage,
         'val_seq':           val_seq,
         'outage_start_s':    float(outage_start),
         'outage_duration_s': float(outage_duration),
@@ -153,6 +131,5 @@ def format_val_line(epoch: int, metrics: dict) -> str:
         f"ATE_out={metrics['ate_outage_m']:.2f}m  "
         f"t_rel={metrics['t_rel_pct']:.2f}%  "
         f"r_rel={metrics['r_rel_deg_per_km']:.2f}deg/km  "
-        f"ATE_nooutage={metrics['ate_no_outage_m']:.2f}m  "
         f"ANEES={metrics['anees']:.2f}"
     )
