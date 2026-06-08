@@ -45,6 +45,7 @@ opt_einsum==3.4.0
 optree==0.17.0
 packaging==25.0
 pandas==2.3.3
+peft==0.19.1
 pillow==12.0.0
 protobuf>=5.28.0
 Pygments==2.19.2

@@ -171,7 +171,12 @@ def main():
     parser.add_argument('--seqs', nargs='+', default=None,
                         help='LOO validation sequence IDs (default: all clean seqs for the dataset). '
                              f'kitti default: {" ".join(CLEAN_SEQS)}. cookies default: c01..c06.')
-    parser.add_argument('--epochs-tlio',    type=int, default=2000)
+    parser.add_argument('--epochs-tlio',    type=int, default=50,
+                        help='Total TLIO training epochs. Default 50 follows '
+                             'Liu et al. RA-L 2020 §IV-A (~10 MSE + ~10 NLL, '
+                             'plus a small cosine-tail safety margin). Higher '
+                             'values collapse log-sigma² and force the SCEKF '
+                             'Mahalanobis gate to disable itself at runtime.')
     parser.add_argument('--epochs-deep-kf', type=int, default=150)
     parser.add_argument('--epochs-tartan',  type=int, default=50)
     parser.add_argument('--epochs-ai-imu',  type=int, default=400)

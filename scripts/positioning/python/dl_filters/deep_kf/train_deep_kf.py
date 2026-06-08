@@ -95,48 +95,71 @@ def generate_eskf_posteriors(nav):
 
 def compute_component_weights(x_post_list):
     """
-    Compute per-component inverse-variance weights for balanced MSE loss.
+    Per-component weights for the 15D weighted-MSE loss.
 
-    The 15D state has very different scales (position ~100m, biases ~0.01).
-    Weighting inversely by variance balances gradient contributions.
+    Each component contributes equally to the total loss so the network is
+    forced to learn position and orientation as well as biases.
+
+    Background. A previous version used `1 / Var(Δx_i)` (inverse-variance of
+    one-step state increments). For KITTI the per-step increments span
+    Var(Δp) ≈ 10⁻² (~ velocity / 100 Hz, in metres²) versus
+    Var(Δb_gyr) ≈ 10⁻¹² (steady gyro bias). The resulting weight ratio is
+    ~10¹⁰; after mean-normalisation the position and velocity weights collapse
+    to numerical zero (we observed `[0, 0, 0, 0, 0, 0, 1e-3, 1e-3, 0, 0, 0,
+    1e-3, 6.6, 8.3, 0.08]`), so the LSTM was trained to predict gyro/accel
+    biases while ignoring position errors entirely. This produced the
+    catastrophic `t_rel ≈ 150 %` we observed on the held-out KITTI drive.
+
+    Hosseinyalamdary 2018 (Eq. 31) prescribes a "weighted MSE" but does not
+    pin the weights. Equal weights are the simplest paper-allowed choice and
+    make position errors dominate the loss in proportion to their physical
+    scale, which is exactly what the journal metric (ATE, t_rel, r_rel) cares
+    about. Bias errors still contribute, just at the natural scale set by
+    their magnitude.
 
     Parameters
     ----------
-    x_post_list : list of (N_i, 15) arrays
+    x_post_list : list of (N_i, 15) arrays — accepted for API compatibility;
+        unused for equal weights but kept so a future variant can switch back
+        to data-driven weighting without changing the call sites.
 
     Returns
     -------
-    weights : (15,) tensor — normalised so mean(weights) = 1
+    weights : (15,) tensor of ones.
     """
-    all_data = np.concatenate(x_post_list, axis=0)  # (N_total, 15)
-    # Compute variance of state increments (what the residual network predicts)
-    deltas = np.diff(all_data, axis=0)  # (N_total-1, 15)
-    var = np.var(deltas, axis=0) + 1e-12  # avoid division by zero
-    inv_var = 1.0 / var
-    inv_var = inv_var / inv_var.mean()  # normalise so mean weight = 1
-    return torch.from_numpy(inv_var.astype(np.float32))
+    del x_post_list   # explicitly ignored for the equal-weights variant
+    return torch.ones(15, dtype=torch.float32)
 
 
 def run_sequence_teacher_forced(x_post, model, optimizer, device,
-                                tbptt_len, weights, training=True):
+                                tbptt_len, weights, training=True,
+                                sampling_prob: float = 0.0):
     """
-    Run one epoch pass on a single sequence with teacher-forced LSTM training.
+    Run one epoch pass on a single sequence with teacher-forced LSTM training,
+    optionally with scheduled sampling (Bengio et al., NeurIPS 2015).
 
     At each step t:
-        input  = x_post[t-1]  (15D posterior state)
+        input  = x_post[t-1]              with probability 1 - sampling_prob,
+                 last detached model out  with probability     sampling_prob
+                                          (only when training=True)
         target = x_post[t]    (15D next posterior state)
         pred   = model(input) (15D predicted state, with residual)
         loss   = weighted_MSE(pred, target)
 
     Parameters
     ----------
-    x_post   : (N, 15) float32 — ESKF posterior trajectory
-    model    : DeepKFNet
-    optimizer: torch optimizer
-    device   : 'cpu' or 'cuda'
-    tbptt_len: int — TBPTT segment length (number of steps)
-    weights  : (15,) tensor — per-component MSE weights
-    training : bool — if True, backward() + step()
+    x_post        : (N, 15) float32 — ESKF posterior trajectory
+    model         : DeepKFNet
+    optimizer     : torch optimizer
+    device        : 'cpu' or 'cuda'
+    tbptt_len     : int — TBPTT segment length (number of steps)
+    weights       : (15,) tensor — per-component MSE weights
+    training      : bool — if True, backward() + step()
+    sampling_prob : float in [0, 1] — probability of substituting the teacher
+                    input x_post[t-1] with the model's last detached prediction.
+                    0.0 reproduces the original pure-teacher-forced behaviour;
+                    ignored when training=False so the validation pass remains
+                    a clean MSE-on-posteriors comparison across runs.
 
     Returns
     -------
@@ -152,13 +175,23 @@ def run_sequence_teacher_forced(x_post, model, optimizer, device,
     total_loss  = 0.
     step_count  = 0
     loss_seg    = None
+    pred_prev   = None   # last detached prediction for scheduled sampling
 
     for t in range(1, N):
-        # Teacher forcing: always feed the ground-truth posterior
-        input_t  = x_t[t - 1].unsqueeze(0)   # (1, 15)
-        target_t = x_t[t].unsqueeze(0)        # (1, 15)
+        # Scheduled sampling: with probability sampling_prob feed the model's
+        # last (detached) prediction instead of the ground-truth posterior.
+        # Detaching breaks the gradient path so the sampled input is treated
+        # as a constant — only the new forward step contributes to the loss.
+        if (training and pred_prev is not None
+                and sampling_prob > 0.0
+                and torch.rand((), device=device).item() < sampling_prob):
+            input_t = pred_prev
+        else:
+            input_t = x_t[t - 1].unsqueeze(0)   # (1, 15)
+        target_t = x_t[t].unsqueeze(0)            # (1, 15)
 
-        pred_t, hidden = model(input_t, hidden)  # (1, 15)
+        pred_t, hidden = model(input_t, hidden)   # (1, 15)
+        pred_prev = pred_t.detach()
 
         # Weighted MSE loss
         step_loss = ((pred_t - target_t) ** 2 * w).mean()
@@ -318,15 +351,29 @@ def train(args):
             print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
             _val_hook = None
 
-    print(f"\nPhase 2: Training LSTM (teacher-forced, {args.epochs} epochs) ...")
+    if args.sampling_prob_max > 0.0:
+        print(f"\nPhase 2: Training LSTM (teacher-forced with scheduled "
+              f"sampling 0 → {args.sampling_prob_max:.2f} over the second "
+              f"half, {args.epochs} epochs) ...")
+    else:
+        print(f"\nPhase 2: Training LSTM (teacher-forced, {args.epochs} "
+              f"epochs) ...")
+    _ss_warmup = args.epochs // 2
     for epoch in range(start_epoch, args.epochs):
+        # Linear scheduled-sampling curriculum: 0 for the first half, then
+        # ramping to args.sampling_prob_max over the second half. Bengio et
+        # al. NeurIPS 2015 — closes the exposure-bias gap between teacher-
+        # forced training and autoregressive inference.
+        _ss_prob = (max(epoch - _ss_warmup, 0)
+                    / max(args.epochs - _ss_warmup, 1)
+                    * args.sampling_prob_max)
         model.train()
         train_loss = 0.
         for x_post in train_posteriors:
             train_loss += run_sequence_teacher_forced(
                 x_post, model, optimizer, device,
                 tbptt_len=args.tbptt_len, weights=weights,
-                training=True,
+                training=True, sampling_prob=_ss_prob,
             )
         scheduler.step()
 
@@ -342,7 +389,8 @@ def train(args):
                     )
             print(f"Epoch {epoch+1:4d}/{args.epochs}  "
                   f"train={train_loss:.4f}  val={val_loss:.4f}  "
-                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+                  f"lr={scheduler.get_last_lr()[0]:.2e}  "
+                  f"ss={_ss_prob:.3f}")
             if val_loss < best_val:
                 best_val = val_loss
                 torch.save({
@@ -391,8 +439,18 @@ def _parse_args():
     parser.add_argument('--epochs',     type=int,   default=150)
     parser.add_argument('--lr',         type=float, default=1e-3)
     parser.add_argument('--latent-dim', type=int,   default=128)
-    parser.add_argument('--tbptt-len',  type=int,   default=200,
-                        help="TBPTT segment length (number of IMU steps)")
+    parser.add_argument('--tbptt-len',  type=int,   default=50,
+                        help="TBPTT segment length (number of IMU steps). "
+                             "Shorter segments stabilise the LSTM hidden "
+                             "state; 30-100 is standard for 1 Hz GPS "
+                             "supervision over 100 Hz IMU. Hosseinyalamdary "
+                             "2018 does not pin the value.")
+    parser.add_argument('--sampling-prob-max', type=float, default=0.25,
+                        help="Maximum probability of feeding the model's own "
+                             "previous output instead of the teacher posterior "
+                             "during the second half of training (scheduled "
+                             "sampling curriculum, Bengio et al. NeurIPS 2015; "
+                             "0 disables, restoring pure teacher forcing).")
     parser.add_argument('--output',     default=str(_REPO_ROOT / 'artifacts/deep_kf'))
     parser.add_argument('--resume',     default=None)
     parser.add_argument('--val-metric-every', type=int, default=10,
