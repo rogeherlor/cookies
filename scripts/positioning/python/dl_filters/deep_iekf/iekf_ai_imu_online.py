@@ -21,16 +21,24 @@ This module produces an online, strictly CAUSAL estimate:
 This matches the paper's stated design (N_n as a function of "past and present" IMU
 measurements, IEEE TIV 2020 §IV-B) and is the form intended for Hailo deployment.
 
-Accuracy note
--------------
-Because the weights were TRAINED with future context, running them causally is an
-approximation: expect a small difference vs the batch version.  Run
+Two weight sources (run() auto-selects)
+---------------------------------------
+A. CAUSAL-trained weights in artifacts/deep_iekf_online/ (or AI_IMU_ONLINE_WEIGHTS) —
+   a left-padded CausalMesNet trained by `train_ai_imu.py --causal`.  These are
+   causal BY CONSTRUCTION, so run() evaluates them in a single batch pass: strictly
+   online, 0 ms latency, exact.  This is the recommended Hailo path.
+B. Acausal upstream weights in artifacts/deep_iekf/ — run causally via the sliding
+   window described above (current-sample-hold).  An approximation, since those
+   weights were trained with future context.
 
-    python iekf_ai_imu_online.py --validate [--window N]
+Accuracy note (path B)
+----------------------
+Running acausal weights causally costs accuracy.  Quantify it with
 
-to quantify it on the default ins_config sequence (prints max/mean covariance
-difference vs batch, and trajectory RMSE).  If the gap is too large for your needs,
-retrain a causal (left-padded) MesNet — see DEVIATIONS.md.
+    python iekf_ai_imu_online.py --validate [--window N] [--lookahead K]
+
+(prints max/mean covariance difference vs batch and trajectory RMSE).  If the gap
+matters, train a causal model (path A) — see DEVIATIONS.md.
 
 Drop-in: run(nav_data, params, outage_config, use_3d_rotation) matches iekf_ai_imu.
 """
@@ -50,6 +58,66 @@ from iekf_ai_imu import (
     _add_aimu_path, _find_weights, _find_norm_factors, _run_filter_loop,
     _AI_IMU_SRC, _ARTIFACTS,
 )
+
+# Separate folder for causal-trained weights (train_ai_imu.py --causal).
+_ARTIFACTS_ONLINE = _ARTIFACTS.parent / 'deep_iekf_online'
+
+
+def _find_online_weights():
+    """
+    Locate causal-trained weights, in order:
+      1. env AI_IMU_ONLINE_WEIGHTS
+      2. <repo>/artifacts/deep_iekf_online/iekfnets.p
+      3. any fold_*.p / *_held_*.p in that folder
+    Returns Path or None.
+    """
+    env_path = os.environ.get('AI_IMU_ONLINE_WEIGHTS')
+    if env_path and Path(env_path).exists():
+        return Path(env_path)
+    canonical = _ARTIFACTS_ONLINE / 'iekfnets.p'
+    if canonical.exists():
+        return canonical
+    if _ARTIFACTS_ONLINE.exists():
+        for pat in ('fold_*.p', '*_held_*.p'):
+            hits = sorted(p for p in _ARTIFACTS_ONLINE.glob(pat)
+                          if not p.name.endswith('_norm.p'))
+            if hits:
+                return hits[0]
+    return None
+
+
+def _load_causal_torch_iekf(u_np, weights_path):
+    """Build TORCHIEKF with a CausalMesNet and load causal-trained weights."""
+    _add_aimu_path()
+    import torch
+    from utils_torch_filter import TORCHIEKF
+    from causal_mesnet import attach_causal_mesnet
+    try:
+        from main_kitti import KITTIParameters as _KP
+        torch_iekf = TORCHIEKF(_KP)
+    except Exception:
+        torch_iekf = TORCHIEKF()
+    if torch_iekf.cov0_measurement is None:
+        torch_iekf.cov0_measurement = torch.tensor([0.2, 300.0]).double()
+    if isinstance(torch_iekf.g, np.ndarray):
+        torch_iekf.g = torch.from_numpy(torch_iekf.g).double()
+
+    attach_causal_mesnet(torch_iekf)            # swap MesNet → CausalMesNet
+    torch_iekf.load_state_dict(torch.load(weights_path, map_location='cpu'))
+    torch_iekf.eval()
+
+    norm = _find_norm_factors(weights_path)
+    if norm is not None:
+        torch_iekf.u_loc = norm['u_loc'].double()
+        torch_iekf.u_std = norm['u_std'].double()
+    else:
+        u_loc = torch.from_numpy(np.mean(u_np, axis=0)).double()
+        u_std = torch.from_numpy(np.std(u_np, axis=0)).double()
+        u_std[u_std < 1e-6] = 1.0
+        torch_iekf.u_loc, torch_iekf.u_std = u_loc, u_std
+        print(f"[iekf_ai_imu_online] WARNING: causal norm factors not found next to "
+              f"{weights_path} — recomputed from sequence (not deployable).")
+    return torch_iekf
 
 # Sliding-window length fed to MesNet per step.  Receptive field is ≈ 17 samples,
 # so the last (current) output needs ~8 real past samples for full left context;
@@ -217,15 +285,37 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     window = int((params or {}).get('window', DEFAULT_WINDOW))
     lookahead = int((params or {}).get('lookahead', 0))
 
-    # ── Causal MesNet inference (trained weights, no future) ────────────────────
-    torch_iekf, weights_path = _load_torch_iekf(nav_data, u_np)
-    if torch_iekf is not None:
+    # Decide architecture: 'causal' (left-padded, trained for online) vs 'acausal'
+    # (upstream weights run causally via sliding-window approximation).
+    causal_arch = (params or {}).get('causal_arch', None)
+    online_weights = _find_online_weights()
+    if causal_arch is None:
+        causal_arch = online_weights is not None
+
+    measurements_covs_np = None
+
+    # ── Path A: causal-trained CausalMesNet (exact online, one batch pass) ──────
+    if causal_arch and online_weights is not None:
+        import torch
+        torch_iekf = _load_causal_torch_iekf(u_np, online_weights)
         iekf.set_learned_covariance(torch_iekf)
-        measurements_covs_np = causal_mes_inference(torch_iekf, u_np, window, lookahead)
-        print(f"AI-IMU (online): causal MesNet from {weights_path} "
-              f"(window={window} past + lookahead={lookahead} future samples; "
-              f"latency={lookahead / sr * 1000:.0f} ms).")
-    else:
+        with torch.no_grad():
+            measurements_covs_np = torch_iekf.forward_nets(
+                torch.from_numpy(u_np).double()).cpu().numpy()
+        print(f"AI-IMU (online): CAUSAL MesNet (left-padded) from {online_weights} "
+              f"— strictly online, 0 ms latency, single batch pass.")
+
+    # ── Path B: upstream acausal weights, run causally via sliding window ───────
+    if measurements_covs_np is None:
+        torch_iekf, weights_path = _load_torch_iekf(nav_data, u_np)
+        if torch_iekf is not None:
+            iekf.set_learned_covariance(torch_iekf)
+            measurements_covs_np = causal_mes_inference(torch_iekf, u_np, window, lookahead)
+            print(f"AI-IMU (online): acausal MesNet from {weights_path}, run causally "
+                  f"(window={window} past + lookahead={lookahead} future; "
+                  f"latency={lookahead / sr * 1000:.0f} ms). "
+                  f"Train with --causal for a true causal model.")
+    if measurements_covs_np is None:
         if os.environ.get('IEKF_AI_IMU_REQUIRE_WEIGHTS', '') == '1':
             raise RuntimeError("[iekf_ai_imu_online] No MesNet weights found and "
                                "IEKF_AI_IMU_REQUIRE_WEIGHTS=1.")

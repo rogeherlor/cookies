@@ -16,6 +16,13 @@ Usage
       --epochs 50 \\
       --output artifacts/deep_iekf
 
+  # CAUSAL / online model for Hailo (strictly no future samples):
+  #   swaps MesNet → CausalMesNet (left-padded), warm-starts from the acausal
+  #   iekfnets.p if present, and saves to artifacts/deep_iekf_online/.
+  #   Run it with iekf_ai_imu_online.py (key 'iekf_ai_imu_online').
+  python dl_filters/deep_iekf/train_ai_imu.py \\
+      --mode loo --causal --held-out 2011_09_30_drive_0033_extract --epochs 400
+
 NOTE on 10 Hz vs 100 Hz
 -----------------------
 --mode kitti  : Uses raw KITTI OXTS data at 100 Hz, matching the paper's setup.
@@ -52,22 +59,48 @@ _REPO_ROOT   = _HERE.parent.parent.parent.parent.parent
 _AI_IMU_SRC  = _REPO_ROOT / 'external/ai-imu-dr/src'
 _SCRIPT_DIR  = _HERE.parent.parent     # scripts/positioning/python/
 _ARTIFACTS   = _REPO_ROOT / 'artifacts/deep_iekf'
+_ARTIFACTS_ONLINE = _REPO_ROOT / 'artifacts/deep_iekf_online'   # causal weights
 
 
 def _add_paths():
-    for p in [str(_AI_IMU_SRC), str(_SCRIPT_DIR)]:
+    for p in [str(_AI_IMU_SRC), str(_SCRIPT_DIR), str(_HERE)]:
         if p not in sys.path:
             sys.path.insert(0, p)
 
 
+def _maybe_make_causal(iekf, causal, warm_start=None):
+    """
+    If `causal`, replace iekf.mes_net with a CausalMesNet (left-padded, strictly
+    online).  Optionally warm-start its conv/linear weights from an existing
+    acausal weights file (`warm_start` path) for faster convergence.
+    Must be called AFTER prepare_filter and BEFORE set_optimizer.
+    """
+    if not causal:
+        return iekf
+    from causal_mesnet import attach_causal_mesnet
+    ws = None
+    if warm_start is not None and Path(warm_start).exists():
+        ws = torch.load(warm_start, map_location='cpu')
+        print(f"  Causal MesNet: warm-starting from {warm_start}")
+    else:
+        print("  Causal MesNet: training from scratch (no warm-start)")
+    attach_causal_mesnet(iekf, warm_start_state_dict=ws)
+    iekf.train()
+    return iekf
+
+
 # ── Journal-metric validation hook (display-only) ─────────────────────────────
 
-def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int):
+def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int,
+                          causal: bool = False):
     """
     Return a callable hook(epoch) that runs the journal three-component metric
     on the held-out sequence using the just-saved fold weights. Returns None
     if validation should be skipped (no held_out, or val_metric_every == 0,
     or imports unavailable).
+
+    When `causal`, validation uses the online runner (iekf_ai_imu_online) loading
+    the CausalMesNet weights via AI_IMU_ONLINE_WEIGHTS; otherwise the batch runner.
     """
     if not held_out or not val_metric_every:
         return None
@@ -80,11 +113,14 @@ def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int):
     val_seq = _drive_to_seq.get(held_out, held_out)
     if val_seq not in {'01', '04', '06', '07', '08', '09', '10'}:
         return None
+    runner_mod = ('dl_filters.deep_iekf.iekf_ai_imu_online' if causal
+                  else 'dl_filters.deep_iekf.iekf_ai_imu')
+    env_var = 'AI_IMU_ONLINE_WEIGHTS' if causal else 'AI_IMU_WEIGHTS'
     try:
         from dl_filters._validation import (validate_with_journal_metric,
                                             format_val_line)
         import importlib
-        runner = importlib.import_module('dl_filters.deep_iekf.iekf_ai_imu')
+        runner = importlib.import_module(runner_mod)
     except Exception as e:
         print(f"  [val] AI-IMU hook unavailable ({e}) — skipping journal metric")
         return None
@@ -94,8 +130,8 @@ def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int):
         import os as _os
         if not weights_canonical.exists():
             return
-        _prev = _os.environ.get('AI_IMU_WEIGHTS')
-        _os.environ['AI_IMU_WEIGHTS'] = str(weights_canonical)
+        _prev = _os.environ.get(env_var)
+        _os.environ[env_var] = str(weights_canonical)
         try:
             m = validate_with_journal_metric(filter_module=runner, val_seq=val_seq)
             print(format_val_line(epoch, m))
@@ -103,16 +139,16 @@ def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int):
             print(f"  [val] journal-metric hook failed: {exc}")
         finally:
             if _prev is None:
-                _os.environ.pop('AI_IMU_WEIGHTS', None)
+                _os.environ.pop(env_var, None)
             else:
-                _os.environ['AI_IMU_WEIGHTS'] = _prev
+                _os.environ[env_var] = _prev
     return _hook
 
 
 # ── KITTI mode ─────────────────────────────────────────────────────────────────
 
 def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training,
-                held_out=None, val_metric_every=0):
+                held_out=None, val_metric_every=0, causal=False, warm_start=None):
     """
     Train using the AI-IMU's own KITTIDataset on raw 100 Hz KITTI data.
     This matches the paper's training setup exactly.
@@ -149,6 +185,9 @@ def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training,
 
     if held_out is None:
         # Standard full training via launch()
+        if causal:
+            raise SystemExit("--causal requires a manual training loop; use "
+                             "--mode loo (recommended) or pass --held-out.")
         from main_kitti import launch
         launch(args)
     else:
@@ -171,9 +210,11 @@ def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training,
                   f"{list(dataset.datasets_train_filter.keys())}")
 
         iekf      = prepare_filter(args, dataset)
+        iekf      = _maybe_make_causal(iekf, causal, warm_start)
         prepare_loss_data(args, dataset)
         optimizer = set_optimizer(iekf)
-        _val_hook = _build_aiimu_val_hook(output_dir, held_out, val_metric_every)
+        _val_hook = _build_aiimu_val_hook(output_dir, held_out, val_metric_every,
+                                          causal=causal)
         for epoch in range(1, epochs + 1):
             train_loop(args, dataset, epoch, iekf, optimizer, args.seq_dim)
             save_iekf(args, iekf)
@@ -224,7 +265,8 @@ def _save_norm_factors(output_dir, args):
 
 # ── LOO mode (data_loader pickle files, no raw KITTI needed) ─────────────────
 
-def train_loo(output_dir, epochs, held_out=None, val_metric_every=0):
+def train_loo(output_dir, epochs, held_out=None, val_metric_every=0,
+              causal=False, warm_start=None):
     """
     Train using our preprocessed KITTI pickle files (datasets/raw_kitti/<drive>.p)
     at 100 Hz — same frequency as the AI-IMU paper — without needing the full raw
@@ -261,9 +303,11 @@ def train_loo(output_dir, epochs, held_out=None, val_metric_every=0):
     args.continue_training = False
 
     iekf      = prepare_filter(args, dataset)
+    iekf      = _maybe_make_causal(iekf, causal, warm_start)
     prepare_loss_data(args, dataset)
     optimizer = set_optimizer(iekf)
-    _val_hook = _build_aiimu_val_hook(output_dir, held_out, val_metric_every)
+    _val_hook = _build_aiimu_val_hook(output_dir, held_out, val_metric_every,
+                                      causal=causal)
 
     for epoch in range(1, epochs + 1):
         train_loop(args, dataset, epoch, iekf, optimizer, args.seq_dim)
@@ -398,9 +442,17 @@ def main():
     p.add_argument('--epochs', type=int, default=400,
                    help='Number of training epochs (paper uses 400)')
     p.add_argument('--output', type=str,
-                   default=str(_ARTIFACTS),
+                   default=None,
                    help='Output directory for weights and normalization factors '
-                        '(default: artifacts/deep_iekf/ at repo root)')
+                        '(default: artifacts/deep_iekf/, or artifacts/deep_iekf_online/ '
+                        'when --causal)')
+    p.add_argument('--causal', action='store_true',
+                   help='Train a strictly causal (left-padded) CausalMesNet for online '
+                        'use (no future samples). Requires --mode loo or --held-out. '
+                        'Default output folder becomes artifacts/deep_iekf_online/.')
+    p.add_argument('--warm-start', dest='warm_start', default=None,
+                   help='[--causal] Acausal weights file to warm-start the causal conv '
+                        'layers from (default: artifacts/deep_iekf/iekfnets.p if present).')
     p.add_argument('--continue', dest='continue_training', action='store_true',
                    help='[kitti mode] Resume from existing iekfnets.p in output dir')
     p.add_argument('--held-out', dest='held_out', default=None,
@@ -416,6 +468,15 @@ def main():
                         'Original Brossard covariance-regression loss is unchanged.')
     args = p.parse_args()
 
+    # Resolve default output folder (causal weights live in a separate folder).
+    if args.output is None:
+        args.output = str(_ARTIFACTS_ONLINE if args.causal else _ARTIFACTS)
+    # Default warm-start source for causal training.
+    warm_start = args.warm_start
+    if args.causal and warm_start is None:
+        _default_ws = _ARTIFACTS / 'iekfnets.p'
+        warm_start = str(_default_ws) if _default_ws.exists() else None
+
     if args.mode == 'kitti':
         if args.kitti_raw_dir is None:
             p.error('--kitti-raw-dir is required for --mode kitti')
@@ -426,6 +487,8 @@ def main():
             continue_training=args.continue_training,
             held_out=args.held_out,
             val_metric_every=args.val_metric_every,
+            causal=args.causal,
+            warm_start=warm_start,
         )
     elif args.mode == 'loo':
         train_loo(
@@ -433,8 +496,12 @@ def main():
             epochs=args.epochs,
             held_out=args.held_out,
             val_metric_every=args.val_metric_every,
+            causal=args.causal,
+            warm_start=warm_start,
         )
     else:
+        if args.causal:
+            p.error('--causal is not supported for --mode single; use --mode loo')
         train_single(
             output_dir=args.output,
             epochs=args.epochs,
