@@ -49,7 +49,7 @@ from filters import (
     imu_only,
 )
 from smoothers import rts_smoother, isam2_runner, isam2_map_runner, fgo_batch_runner
-from dl_filters.deep_iekf  import iekf_ai_imu
+from dl_filters.deep_iekf  import iekf_ai_imu, iekf_ai_imu_online
 from dl_filters.tlio       import tlio_runner
 from dl_filters.deep_kf    import deep_kf_runner
 from dl_filters.tartan_imu import tartan_runner
@@ -111,7 +111,7 @@ def _load_tuned_params(nav_data, mode_3d):
                 _best_classical.get('QgyrXY', 1e-7) +
                 _best_classical.get('QgyrZ', 1e-7)) / 2.0
 
-        for dl_key in ['tlio', 'deep_kf', 'tartan_imu', 'iekf_ai_imu']:
+        for dl_key in ['tlio', 'deep_kf', 'tartan_imu', 'iekf_ai_imu', 'iekf_ai_imu_online']:
             if dl_key not in result:   # don't overwrite if already tuned directly
                 result[dl_key] = _dl_base.copy()
 
@@ -129,6 +129,7 @@ FILTER_CONFIGS = [
     {'name': 'IMU Only',       'key': 'imu_only',      'module': imu_only},
     # Deep learning filters
     {'name': 'IEKF AI-IMU',  'key': 'iekf_ai_imu', 'module': iekf_ai_imu},
+    {'name': 'IEKF AI-IMU Online', 'key': 'iekf_ai_imu_online', 'module': iekf_ai_imu_online},
     {'name': 'TLIO',         'key': 'tlio',         'module': tlio_runner},
     {'name': 'Deep KF',      'key': 'deep_kf',      'module': deep_kf_runner},
     {'name': 'Tartan IMU',   'key': 'tartan_imu',   'module': tartan_runner},
@@ -160,13 +161,13 @@ def main():
     parser.add_argument('--filters', nargs='+', default=None,
                         help='Restrict evaluation to a subset of filter keys '
                              '(e.g. --filters iekf_ai_imu tlio deep_kf tartan_imu). '
-                             'Default: all 13 filters in FILTER_CONFIGS. '
-                             'Useful shortcut: --filters dl runs only the four DL filters.')
+                             'Default: all filters in FILTER_CONFIGS. '
+                             'Useful shortcut: --filters dl runs only the DL filters.')
     args = parser.parse_args()
 
     # Resolve the "dl" alias and apply the filter restriction.
     if args.filters:
-        _DL_KEYS = {'iekf_ai_imu', 'tlio', 'deep_kf', 'tartan_imu'}
+        _DL_KEYS = {'iekf_ai_imu', 'iekf_ai_imu_online', 'tlio', 'deep_kf', 'tartan_imu'}
         _CLASSICAL_KEYS = {'esekfg_vanilla', 'esekfg_enhanced',
                            'esekfs_vanilla', 'esekfs_enhanced',
                            'iekf_vanilla', 'iekf_enhanced', 'imu_only'}
@@ -346,10 +347,10 @@ def main():
 
         logger.info(f"\nRunning {fname}  ({'tuned' if params else 'default params'})…")
 
-        # For AI-IEKF: inject fold-specific weights via env var if available
-        if fkey == 'iekf_ai_imu' and _ai_weights is not None:
+        # For AI-IEKF (batch + online): inject fold-specific weights via env var if available
+        if fkey in ('iekf_ai_imu', 'iekf_ai_imu_online') and _ai_weights is not None:
             os.environ['AI_IMU_WEIGHTS'] = str(_ai_weights)
-        elif fkey == 'iekf_ai_imu':
+        elif fkey in ('iekf_ai_imu', 'iekf_ai_imu_online'):
             os.environ.pop('AI_IMU_WEIGHTS', None)
 
         _t0 = datetime.now()

@@ -30,6 +30,27 @@ The IEKF state (Appendix A, eq. 21) is [φ(0:3), ξ_v(3:6), ξ_p(6:9),
 δb_ω(9:12), δb_a(12:15), ξ_Rc(15:18), ξ_pc(18:21)] — 21D.
 The car-to-IMU calibration (Rc, pc) is estimated online, starting at identity/zero.
 
+Execution model — BATCH CNN, then SEQUENTIAL filter (NOT fully online)
+----------------------------------------------------------------------
+This wrapper runs in two distinct phases, matching the original AI-IMU code:
+  1. The MesNet CNN is evaluated ONCE over the WHOLE IMU sequence in a single
+     forward pass (ONNX sess.run / torch forward_nets on the full u array),
+     producing the (N, 2) NHC measurement covariances for every timestep up front.
+  2. The IEKF then runs sequentially (propagate → NHC update → optional GPS update)
+     for i in 1..N, only *looking up* the pre-computed covariance for step i.
+So the Kalman recursion is causal/online, but the covariance adaptation is NOT:
+it is computed offline in bulk. This is a benchmark-replay design.
+
+Important for a true online / embedded (e.g. Hailo) deployment:
+MesNet is ACAUSAL. cov_net uses two Conv1d layers (k=5, the 2nd with dilation=3)
+with symmetric ReplicationPad1d(4) on both sides — receptive field ≈ 17 samples
+centred on i, so output[i] depends on ~8 FUTURE IMU samples. To reproduce these
+results online you must either (a) buffer a sliding window covering the full
+receptive field and accept ~8-sample (~80 ms @ 100 Hz) latency — interior samples
+then match the batch output numerically — or (b) retrain a causal (left-padded)
+MesNet. Also use the FIXED saved normalisation constants (u_loc/u_std from the
+*_norm.p sibling), never per-sequence statistics, or results will drift.
+
 GPS / GNSS
 ----------
 When nav_data.gps_available is True at a given timestep, the filter applies a
@@ -38,13 +59,14 @@ The CNN adapter continues to regulate NHC covariances independently.
 During GPS outages (gps_available=False), the filter runs pure CNN dead-reckoning.
 Set DR_MODE=True in ins_config.py to disable GPS for all filters (paper comparison).
 
-10 Hz vs 100 Hz
----------------
-The paper trains and tests at 100 Hz (raw KITTI OXTS).  Our nav_data is at 10 Hz
-(synchronized KITTI).  The CNN window (N=15 samples) thus covers 1.5 s instead of
-0.15 s.  For best performance, train at 100 Hz and run at 100 Hz (see train_ai_imu.py).
-Running at 10 Hz with weights trained at 10 Hz still works; paper results (1.10% t_rel)
-require 100 Hz data.
+Sample rate
+-----------
+The paper trains and tests at 100 Hz (raw KITTI OXTS), and so do we: nav_data is
+loaded at 100 Hz (KITTI native rate; see data_loader.get_kitti_dataset default and
+ins_config.py).  The CNN window (N=15 samples) therefore covers 0.15 s, matching
+the paper.  The filter runs at whatever nav_data.sample_rate provides, so train and
+test rates stay consistent (see train_ai_imu.py).  Paper results (1.10% t_rel)
+assume 100 Hz data.
 
 Weights
 -------
@@ -63,7 +85,7 @@ from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _HERE        = Path(__file__).resolve().parent
-_REPO_ROOT   = _HERE.parent.parent.parent.parent.parent   # c:/Github/cookies
+_REPO_ROOT   = _HERE.parent.parent.parent.parent.parent   # <repo>/cookies
 _AI_IMU_SRC  = _REPO_ROOT / 'external/ai-imu-dr/src'
 _ARTIFACTS   = _REPO_ROOT / 'artifacts/deep_iekf'
 
@@ -298,7 +320,8 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     Parameters
     ----------
     nav_data        : NavigationData — IMU + GNSS data
-    params          : optional dict — supports 'Rpos' (GPS noise std [m], default 2.0)
+    params          : optional dict — supports 'Rpos' (GPS position measurement
+                      variance [m²] applied to R_gps diagonal, default 4.0 ≈ 2 m std)
     outage_config   : optional {'start': float, 'duration': float} — GPS blackout window
     use_3d_rotation : ignored (filter always runs in full 3D)
 

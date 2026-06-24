@@ -35,6 +35,7 @@ import filter_params as fp
 #                      Requires: conda install -c conda-forge gtsam
 # Deep learning filters (require trained weights in artifacts/ — see dl_filters/):
 #   "iekf_ai_imu"    — AI-IMU Dead-Reckoning (Brossard et al. IEEE TIV 2020)
+#   "iekf_ai_imu_online" — AI-IMU, causal/online MesNet (Hailo variant; no future data)
 #   "tlio"           — Tight Learned Inertial Odometry (Liu et al. IEEE RA-L 2020)
 #   "deep_kf"        — Deep Kalman Filter GNSS+IMU (Hosseinyalamdary MDPI Sensors 2018)
 #   "tartan_imu"     — Tartan IMU foundation model (Zhao et al. CVPR 2025)
