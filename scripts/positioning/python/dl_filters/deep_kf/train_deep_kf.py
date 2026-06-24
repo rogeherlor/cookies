@@ -225,7 +225,19 @@ def run_sequence_teacher_forced(x_post, model, optimizer, device,
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
+def _set_seed(seed):
+    """Seed Python/NumPy/Torch RNGs for reproducible training. No-op if seed is None."""
+    if seed is None:
+        return
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    print(f"  RNG seed = {seed} (reproducible training)")
+
+
 def train(args):
+    _set_seed(getattr(args, 'seed', 42))
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on device: {device}")
 
@@ -460,6 +472,9 @@ def _parse_args():
                              "J = ATE_outage + t_rel + r_rel (default 10; "
                              "0 disables). Original weighted-MSE training loss "
                              "is unchanged.")
+    parser.add_argument('--seed', type=int, default=42,
+                        help="RNG seed for reproducible training (default: 42, "
+                             "matching the genetic optimiser).")
     return parser.parse_args()
 
 

@@ -17,8 +17,9 @@ Usage
       --output artifacts/deep_iekf
 
   # CAUSAL / online model for Hailo (strictly no future samples):
-  #   swaps MesNet → CausalMesNet (left-padded), warm-starts from the acausal
-  #   iekfnets.p if present, and saves to artifacts/deep_iekf_online/.
+  #   swaps MesNet → CausalMesNet (left-padded), saves to artifacts/deep_iekf_online/.
+  #   Trains FROM SCRATCH by default so a causal-vs-acausal comparison is fair
+  #   (add "--warm-start" only if you want the best deployable model fast).
   #   Run it with iekf_ai_imu_online.py (key 'iekf_ai_imu_online').
   python dl_filters/deep_iekf/train_ai_imu.py \\
       --mode loo --causal --held-out 2011_09_30_drive_0033_extract --epochs 400
@@ -66,6 +67,58 @@ def _add_paths():
     for p in [str(_AI_IMU_SRC), str(_SCRIPT_DIR), str(_HERE)]:
         if p not in sys.path:
             sys.path.insert(0, p)
+
+
+def _set_seed(seed):
+    """
+    Seed Python/NumPy/Torch RNGs for reproducible DL training. Upstream AI-IMU sets
+    no seed, so training is otherwise non-deterministic (random init, dropout, batch
+    order). With a fixed seed, MesNet and CausalMesNet also get identical conv init
+    (pad layers consume no RNG, param-creation order matches) → controlled comparison.
+    No-op when seed is None (preserves the original non-deterministic behaviour).
+    """
+    if seed is None:
+        return
+    import random as _random
+    import numpy as _np
+    _random.seed(seed)
+    _np.random.seed(seed)
+    torch.manual_seed(seed)
+    print(f"  RNG seed = {seed} (reproducible training)")
+
+
+def _resolve_warm_start(warm_start, held_out):
+    """
+    Resolve the warm-start source for causal training.
+
+    warm_start is None    → DO NOT warm-start (train from scratch). This is the
+                            default, so a causal-vs-acausal comparison isolates the
+                            effect of causality and is not confounded by inheriting
+                            acausal-learned features.
+    warm_start == 'auto'  → prefer the SAME-fold acausal weights
+                            (artifacts/deep_iekf/fold_<seq>.p — same LOO split, no
+                            held-out leak), else the generic iekfnets.p.
+    warm_start == <path>  → use that file.
+
+    Use 'auto'/<path> only when the goal is the best deployable causal model fast,
+    not a controlled comparison. Returns a path string or None.
+    """
+    if warm_start is None:
+        return None
+    if warm_start != 'auto':
+        return warm_start
+    try:
+        from kitti_sequences import KITTI_SEQ_TO_DRIVE
+        _d2s = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
+    except Exception:
+        _d2s = {}
+    if held_out:
+        seq = _d2s.get(held_out, held_out)
+        cand = _ARTIFACTS / f'fold_{seq}.p'
+        if cand.exists():
+            return str(cand)
+    generic = _ARTIFACTS / 'iekfnets.p'
+    return str(generic) if generic.exists() else None
 
 
 def _maybe_make_causal(iekf, causal, warm_start=None):
@@ -148,7 +201,8 @@ def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int,
 # ── KITTI mode ─────────────────────────────────────────────────────────────────
 
 def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training,
-                held_out=None, val_metric_every=0, causal=False, warm_start=None):
+                held_out=None, val_metric_every=0, causal=False, warm_start=None,
+                seed=None):
     """
     Train using the AI-IMU's own KITTIDataset on raw 100 Hz KITTI data.
     This matches the paper's training setup exactly.
@@ -158,6 +212,7 @@ def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training,
                When set, weights are saved as iekfnets_held_<drive>.p.
     """
     _add_paths()
+    _set_seed(seed)
     from main_kitti import KITTIParameters, KITTIDataset
 
     output_dir = Path(output_dir)
@@ -210,7 +265,7 @@ def train_kitti(kitti_raw_dir, output_dir, epochs, continue_training,
                   f"{list(dataset.datasets_train_filter.keys())}")
 
         iekf      = prepare_filter(args, dataset)
-        iekf      = _maybe_make_causal(iekf, causal, warm_start)
+        iekf      = _maybe_make_causal(iekf, causal, _resolve_warm_start(warm_start, held_out))
         prepare_loss_data(args, dataset)
         optimizer = set_optimizer(iekf)
         _val_hook = _build_aiimu_val_hook(output_dir, held_out, val_metric_every,
@@ -266,7 +321,7 @@ def _save_norm_factors(output_dir, args):
 # ── LOO mode (data_loader pickle files, no raw KITTI needed) ─────────────────
 
 def train_loo(output_dir, epochs, held_out=None, val_metric_every=0,
-              causal=False, warm_start=None):
+              causal=False, warm_start=None, seed=None):
     """
     Train using our preprocessed KITTI pickle files (datasets/raw_kitti/<drive>.p)
     at 100 Hz — same frequency as the AI-IMU paper — without needing the full raw
@@ -279,6 +334,7 @@ def train_loo(output_dir, epochs, held_out=None, val_metric_every=0,
     import types
     import shutil
     _add_paths()
+    _set_seed(seed)
     from kitti_sequences import MultiSequenceDataset, KITTI_CLEAN_SEQS
     from main_kitti import KITTIParameters
     from train_torch_filter import (prepare_filter, prepare_loss_data,
@@ -303,7 +359,7 @@ def train_loo(output_dir, epochs, held_out=None, val_metric_every=0,
     args.continue_training = False
 
     iekf      = prepare_filter(args, dataset)
-    iekf      = _maybe_make_causal(iekf, causal, warm_start)
+    iekf      = _maybe_make_causal(iekf, causal, _resolve_warm_start(warm_start, held_out))
     prepare_loss_data(args, dataset)
     optimizer = set_optimizer(iekf)
     _val_hook = _build_aiimu_val_hook(output_dir, held_out, val_metric_every,
@@ -450,9 +506,14 @@ def main():
                    help='Train a strictly causal (left-padded) CausalMesNet for online '
                         'use (no future samples). Requires --mode loo or --held-out. '
                         'Default output folder becomes artifacts/deep_iekf_online/.')
-    p.add_argument('--warm-start', dest='warm_start', default=None,
-                   help='[--causal] Acausal weights file to warm-start the causal conv '
-                        'layers from (default: artifacts/deep_iekf/iekfnets.p if present).')
+    p.add_argument('--warm-start', dest='warm_start', nargs='?', const='auto',
+                   default=None,
+                   help='[--causal] Warm-start the causal conv layers from acausal '
+                        'weights. DEFAULT: OFF — train from scratch, so a causal-vs-'
+                        'acausal comparison is not confounded. Pass "--warm-start" '
+                        '(no value) to auto-pick the same-fold acausal weights, or '
+                        '"--warm-start <path>" for a specific file. Use only when you '
+                        'want the best deployable causal model fast, not a fair study.')
     p.add_argument('--continue', dest='continue_training', action='store_true',
                    help='[kitti mode] Resume from existing iekfnets.p in output dir')
     p.add_argument('--held-out', dest='held_out', default=None,
@@ -460,6 +521,11 @@ def main():
                         '(e.g. 2011_09_30_drive_0033_extract). Weights saved as '
                         'iekfnets_held_<drive>.p. Use run_loo_evaluation.py to '
                         'run all 7 folds automatically.')
+    p.add_argument('--seed', type=int, default=42,
+                   help='RNG seed for reproducible training (default: 42, matching '
+                        'the genetic optimiser and the other DL filters). With a fixed '
+                        'seed the acausal and causal models share identical conv init, '
+                        'giving a controlled "cost of causality" comparison.')
     p.add_argument('--val-metric-every', type=int, default=50,
                    help='[kitti/loo modes] Every K epochs (and at final epoch), '
                         'run a display-only validation on the held-out sequence '
@@ -471,11 +537,8 @@ def main():
     # Resolve default output folder (causal weights live in a separate folder).
     if args.output is None:
         args.output = str(_ARTIFACTS_ONLINE if args.causal else _ARTIFACTS)
-    # Default warm-start source for causal training.
+    # Warm-start is resolved per-fold inside train_loo/train_kitti (fold-aware).
     warm_start = args.warm_start
-    if args.causal and warm_start is None:
-        _default_ws = _ARTIFACTS / 'iekfnets.p'
-        warm_start = str(_default_ws) if _default_ws.exists() else None
 
     if args.mode == 'kitti':
         if args.kitti_raw_dir is None:
@@ -489,6 +552,7 @@ def main():
             val_metric_every=args.val_metric_every,
             causal=args.causal,
             warm_start=warm_start,
+            seed=args.seed,
         )
     elif args.mode == 'loo':
         train_loo(
@@ -498,6 +562,7 @@ def main():
             val_metric_every=args.val_metric_every,
             causal=args.causal,
             warm_start=warm_start,
+            seed=args.seed,
         )
     else:
         if args.causal:

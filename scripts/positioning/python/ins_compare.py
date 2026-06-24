@@ -347,11 +347,25 @@ def main():
 
         logger.info(f"\nRunning {fname}  ({'tuned' if params else 'default params'})…")
 
-        # For AI-IEKF (batch + online): inject fold-specific weights via env var if available
-        if fkey in ('iekf_ai_imu', 'iekf_ai_imu_online') and _ai_weights is not None:
-            os.environ['AI_IMU_WEIGHTS'] = str(_ai_weights)
-        elif fkey in ('iekf_ai_imu', 'iekf_ai_imu_online'):
-            os.environ.pop('AI_IMU_WEIGHTS', None)
+        # For AI-IEKF (batch): inject fold-specific acausal weights via env var.
+        if fkey == 'iekf_ai_imu':
+            if _ai_weights is not None:
+                os.environ['AI_IMU_WEIGHTS'] = str(_ai_weights)
+            else:
+                os.environ.pop('AI_IMU_WEIGHTS', None)
+        # For AI-IEKF online: prefer the matching causal fold in deep_iekf_online/;
+        # also set AI_IMU_WEIGHTS so the sliding-window fallback uses the right fold.
+        elif fkey == 'iekf_ai_imu_online':
+            if _ai_weights is not None:
+                os.environ['AI_IMU_WEIGHTS'] = str(_ai_weights)
+                _online_w = (_repo_root / 'artifacts/deep_iekf_online' / Path(_ai_weights).name)
+                if _online_w.exists():
+                    os.environ['AI_IMU_ONLINE_WEIGHTS'] = str(_online_w)
+                else:
+                    os.environ.pop('AI_IMU_ONLINE_WEIGHTS', None)
+            else:
+                os.environ.pop('AI_IMU_WEIGHTS', None)
+                os.environ.pop('AI_IMU_ONLINE_WEIGHTS', None)
 
         _t0 = datetime.now()
         try:

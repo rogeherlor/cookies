@@ -166,7 +166,19 @@ def build_dataset(train_seqs: list, val_seq: str = None, sample_rate: float = 10
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
+def _set_seed(seed):
+    """Seed Python/NumPy/Torch RNGs for reproducible training. No-op if seed is None."""
+    if seed is None:
+        return
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    print(f"  RNG seed = {seed} (reproducible training)")
+
+
 def train(args):
+    _set_seed(getattr(args, 'seed', 42))
     import importlib.util
     _mf_path = _HERE / 'network/model_factory.py'
     _spec = importlib.util.spec_from_file_location('_tlio_model_factory', _mf_path)
@@ -415,6 +427,9 @@ def _parse_args():
                              "J = ATE_outage + t_rel + r_rel (default 10; "
                              "0 disables). Original MSE/NLL training loss is "
                              "unchanged.")
+    parser.add_argument('--seed', type=int, default=42,
+                        help="RNG seed for reproducible training (default: 42, "
+                             "matching the genetic optimiser).")
     return parser.parse_args()
 
 
