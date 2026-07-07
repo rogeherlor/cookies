@@ -20,7 +20,7 @@ Phase 1: Generate ESKF posterior trajectories x_t^+ for each training sequence
 Phase 2: Teacher-forced sequence training:
     - Input:  x_{t-1}^+ (15D posterior state from ESKF)
     - Target: x_t^+     (15D posterior state at next timestep)
-    - Loss:   weighted MSE on all 15 state components
+    - Loss:   equal-weight MSE on all 15 state components (plain MSE, Eq. 27)
     - The LSTM learns to predict state transitions, including the effect of
       GPS measurement updates on the state.
 
@@ -66,29 +66,46 @@ CLEAN_SEQS = ['01', '04', '06', '07', '08', '09', '10']
 
 # ── Phase 1: Generate ESKF posterior trajectories ─────────────────────────────
 
-def generate_eskf_posteriors(nav):
+def generate_error_targets(nav):
     """
-    Run ESKF enhanced on a sequence to produce the posterior state trajectory.
+    Feedforward error target (the paper's FeedforwardFilter): the error between
+    the GPS-aided ESKF posterior and the free-running (open-loop) IMU trajectory,
+
+        e = [p_a - p_dr, v_a - v_dr, wrap(θ_a - θ_dr), b_a, b_g]
+
+    This is the accumulating IMU error the LSTM learns to model (Appendix A1),
+    NOT the absolute navigation state.
 
     Returns
     -------
-    x_post : (N, 15) float32 — [p(3), v(3), rpy(3), b_acc(3), b_gyr(3)]
+    err : (N, 15) float32 — [δp(3), δv(3), δθ(3), b_acc(3), b_gyr(3)]
     """
     import esekfs_enhanced
+    import pymap3d as pm
+    from deep_kf_runner import _free_dead_reckoning, _qfrom_euler, _wrap
 
     result = esekfs_enhanced.run(nav)
-    x_post = np.concatenate([
-        result['p'],         # (N, 3) position ENU
-        result['v'],         # (N, 3) velocity ENU
-        result['r'],         # (N, 3) roll, pitch, yaw
-        result['bias_acc'],  # (N, 3) accel bias FLU
-        result['bias_gyr'],  # (N, 3) gyro bias FLU
+    p_a  = result['p'];  v_a = result['v'];  th_a = result['r']
+    b_a  = result['bias_acc'];  b_g = result['bias_gyr']
+
+    N  = p_a.shape[0]
+    Ts = 1.0 / nav.sample_rate
+    e_enu, n_enu, u_enu = pm.geodetic2enu(
+        nav.lla[:, 0], nav.lla[:, 1], nav.lla[:, 2],
+        nav.lla0[0], nav.lla0[1], nav.lla0[2])
+    p_gps0 = np.array([e_enu[0], n_enu[0], u_enu[0]])
+    q0 = _qfrom_euler(nav.orient[0, 0], nav.orient[0, 1], nav.orient[0, 2])
+    p_dr, v_dr, th_dr = _free_dead_reckoning(
+        nav.accel_flu, nav.gyro_flu, p_gps0, nav.vel_enu[0], q0, Ts, N)
+
+    err = np.concatenate([
+        p_a  - p_dr,
+        v_a  - v_dr,
+        _wrap(th_a - th_dr),
+        b_a,
+        b_g,
     ], axis=1)  # (N, 15)
-
-    # Unwrap yaw to avoid 2π discontinuities in training targets
-    x_post[:, 8] = np.unwrap(x_post[:, 8])  # yaw is index 8 (rpy[2])
-
-    return x_post.astype(np.float32)
+    return err.astype(np.float32)
 
 
 # ── Phase 2: Teacher-forced sequence training ─────────────────────────────────
@@ -110,12 +127,13 @@ def compute_component_weights(x_post_list):
     biases while ignoring position errors entirely. This produced the
     catastrophic `t_rel ≈ 150 %` we observed on the held-out KITTI drive.
 
-    Hosseinyalamdary 2018 (Eq. 31) prescribes a "weighted MSE" but does not
-    pin the weights. Equal weights are the simplest paper-allowed choice and
-    make position errors dominate the loss in proportion to their physical
-    scale, which is exactly what the journal metric (ATE, t_rel, r_rel) cares
-    about. Bias errors still contribute, just at the natural scale set by
-    their magnitude.
+    Hosseinyalamdary 2018 prescribes a *plain* MSE energy (Eq. 27,
+    E = ½‖x⁺⁻ − x⁺‖²); Eqs. 31-32 are the gradient-descent weight updates,
+    not a weighted loss. Equal weights therefore reproduce the paper's
+    objective exactly, and make position errors dominate the loss in
+    proportion to their physical scale, which is what the journal metric
+    (ATE, t_rel, r_rel) cares about. Bias errors still contribute, just at the
+    natural scale set by their magnitude.
 
     Parameters
     ----------
@@ -283,21 +301,33 @@ def train(args):
         except Exception as e:
             print(f"  WARNING: failed to load val seq {seq}: {e}")
 
-    # ── Phase 1: Generate ESKF posteriors ─────────────────────────────────
-    print("Phase 1: Generating ESKF posterior trajectories ...")
-    train_posteriors = []
+    # ── Phase 1: Generate feedforward error targets (aided − free IMU) ─────
+    print("Phase 1: Generating feedforward error targets (aided − free IMU) ...")
+    train_errors = []
     for i, nav in enumerate(train_navs):
-        x_post = generate_eskf_posteriors(nav)
-        train_posteriors.append(x_post)
-        print(f"  Seq {train_seqs[i]}: {x_post.shape[0]} samples, "
-              f"pos range [{x_post[:,:3].min():.1f}, {x_post[:,:3].max():.1f}] m")
+        err = generate_error_targets(nav)
+        train_errors.append(err)
+        print(f"  Seq {train_seqs[i]}: {err.shape[0]} samples, "
+              f"δpos range [{err[:,:3].min():.1f}, {err[:,:3].max():.1f}] m")
 
-    val_posteriors = []
-    for i, nav in enumerate(val_navs):
-        x_post = generate_eskf_posteriors(nav)
-        val_posteriors.append(x_post)
+    # Per-component normalisation (paper cell 71): standardise the error using
+    # statistics from the TRAINING folds only, saved with the checkpoint so the
+    # runner can denormalise the network output.  We average the per-sequence
+    # statistics rather than concatenating, so a single long drive cannot
+    # dominate the scale by sheer sample count (its raw dead-reckoning drift
+    # over minutes is orders of magnitude larger than the short drives).
+    per_seq_mean = np.stack([e.mean(axis=0) for e in train_errors])   # (n_seq, 15)
+    per_seq_std  = np.stack([e.std(axis=0)  for e in train_errors])   # (n_seq, 15)
+    norm_mean = per_seq_mean.mean(axis=0).astype(np.float32)
+    norm_std  = (per_seq_std.mean(axis=0) + 1e-6).astype(np.float32)
+    print(f"  Norm mean (per-seq avg): {norm_mean.round(3)}")
+    print(f"  Norm std  (per-seq avg): {norm_std.round(3)}")
 
-    # Compute per-component weights from training data
+    # Downstream code operates on the NORMALISED error trajectories.
+    train_posteriors = [(e - norm_mean) / norm_std for e in train_errors]
+    val_posteriors   = [(generate_error_targets(nav) - norm_mean) / norm_std
+                        for nav in val_navs]
+
     weights = compute_component_weights(train_posteriors)
     print(f"  Component weights: {weights.numpy().round(3)}")
 
@@ -344,6 +374,8 @@ def train(args):
                         'num_layers': 2,
                         'nav_state_dim': 15,
                     },
+                    'norm_mean': torch.from_numpy(norm_mean),
+                    'norm_std': torch.from_numpy(norm_std),
                 }, val_metric_path)
                 _prev = _os.environ.get('DEEP_KF_WEIGHTS')
                 _os.environ['DEEP_KF_WEIGHTS'] = str(val_metric_path)
@@ -414,6 +446,8 @@ def train(args):
                         'num_layers': 2,
                         'nav_state_dim': 15,
                     },
+                    'norm_mean': torch.from_numpy(norm_mean),
+                    'norm_std': torch.from_numpy(norm_std),
                 }, output_dir / out_name)
                 print(f"  -> saved best ({out_name})")
         else:
@@ -436,6 +470,8 @@ def train(args):
                 'num_layers': 2,
                 'nav_state_dim': 15,
             },
+            'norm_mean': torch.from_numpy(norm_mean),
+            'norm_std': torch.from_numpy(norm_std),
         }, output_dir / out_name)
 
     print("Training complete.")

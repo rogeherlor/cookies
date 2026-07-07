@@ -23,13 +23,19 @@ x_t^+ which is more trustworthy than the DNN prediction.
 Differences from the original paper
 ------------------------------------
 1. F matrix: Solà 2017 ESKF linearized F matrix (same as esekfs_enhanced.py)
-   is used for error-state covariance propagation.  The original paper learns
-   a generic W_xx matrix via gradient descent (Eqs. 24-32).  Solà's F is
-   more numerically stable and leverages the established kinematic model.
+   is used for error-state covariance propagation.  The original paper ALSO
+   uses an analytic F (a Noureldin / Ref. [3] nav-frame error model, Appendix
+   Eq. A2) — it does NOT learn the covariance.  W_xx / W_h in the paper are the
+   network's coefficient (weight) matrices of the modelling step (Eqs. 20-21),
+   not P.  We reuse Solà's F for consistency with the other filters; it is more
+   numerically stable and leverages the established kinematic model.
 
-2. State space: 15-state ESKF [δp, δv, δα, δb_a, δb_g] in navigation space,
-   identical to esekfs_enhanced.py.  The original paper uses a generic latent
-   vector state.
+2. State space: the network input/target is the absolute 15-state
+   [p, v, rpy(Euler), b_a, b_g]; the error-state propagated for the covariance
+   is [δp, δv, δα, δb_a, δb_g], identical to esekfs_enhanced.py.  The original
+   paper's KF state is the explicit error-state [δp, δv, δθ, b_acc, b_gyro]
+   (Appendix Eq. A1) and its 3000-node latent vector h is separate; we model
+   the absolute posterior because the error posterior resets to ~0 each step.
 
 3. GPS update: standard ESKF position update (H = [I_3 | 0_3×12]) applied
    when gps_available[i] is True.  Paper also uses GPS; update structure same.
@@ -37,8 +43,9 @@ Differences from the original paper
 4. Training: LOO CV on KITTI clean sequences (01,04,06,07,08,09,10).
    Original paper: single urban driving dataset.
 
-5. Coordinate frames: FLU body / ENU navigation.  Original paper unspecified
-   (likely ECEF-derived).
+5. Coordinate frames: FLU body / ENU navigation.  The original paper uses a
+   local geographic navigation frame (curvilinear lat/lon/h; see the R_M, R_N,
+   tan φ terms of Appendix Eq. A2), not ECEF.
 
 6. Outage simulation and DR_MODE: added for project compatibility, not in paper.
 
@@ -148,12 +155,18 @@ def _load_model(weights_path: Path, latent_dim: int, num_layers: int,
     model = DeepKFNet(nav_state_dim=15,
                       hidden_dim=latent_dim, num_layers=num_layers)
     ckpt = torch.load(weights_path, map_location=device)
+    norm_mean = norm_std = None
     if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+        norm_mean = ckpt.get('norm_mean')
+        norm_std  = ckpt.get('norm_std')
         ckpt = ckpt['model_state_dict']
     model.load_state_dict(ckpt)
     model.to(device)
     model.eval()
-    return model
+    if norm_mean is not None and norm_std is not None:
+        norm_mean = np.asarray(norm_mean, dtype=float).reshape(15)
+        norm_std  = np.asarray(norm_std,  dtype=float).reshape(15)
+    return model, norm_mean, norm_std
 
 
 # ── Quaternion utilities (copied from esekfs_enhanced.py) ───────────────────────
@@ -218,6 +231,39 @@ def _qto_Rbn(q):
     ])
 
 
+def _wrap(a):
+    """Wrap angle(s) to [-pi, pi]."""
+    return (a + np.pi) % (2. * np.pi) - np.pi
+
+
+def _free_dead_reckoning(accel_flu, gyro_flu, p0, v0, q0, Ts, N,
+                         use_3d_rotation=True):
+    """
+    Open-loop strapdown mechanisation — the free-running (uncorrected) IMU
+    trajectory the paper's feedforward filter (pyins.FeedforwardFilter) estimates
+    the error against.  No GPS, no bias correction, no error feedback.
+
+    Returns absolute position, velocity (N,3) and roll-pitch-yaw (N,3).
+    """
+    p_dr  = np.zeros((N, 3))
+    v_dr  = np.zeros((N, 3))
+    th_dr = np.zeros((N, 3))
+    p = np.asarray(p0, dtype=float).copy()
+    v = np.asarray(v0, dtype=float).copy()
+    q = q0.copy()
+    p_dr[0], v_dr[0], th_dr[0] = p, v, _qto_rpy(q)
+    for i in range(N - 1):
+        omega_b = gyro_flu[i]
+        acc_b   = accel_flu[i]
+        dtheta  = omega_b * Ts if use_3d_rotation else np.array([0., 0., omega_b[2] * Ts])
+        q = _qnorm(_qmul(q, _qfrom_axis_angle(dtheta)))
+        a_enu = _qto_Rbn(q) @ acc_b
+        p = p + Ts * v + 0.5 * Ts**2 * (a_enu + GRAVITY)
+        v = v + Ts * (a_enu + GRAVITY)
+        p_dr[i+1], v_dr[i+1], th_dr[i+1] = p, v, _qto_rpy(q)
+    return p_dr, v_dr, th_dr
+
+
 # ── Main filter ───────────────────────────────────────────────────────────────
 
 def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
@@ -267,7 +313,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     weights_path = _find_weights(seq_id)
     latent_dim = int(p_cfg['latent_dim'])
     num_layers  = int(p_cfg['num_layers'])
-    model = _load_model(weights_path, latent_dim, num_layers, device)
+    model, norm_mean, norm_std = _load_model(weights_path, latent_dim, num_layers, device)
     print(f"Deep KF: loaded weights from {weights_path} (device={device})")
 
     # ── GPS outage mask ────────────────────────────────────────────────────
@@ -305,17 +351,26 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     std_b_acc  = np.zeros((N, 3))
     std_b_gyr  = np.zeros((N, 3))
 
-    # ── ESKF initialisation ────────────────────────────────────────────────
+    # ── Feedforward initialisation ─────────────────────────────────────────
     pos[0]     = p_gps_enu[0]
     vel[0]     = vel_enu[0]
     rpy_out[0] = orient[0]
 
-    pIMU = pos[0].copy()
-    vIMU = vel[0].copy()
-    q    = _qfrom_euler(orient[0, 0], orient[0, 1], orient[0, 2])
-    b_a  = np.zeros(3)
-    b_g  = np.zeros(3)
-    dx   = np.zeros(15)
+    if norm_mean is None or norm_std is None:
+        raise RuntimeError(
+            "Deep KF weights lack error-normalisation stats (norm_mean/norm_std). "
+            "This checkpoint predates the feedforward error-state model — retrain "
+            "with:  python ins_train.py deep_kf")
+
+    # Free-running (open-loop) IMU trajectory — the paper estimates the error
+    # against this uncorrected mechanisation (pyins.FeedforwardFilter), not
+    # against a GPS-corrected nominal.
+    q0 = _qfrom_euler(orient[0, 0], orient[0, 1], orient[0, 2])
+    p_dr, v_dr, th_dr = _free_dead_reckoning(
+        accel_flu, gyro_flu, p_gps_enu[0], vel_enu[0], q0, Ts, N, use_3d_rotation)
+
+    # Feedforward error state e = [δp, δv, δθ, b_a, b_g]; accumulates (no reset).
+    e = np.zeros(15)
 
     beta_acc = p_cfg['beta_acc']
     beta_gyr = p_cfg['beta_gyr']
@@ -337,25 +392,17 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
     R_pos = np.eye(3) * p_cfg['Rpos']
 
-    # ── LSTM state ─────────────────────────────────────────────────────────
+    # ── LSTM (feedforward error model) state ────────────────────────────────
     hidden = model.init_hidden(batch_size=1, device=device)
 
-    print(f"Deep KF: running filter on {N} samples ...")
+    print(f"Deep KF: running feedforward error filter on {N} samples ...")
 
     for i in range(N - 1):
 
-        # ── A. Correct IMU with current bias estimate ─────────────────
-        acc_b   = accel_flu[i] - b_a      # corrected acceleration (FLU)
-        omega_b = gyro_flu[i]  - b_g      # corrected angular rate (FLU)
-
-        # ── B. Covariance propagation (Solà F matrix) ─────────────────
-        # Strapdown quantities needed for F (Rbn, acc_b, omega_b)
-        if use_3d_rotation:
-            dtheta = omega_b * Ts
-        else:
-            dtheta = np.array([0., 0., omega_b[2] * Ts])
-
-        Rbn = _qto_Rbn(q)
+        # ── A. Covariance propagation (Solà F around the free-IMU nominal) ──
+        acc_b   = accel_flu[i]          # raw specific force (open-loop DR)
+        omega_b = gyro_flu[i]           # raw angular rate
+        Rbn = _qto_Rbn(_qfrom_euler(th_dr[i, 0], th_dr[i, 1], th_dr[i, 2]))
 
         F = np.zeros((15, 15))
         F[0:3,   3:6]   = np.eye(3)
@@ -368,66 +415,42 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
         Fd           = np.eye(15) + F * Ts
         Fd[6:9, 6:9] = _qto_Rbn(_qfrom_axis_angle(omega_b * Ts)).T
-
         P = Fd @ P @ Fd.T + Q
 
-        # ── C. DNN modelling step (Eqs. 20-21, Figure 3) ─────────────
-        # Build x_{t-1}^+ = current posterior nominal state (15D)
-        rpy_now = _qto_rpy(q)
-        x_post_np = np.concatenate([pIMU, vIMU, rpy_now, b_a, b_g])  # (15,)
-
+        # ── B. LSTM forward on the previous error (normalised) ──────────────
+        # Faithful to §3, the network replaces the prior only "in the absence of
+        # GNSS": under aiding the ordinary feedforward EKF runs and the LSTM is
+        # only kept warm (output ignored); under outage the LSTM prediction is
+        # the prior.  Either way the network sees the previous error once/step.
+        e_norm_in = (e - norm_mean) / norm_std
         with torch.no_grad():
-            x_post_t = torch.from_numpy(x_post_np).float().unsqueeze(0).to(device)
-            state_pred_t, hidden = model(x_post_t, hidden)
-            state_pred = state_pred_t[0].cpu().numpy()  # (15,)
+            e_t = torch.from_numpy(e_norm_in).float().unsqueeze(0).to(device)
+            e_pred_t, hidden = model(e_t, hidden)
+            e_lstm = e_pred_t[0].cpu().numpy() * norm_std + norm_mean
 
-        # ── D. Apply DNN prediction or strapdown ─────────────────────
-        # DNN replaces the prior x_t^- (strapdown would normally update
-        # pIMU/vIMU/q here, but DNN provides a better prediction).
-        # Unpack the 15D predicted state.
-        pIMU  = state_pred[0:3].copy()
-        vIMU  = state_pred[3:6].copy()
-        q     = _qfrom_euler(state_pred[6], state_pred[7], state_pred[8])
-        b_a   = state_pred[9:12].copy()
-        b_g   = state_pred[12:15].copy()
-
-        update_occurred = False
-
-        # ── E. GPS position update ────────────────────────────────────
         if gps_avail[i + 1]:
-            z_pos = p_gps_enu[i + 1] - pIMU
-            innov = z_pos - dx[0:3]
+            # ── C. AIDING: analytic feedforward EKF prior + GPS position update
+            e = Fd @ e                                            # Solà-F error prior
+            corrected_p = p_dr[i + 1] + e[0:3]
+            innov     = p_gps_enu[i + 1] - corrected_p
             S_gps     = P[0:3, 0:3] + R_pos
             S_gps_reg = S_gps + 1e-9 * np.eye(3)
             K_gps     = np.linalg.solve(S_gps_reg, P[0:3, :]).T   # 15×3
-            dx        = dx + K_gps @ innov
+            e         = e + K_gps @ innov
             H_gps     = np.zeros((3, 15)); H_gps[:, 0:3] = np.eye(3)
             IKH_gps   = np.eye(15) - K_gps @ H_gps
-            P         = IKH_gps @ P @ IKH_gps.T + K_gps @ R_pos @ K_gps.T  # Joseph form
+            P         = IKH_gps @ P @ IKH_gps.T + K_gps @ R_pos @ K_gps.T  # Joseph
             P         = 0.5 * (P + P.T)
-            update_occurred = True
+        else:
+            # ── C. OUTAGE: LSTM prediction replaces the analytic prior ──────
+            e = e_lstm
 
-        # ── F. Error injection ────────────────────────────────────────
-        if update_occurred:
-            pIMU += dx[0:3]
-            vIMU += dx[3:6]
-            b_a  += dx[9:12]
-            b_g  += dx[12:15]
-
-            delta_alpha = dx[6:9]
-            q = _qnorm(_qmul(q, _qfrom_axis_angle(delta_alpha)))
-
-            G           = np.eye(15)
-            G[6:9, 6:9] = np.eye(3) - 0.5 * _skew(delta_alpha)
-            P           = G @ P @ G.T
-            dx[:]       = 0.
-
-        # ── G. Store outputs ──────────────────────────────────────────
-        pos[i+1]       = pIMU
-        vel[i+1]       = vIMU
-        rpy_out[i+1]   = _qto_rpy(q)
-        b_acc_out[i+1] = b_a
-        b_gyr_out[i+1] = b_g
+        # ── D. Output = free IMU + estimated error (feedforward add-back) ────
+        pos[i+1]       = p_dr[i+1] + e[0:3]
+        vel[i+1]       = v_dr[i+1] + e[3:6]
+        rpy_out[i+1]   = _wrap(th_dr[i+1] + e[6:9])
+        b_acc_out[i+1] = e[9:12]
+        b_gyr_out[i+1] = e[12:15]
         std_pos[i+1]      = np.sqrt(np.maximum(np.diag(P[0:3,   0:3]),   0.))
         std_vel[i+1]      = np.sqrt(np.maximum(np.diag(P[3:6,   3:6]),   0.))
         std_orient[i+1]   = np.sqrt(np.maximum(np.diag(P[6:9,   6:9]),   0.))

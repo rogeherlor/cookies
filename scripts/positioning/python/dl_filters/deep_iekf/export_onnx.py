@@ -92,11 +92,24 @@ def export(weights_path, output_path, seq_len=4544):
 
     # Load weights
     mondict = torch.load(weights_path, map_location='cpu')
+
+    # A --causal checkpoint stores CausalMesNet (convs at cov_net.1/.5, pad-then-
+    # conv) rather than the acausal MesNet (convs at cov_net.0/.4). Detect that and
+    # swap in a CausalMesNet so the state_dict keys line up. MesNetWrapper reuses
+    # cov_net/cov_lin as-is, so the causal left-padding is preserved in the export.
+    if 'mes_net.cov_net.1.weight' in mondict:
+        from causal_mesnet import attach_causal_mesnet
+        attach_causal_mesnet(torch_iekf)
+
     torch_iekf.load_state_dict(mondict)
     torch_iekf.eval()
 
-    # Load normalization factors
-    norm_path = Path(weights_path).parent / 'iekfnets_norm.p'
+    # Load normalization factors (saved as '<weights-stem>_norm.p' by fold training,
+    # or 'iekfnets_norm.p' for whole-dataset training).
+    weights_path = Path(weights_path)
+    norm_path = weights_path.parent / f'{weights_path.stem}_norm.p'
+    if not norm_path.exists():
+        norm_path = weights_path.parent / 'iekfnets_norm.p'
     if norm_path.exists():
         norm = torch.load(norm_path, map_location='cpu')
         torch_iekf.u_loc = norm['u_loc'].double()
