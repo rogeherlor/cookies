@@ -17,9 +17,12 @@ Differences from the original paper:
    gps_available[i] is True.  Original paper is IMU-only (no GPS integration).
 
 3. Filter: 15-state ESKF (Solà 2017) for position/velocity/attitude tracking.
-   Tartan network outputs velocity in body frame → rotated to ENU → velocity
-   measurement (H = [0 | I_3 | 0_3×9]).  Original paper integrates velocity
-   directly without a Kalman filter.
+   Tartan network outputs body-frame velocity, fused as a BODY-FRAME velocity
+   measurement  z = v_body - Rbn^T v^n  with attitude Jacobian
+   H_θ = [Rbn^T v^n]_× , so the update observes heading (yaw) through the
+   vehicle's near-zero lateral/vertical body velocity.  (An ENU velocity
+   residual with H = [0 | I_3 | 0] leaves attitude unobserved.)  Original paper
+   integrates velocity directly without a Kalman filter.
 
 4. Online adaptation: DISABLED for fair comparison.  Tartan's GMM-based adaptive
    training buffer (paper Section 3.4) is not used during inference.
@@ -105,12 +108,15 @@ class _TartanImuStub(nn.Module):
         super().__init__()
         self.scale = nn.Parameter(torch.ones(1))
 
-    def forward(self, imu_input, robot_type='car'):
-        B           = imu_input.shape[0]
+    def forward(self, imu_input, robot_type='car', return_sequence=False):
+        B, T        = imu_input.shape[0], imu_input.shape[1]
         last_step   = imu_input[:, -1, :, 0:3]    # (B, step_samples, 3) accel
         dt          = 1.0 / 200.0
         v_body      = last_step.mean(dim=1) * dt * last_step.shape[1] * self.scale
         log_std     = torch.ones(B, 3, device=imu_input.device) * 0.5
+        if return_sequence:
+            v_body  = v_body.unsqueeze(1).expand(B, T, 3)
+            log_std = log_std.unsqueeze(1).expand(B, T, 3)
         return v_body, log_std
 
 
@@ -271,16 +277,19 @@ class _TartanIMUBackbone(nn.Module):
         x = self.resnet_post_pro(x)          # (B, 128, 13)
         return x.flatten(1)                  # (B, 1664)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_sequence: bool = False) -> torch.Tensor:
         """
         x: (B, lstm_steps, step_samples, 6)
-        Returns: (B, 64) — transformer features from last LSTM step
+        Returns: (B, 64) transformer features from the last LSTM step, or the
+        full (B, T, 64) sequence when return_sequence=True (per-window training).
         """
         B, T, S, C = x.shape
         feats = self.forward_cnn(x.reshape(B * T, C, S))  # (B*T, 1664)
         feats = feats.reshape(B, T, -1)                    # (B, T, 1664)
         lstm_out, _ = self.lstm(feats)                     # (B, T, 64)
         trunk_out   = self.IMU_Trunk(lstm_out)             # (B, T, 64)
+        if return_sequence:
+            return trunk_out                               # (B, T, 64)
         return trunk_out[:, -1, :]                         # (B, 64)
 
 
@@ -306,8 +315,10 @@ class _TartanIMUModel(nn.Module):
             'drone': _RobotHead(),
         })
 
-    def forward(self, x: torch.Tensor, robot_type: str = 'car'):
-        feat = self.model(x)                    # (B, 64)
+    def forward(self, x: torch.Tensor, robot_type: str = 'car',
+                return_sequence: bool = False):
+        # feat is (B, 64) or (B, T, 64); the Linear head broadcasts over T.
+        feat = self.model(x, return_sequence=return_sequence)
         return self.heads[robot_type](feat)     # (v_body, log_std)
 
 
@@ -657,18 +668,28 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 log_std = log_std_t[0].cpu().numpy().astype(np.float64)
                 log_std = np.clip(log_std, -10.0, 10.0)   # prevent exp underflow/overflow
 
-                v_enu_pred = Rbn @ v_body
-                Sigma_body = np.diag(np.maximum(np.exp(log_std), 1e-4))   # floor at 1e-4 m²/s²
-                Sigma_enu  = Rbn @ Sigma_body @ Rbn.T
+                # Body-frame velocity update — observes attitude (esp. yaw):
+                #   h(x) = R_bn v^n = Rbn^T v^n          (predicted body velocity)
+                #   z    = v_body_net - Rbn^T vIMU
+                #   H_v  = ∂h/∂δv = Rbn^T
+                #   H_θ  = ∂h/∂δα = [Rbn^T vIMU]_×       (body-frame error, ES-EKF Solà)
+                # A car's true lateral/vertical body velocity is ≈0, so the
+                # body-frame residual constrains heading — unlike an ENU velocity
+                # residual (H = [0 | I | 0]) which leaves attitude unobserved.
+                Rbn_T       = Rbn.T
+                v_body_pred = Rbn_T @ vIMU
+                Sigma_body  = np.diag(np.maximum(np.exp(log_std), 1e-4))  # body-frame vel cov [m²/s²]
 
-                z_vel  = v_enu_pred - vIMU
-                H_vel  = np.zeros((3,15)); H_vel[:,3:6] = np.eye(3)
-                S_vel  = H_vel @ P @ H_vel.T + Sigma_enu
+                z_vel  = v_body - v_body_pred
+                H_vel  = np.zeros((3, 15))
+                H_vel[:, 3:6] = Rbn_T                 # ∂h/∂δv
+                H_vel[:, 6:9] = _skew(v_body_pred)    # ∂h/∂δα
+                S_vel  = H_vel @ P @ H_vel.T + Sigma_body
                 S_vel_reg = S_vel + 1e-9 * np.eye(3)
                 K_vel  = np.linalg.solve(S_vel_reg, H_vel @ P).T   # 15×3
                 dx     = dx + K_vel @ (z_vel - H_vel @ dx)
                 IKH_v  = np.eye(15) - K_vel @ H_vel
-                P      = IKH_v @ P @ IKH_v.T + K_vel @ Sigma_enu @ K_vel.T  # Joseph form
+                P      = IKH_v @ P @ IKH_v.T + K_vel @ Sigma_body @ K_vel.T  # Joseph form
                 P      = 0.5*(P + P.T)
                 update_occurred = True
 

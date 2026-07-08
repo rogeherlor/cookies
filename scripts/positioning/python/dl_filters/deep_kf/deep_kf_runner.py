@@ -164,6 +164,12 @@ def _load_model(weights_path: Path, latent_dim: int, num_layers: int,
     model.to(device)
     model.eval()
     if norm_mean is not None and norm_std is not None:
+        # ckpt was loaded with map_location=device, so on a GPU box these are
+        # CUDA tensors; np.asarray() can't convert them directly. Move to CPU.
+        if hasattr(norm_mean, 'detach'):
+            norm_mean = norm_mean.detach().cpu()
+        if hasattr(norm_std, 'detach'):
+            norm_std = norm_std.detach().cpu()
         norm_mean = np.asarray(norm_mean, dtype=float).reshape(15)
         norm_std  = np.asarray(norm_std,  dtype=float).reshape(15)
     return model, norm_mean, norm_std

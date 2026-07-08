@@ -84,8 +84,10 @@ def build_tartan_dataset(nav, target_hz=TARGET_HZ,
     Returns
     -------
     imu_windows  : (M, lstm_steps, step_samples, 6) float32
-    v_gt_body    : (M, 3) float32 — ground-truth velocity in body frame [m/s]
-    log_std_mask : (M,) bool — True if velocity is reliable (moving, GPS available)
+    v_gt_body    : (M, lstm_steps, 3) float32 — ground-truth body-frame velocity
+                   per LSTM window (paper Eq. 2): the window-integrated relative
+                   velocity v_{j→j+1} = Δp/dt rotated into the body frame, one
+                   target per 1-second window rather than a single last-window one.
     """
     accel_flu = nav.accel_flu
     gyro_flu  = nav.gyro_flu
@@ -135,27 +137,36 @@ def build_tartan_dataset(nav, target_hz=TARGET_HZ,
             win[step, :, 0:3] = accel_gf[ss:ee].astype(np.float32)
             win[step, :, 3:6] = gyro_up[ss:ee].astype(np.float32)
 
-        # Ground-truth velocity in body frame at i_src
-        if i_src + 1 < N:
-            dt    = 1.0 / src_rate
-            # Finite-difference velocity from position (via vel_enu which is GT)
-            v_enu = vel_enu[i_src].copy()
-            R_nb  = _qto_Rbn(_qfrom_euler(orient[i_src, 0],
-                                           orient[i_src, 1],
-                                           orient[i_src, 2]))
-            R_bn  = R_nb.T
-            v_body = R_bn @ v_enu   # (3,)
-        else:
+        # Per-window ground-truth body-frame velocity (paper Eq. 2).
+        # Window w spans source indices [s_w, e_w) (1 s).  The target is the
+        # window-integrated velocity  v_{j→j+1} = Δp/dt ≈ mean(vel_enu) over the
+        # window, rotated into the body frame at the window end — not the
+        # instantaneous vel_enu[i_src].  This matches what the pretrained backbone
+        # regresses and supervises all 10 windows, not only the last.
+        step_src = int(src_rate)   # source samples per 1-s window
+        v_win    = np.zeros((lstm_steps, 3), dtype=np.float32)
+        ok       = True
+        for w in range(lstm_steps):
+            s_w = i_src - (lstm_steps - w) * step_src
+            e_w = i_src - (lstm_steps - 1 - w) * step_src
+            if s_w < 0 or e_w > N:
+                ok = False
+                break
+            v_enu_mean = vel_enu[s_w:e_w].mean(axis=0)              # Δp/dt over window
+            io   = min(e_w, N - 1)
+            R_nb = _qto_Rbn(_qfrom_euler(orient[io, 0], orient[io, 1], orient[io, 2]))
+            v_win[w] = (R_nb.T @ v_enu_mean).astype(np.float32)     # body-frame velocity
+        if not ok:
             continue
 
         windows.append(win)
-        v_bodies.append(v_body.astype(np.float32))
+        v_bodies.append(v_win)
 
     if not windows:
         return None, None
 
-    imu_tensor = torch.from_numpy(np.stack(windows, axis=0))   # (M, 10, 200, 6)
-    v_gt_tensor = torch.from_numpy(np.stack(v_bodies, axis=0)) # (M, 3)
+    imu_tensor  = torch.from_numpy(np.stack(windows, axis=0))   # (M, 10, 200, 6)
+    v_gt_tensor = torch.from_numpy(np.stack(v_bodies, axis=0))  # (M, 10, 3)
     return imu_tensor, v_gt_tensor
 
 
@@ -166,6 +177,10 @@ def nll_velocity_loss(v_pred, log_std, v_gt):
     Diagonal Gaussian NLL for velocity prediction.
     Σ = diag(exp(log_std_i))  (single log-std → log-variance = 2*log_std)
     L = 0.5 * Σ_i [(v_gt_i - v_pred_i)² * exp(-log_std_i) + log_std_i]
+
+    Shapes broadcast over any leading dims, so this handles both a single
+    prediction (B, 3) and the per-window sequence (B, lstm_steps, 3) used for
+    the paper's Eq. 2 multi-window supervision; .mean() averages over windows.
     """
     err     = v_gt - v_pred
     inv_std = torch.exp(-log_std)
@@ -342,7 +357,7 @@ def train(args):
             imu_b  = imu_b.to(device)
             v_gt_b = v_gt_b.to(device)
             optimizer.zero_grad()
-            v_pred, log_std = model(imu_b, robot_type='car')
+            v_pred, log_std = model(imu_b, robot_type='car', return_sequence=True)
             loss = nll_velocity_loss(v_pred, log_std, v_gt_b)
             loss.backward()
             nn.utils.clip_grad_norm_(trainable, max_norm=5.)
@@ -359,7 +374,7 @@ def train(args):
                 for imu_b, v_gt_b in val_loader:
                     imu_b  = imu_b.to(device)
                     v_gt_b = v_gt_b.to(device)
-                    v_pred, log_std = model(imu_b, robot_type='car')
+                    v_pred, log_std = model(imu_b, robot_type='car', return_sequence=True)
                     loss = nll_velocity_loss(v_pred, log_std, v_gt_b)
                     val_loss += loss.item() * imu_b.size(0)
             avg_val = val_loss / len(val_loader.dataset)
