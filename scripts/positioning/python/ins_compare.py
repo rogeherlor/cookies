@@ -128,7 +128,9 @@ FILTER_CONFIGS = [
     {'name': 'IEKF Enhanced',  'key': 'iekf_enhanced', 'module': iekf_enhanced},
     {'name': 'IMU Only',       'key': 'imu_only',      'module': imu_only},
     # Deep learning filters
-    {'name': 'IEKF AI-IMU',  'key': 'iekf_ai_imu', 'module': iekf_ai_imu},
+    # Acausal batch AI-IMU: opt-in diagnostic reference only (peeks at future
+    # samples). Excluded from the default run; request via --filters iekf_ai_imu.
+    {'name': 'IEKF AI-IMU',  'key': 'iekf_ai_imu', 'module': iekf_ai_imu, 'default_run': False},
     {'name': 'IEKF AI-IMU Online', 'key': 'iekf_ai_imu_online', 'module': iekf_ai_imu_online},
     {'name': 'TLIO',         'key': 'tlio',         'module': tlio_runner},
     {'name': 'Deep KF',      'key': 'deep_kf',      'module': deep_kf_runner},
@@ -185,6 +187,11 @@ def main():
             parser.error(f"Unknown filter keys: {sorted(_unknown)}. "
                          f"Available: {[cfg['key'] for cfg in FILTER_CONFIGS]}")
         FILTER_CONFIGS[:] = _kept
+    else:
+        # No explicit --filters: run the default set, excluding opt-in-only filters
+        # (e.g. the acausal batch AI-IMU, a diagnostic reference).
+        FILTER_CONFIGS[:] = [cfg for cfg in FILTER_CONFIGS
+                             if cfg.get('default_run', True)]
 
     # ── Shared configuration ───────────────────────────────────────────────────
     if args.test_seq is not None:
@@ -241,24 +248,28 @@ def main():
     # are used regardless of how the model was trained.
     # _HERE = scripts/positioning/python/, so the repo root is THREE levels up.
     _repo_root = _HERE / '../../..'
+    _drive  = data_loader.KITTI_SEQ_TO_DRIVE.get(
+        nav_data.dataset_name, nav_data.dataset_name)
+    _drive_to_seq = {v: k for k, v in data_loader.KITTI_SEQ_TO_DRIVE.items()}
+    _seq_id = _drive_to_seq.get(_drive, nav_data.dataset_name)
+
+    # Batch (acausal) AI-IEKF weights — opt-in diagnostic filter (deep_iekf/).
     if args.ai_imu_weights:
         _ai_weights = Path(args.ai_imu_weights)
     else:
-        _drive  = data_loader.KITTI_SEQ_TO_DRIVE.get(
-            nav_data.dataset_name, nav_data.dataset_name)
-        _drive_to_seq = {v: k for k, v in data_loader.KITTI_SEQ_TO_DRIVE.items()}
-        _seq_id = _drive_to_seq.get(_drive, nav_data.dataset_name)
         _candidates = [
             _repo_root / f'artifacts/deep_iekf/fold_{_seq_id}.p',           # train_loo
             _repo_root / f'artifacts/deep_iekf/iekfnets_held_{_drive}.p',   # train_kitti
         ]
         _ai_weights = next((p for p in _candidates if p.exists()), None)
-        if _ai_weights is None:
-            logger_msg = (f"  AI-IMU: no fold-specific weights found "
-                          f"(searched {[str(p) for p in _candidates]}); "
-                          f"runner will fall back to generic iekfnets.p — "
-                          f"BEWARE OF FOLD LEAK.")
-            print(logger_msg)
+
+    # Causal (online) AI-IEKF weights — the DEFAULT AI-IMU. Resolved seq-aware from
+    # deep_iekf_online/, independently of the batch weights (no coupling, no leak).
+    _online_candidates = [
+        _repo_root / f'artifacts/deep_iekf_online/fold_{_seq_id}.p',
+        _repo_root / f'artifacts/deep_iekf_online/iekfnets_held_{_drive}.p',
+    ]
+    _ai_online_weights = next((p for p in _online_candidates if p.exists()), None)
 
     # ── Output directories ─────────────────────────────────────────────────────
     if dr_mode:
@@ -353,18 +364,12 @@ def main():
                 os.environ['AI_IMU_WEIGHTS'] = str(_ai_weights)
             else:
                 os.environ.pop('AI_IMU_WEIGHTS', None)
-        # For AI-IEKF online: prefer the matching causal fold in deep_iekf_online/;
-        # also set AI_IMU_WEIGHTS so the sliding-window fallback uses the right fold.
+        # For AI-IEKF online (causal, default): use the seq-specific causal fold
+        # from deep_iekf_online/. No coupling to the batch weights.
         elif fkey == 'iekf_ai_imu_online':
-            if _ai_weights is not None:
-                os.environ['AI_IMU_WEIGHTS'] = str(_ai_weights)
-                _online_w = (_repo_root / 'artifacts/deep_iekf_online' / Path(_ai_weights).name)
-                if _online_w.exists():
-                    os.environ['AI_IMU_ONLINE_WEIGHTS'] = str(_online_w)
-                else:
-                    os.environ.pop('AI_IMU_ONLINE_WEIGHTS', None)
+            if _ai_online_weights is not None:
+                os.environ['AI_IMU_ONLINE_WEIGHTS'] = str(_ai_online_weights)
             else:
-                os.environ.pop('AI_IMU_WEIGHTS', None)
                 os.environ.pop('AI_IMU_ONLINE_WEIGHTS', None)
 
         _t0 = datetime.now()
@@ -498,7 +503,7 @@ def main():
           f"{_mode_str}  |  {'3D' if use_3d else '2D'}")
     print("=" * 112)
     print(f"{'Filter':<20} {'ATE 2D [m]':>12} {'ATE 3D [m]':>12} {'Pos RMSE 2D':>13} "
-          f"{'Outage max [m]':>16} {'t_rel [%]':>11} {'r_rel [°/km]':>13} {'Time [s]':>10}")
+          f"{'Outage max [m]':>16} {'t_rel [%]':>11} {'r_rel [°/km]':>13} {'Proc wall [s]':>14}")
     print("-" * 112)
     for entry in all_results:
         mets   = entry['metrics']
@@ -511,10 +516,13 @@ def main():
         rrel   = km.get('r_rel', float('nan'))
         elapsed = entry.get('elapsed_s', float('nan'))
         print(f"{entry['name']:<20} {ate2d:>12.2f} {ate3d:>12.2f} {prmse:>13.2f} "
-              f"{outagm:>16.2f} {trel:>11.2f} {rrel:>13.2f} {elapsed:>10.1f}")
+              f"{outagm:>16.2f} {trel:>11.2f} {rrel:>13.2f} {elapsed:>14.1f}")
     print("=" * 112)
     print("NOTE: Tune parameters with ins_genetic.py before drawing conclusions.\n"
-          "      t_rel / r_rel are KITTI odometry metrics (full sequence, vs raw GPS).\n")
+          "      t_rel / r_rel are KITTI odometry metrics (full sequence, vs raw GPS).\n"
+          "      Proc wall = total dev-machine wall-clock to process the whole\n"
+          "      sequence in Python; it is a relative throughput proxy, NOT the\n"
+          "      per-sample real-time / embedded latency of a live deployment.\n")
 
 
 if __name__ == '__main__':

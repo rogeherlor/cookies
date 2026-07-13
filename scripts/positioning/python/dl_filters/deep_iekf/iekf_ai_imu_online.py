@@ -21,24 +21,25 @@ This module produces an online, strictly CAUSAL estimate:
 This matches the paper's stated design (N_n as a function of "past and present" IMU
 measurements, IEEE TIV 2020 §IV-B) and is the form intended for Hailo deployment.
 
-Two weight sources (run() auto-selects)
----------------------------------------
-A. CAUSAL-trained weights in artifacts/deep_iekf_online/ (or AI_IMU_ONLINE_WEIGHTS) —
-   a left-padded CausalMesNet trained by `train_ai_imu.py --causal`.  These are
-   causal BY CONSTRUCTION, so run() evaluates them in a single batch pass: strictly
-   online, 0 ms latency, exact.  This is the recommended Hailo path.
-B. Acausal upstream weights in artifacts/deep_iekf/ — run causally via the sliding
-   window described above (current-sample-hold).  An approximation, since those
-   weights were trained with future context.
+Weight source (run() requires a true causal model)
+--------------------------------------------------
+run() ALWAYS uses CAUSAL-trained weights in artifacts/deep_iekf_online/ (or
+AI_IMU_ONLINE_WEIGHTS) — a left-padded CausalMesNet trained by
+`train_ai_imu.py --causal`.  These are causal BY CONSTRUCTION, so run() evaluates
+them in a single batch pass: strictly online, 0 ms latency, exact.  This is the
+recommended Hailo path.  If no causal weights are found, run() raises (see the
+require-weights logic) — it does NOT fall back to running the upstream ACAUSAL
+weights causally, which would report an approximation as the online result.
 
-Accuracy note (path B)
-----------------------
-Running acausal weights causally costs accuracy.  Quantify it with
+Diagnostic only (not used by run())
+-----------------------------------
+`causal_mes_inference` / `validate` still let you quantify, at the covariance
+level, what running the upstream ACAUSAL weights causally (sliding-window,
+current-sample-hold) would cost vs the batch pass:
 
     python iekf_ai_imu_online.py --validate [--window N] [--lookahead K]
 
-(prints max/mean covariance difference vs batch and trajectory RMSE).  If the gap
-matters, train a causal model (path A) — see DEVIATIONS.md.
+If you need that number, train a causal model instead — see DEVIATIONS.md.
 
 Drop-in: run(nav_data, params, outage_config, use_3d_rotation) matches iekf_ai_imu.
 """
@@ -53,7 +54,6 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 # Reuse all the loading / filter machinery from the batch wrapper.
-import iekf_ai_imu as _batch
 from iekf_ai_imu import (
     _add_aimu_path, _find_weights, _find_norm_factors, _run_filter_loop,
     _AI_IMU_SRC, _ARTIFACTS,
@@ -78,11 +78,18 @@ def _find_online_weights():
     if canonical.exists():
         return canonical
     if _ARTIFACTS_ONLINE.exists():
-        for pat in ('fold_*.p', '*_held_*.p'):
-            hits = sorted(p for p in _ARTIFACTS_ONLINE.glob(pat)
-                          if not p.name.endswith('_norm.p'))
-            if hits:
-                return hits[0]
+        hits = sorted(p for pat in ('fold_*.p', '*_held_*.p')
+                      for p in _ARTIFACTS_ONLINE.glob(pat)
+                      if not p.name.endswith('_norm.p'))
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            # Refuse to guess a fold — under LOO that risks a train/test leak.
+            raise RuntimeError(
+                f"[iekf_ai_imu_online] Multiple causal folds in {_ARTIFACTS_ONLINE} "
+                f"{[p.name for p in hits]} but AI_IMU_ONLINE_WEIGHTS is unset. Set it "
+                f"to the correct fold (ins_compare does this per test sequence)."
+            )
     return None
 
 
@@ -270,7 +277,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     _add_aimu_path()
     from utils_numpy_filter import NUMPYIEKF
 
-    N, sr, t, u_np, ang0, v0 = _build_inputs(nav_data)
+    N, _sr, t, u_np, ang0, v0 = _build_inputs(nav_data)
 
     # IEKF core with KITTI-tuned parameters
     try:
@@ -282,20 +289,16 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     if not isinstance(iekf.g, np.ndarray):
         iekf.g = np.array(iekf.g)
 
-    window = int((params or {}).get('window', DEFAULT_WINDOW))
-    lookahead = int((params or {}).get('lookahead', 0))
-
-    # Decide architecture: 'causal' (left-padded, trained for online) vs 'acausal'
-    # (upstream weights run causally via sliding-window approximation).
-    causal_arch = (params or {}).get('causal_arch', None)
+    # This online filter is ALWAYS a true causal model: a left-padded CausalMesNet
+    # trained with `train_ai_imu.py --causal`, evaluated in a single batch pass
+    # (causal by construction → strictly online, 0 ms latency, exact). Running the
+    # upstream ACAUSAL MesNet causally (sliding-window approximation) is
+    # intentionally NOT offered — it would report an approximation as the online
+    # result.
     online_weights = _find_online_weights()
-    if causal_arch is None:
-        causal_arch = online_weights is not None
 
     measurements_covs_np = None
-
-    # ── Path A: causal-trained CausalMesNet (exact online, one batch pass) ──────
-    if causal_arch and online_weights is not None:
+    if online_weights is not None:
         import torch
         torch_iekf = _load_causal_torch_iekf(u_np, online_weights)
         iekf.set_learned_covariance(torch_iekf)
@@ -305,24 +308,24 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         print(f"AI-IMU (online): CAUSAL MesNet (left-padded) from {online_weights} "
               f"— strictly online, 0 ms latency, single batch pass.")
 
-    # ── Path B: upstream acausal weights, run causally via sliding window ───────
     if measurements_covs_np is None:
-        torch_iekf, weights_path = _load_torch_iekf(nav_data, u_np)
-        if torch_iekf is not None:
-            iekf.set_learned_covariance(torch_iekf)
-            measurements_covs_np = causal_mes_inference(torch_iekf, u_np, window, lookahead)
-            print(f"AI-IMU (online): acausal MesNet from {weights_path}, run causally "
-                  f"(window={window} past + lookahead={lookahead} future; "
-                  f"latency={lookahead / sr * 1000:.0f} ms). "
-                  f"Train with --causal for a true causal model.")
-    if measurements_covs_np is None:
-        if os.environ.get('IEKF_AI_IMU_REQUIRE_WEIGHTS', '') == '1':
-            raise RuntimeError("[iekf_ai_imu_online] No MesNet weights found and "
-                               "IEKF_AI_IMU_REQUIRE_WEIGHTS=1.")
+        # No causal-trained weights. Do NOT fall back to acausal weights run
+        # causally (removed): require a true causal model by default.
+        if os.environ.get('IEKF_AI_IMU_REQUIRE_WEIGHTS', '1') != '0':
+            raise RuntimeError(
+                "[iekf_ai_imu_online] No CAUSAL MesNet weights found in "
+                f"{_ARTIFACTS_ONLINE} (or via AI_IMU_ONLINE_WEIGHTS). This filter is "
+                "always a true causal model; the acausal-weights-run-causally "
+                "approximation has been removed. Train one per LOO fold:\n"
+                "  python dl_filters/deep_iekf/train_ai_imu.py --causal --mode loo "
+                "--held-out <drive>\n"
+                "Set IEKF_AI_IMU_REQUIRE_WEIGHTS=0 to allow the fixed-covariance "
+                "fallback (smoke tests only)."
+            )
         cov_lat, cov_up = iekf.cov_lat, iekf.cov_up
         measurements_covs_np = np.tile([cov_lat, cov_up], (N, 1))
-        print(f"[iekf_ai_imu_online] WARNING: no weights — fallback fixed covariances "
-              f"[cov_lat={cov_lat}, cov_up={cov_up}] (no CNN adapter).")
+        print(f"[iekf_ai_imu_online] WARNING: no causal weights — fallback fixed "
+              f"covariances [cov_lat={cov_lat}, cov_up={cov_up}] (no CNN adapter).")
 
     # ── GPS / outage / DR_MODE ──────────────────────────────────────────────────
     p_gps_for_loop, gps_avail_masked, R_gps = _prepare_gps(nav_data, params, outage_config)
@@ -344,15 +347,18 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
 def validate(nav_data, window=DEFAULT_WINDOW, lookahead=0):
     """
-    Quantify the cost of going causal with the trained weights.
-    Compares per-step covariances and final trajectory against the batch wrapper.
+    Diagnostic: quantify, at the covariance level, what running the upstream
+    ACAUSAL MesNet weights causally (sliding window, current-sample-hold) costs
+    versus the whole-sequence batch pass. This is decoupled from run(), which
+    always uses a true causal model (CausalMesNet); it exists only to justify
+    training one (path A) — see DEVIATIONS.md.
     """
     _add_aimu_path()
     _, _, _, u_np, _, _ = _build_inputs(nav_data)
 
     torch_iekf, weights_path = _load_torch_iekf(nav_data, u_np)
     if torch_iekf is None:
-        print("validate: no weights found — nothing to compare.")
+        print("validate: no (acausal) weights found — nothing to compare.")
         return
 
     import torch
@@ -365,18 +371,13 @@ def validate(nav_data, window=DEFAULT_WINDOW, lookahead=0):
     s = window
     d = np.abs(causal_covs[s:] - batch_covs[s:])
     rel = d / (np.abs(batch_covs[s:]) + 1e-12)
-    print(f"\n=== MesNet covariance: causal vs batch (window={window}, lookahead={lookahead}) ===")
+    print(f"\n=== MesNet covariance: acausal-run-causally vs batch "
+          f"(window={window}, lookahead={lookahead}) ===")
     print(f"  weights: {weights_path}")
     for j, name in enumerate(['cov_lat', 'cov_up']):
         print(f"  {name}: max|Δ|={d[:, j].max():.4g}  mean|Δ|={d[:, j].mean():.4g}  "
               f"mean rel={rel[:, j].mean()*100:.2f}%")
-
-    out_batch = _batch.run(nav_data)
-    out_causal = run(nav_data, params={'window': window, 'lookahead': lookahead})
-    dp = np.linalg.norm(out_causal['p'] - out_batch['p'], axis=1)
-    print(f"\n=== Trajectory: causal vs batch ===")
-    print(f"  position RMSE = {np.sqrt(np.mean(dp**2)):.3f} m   max = {dp.max():.3f} m")
-    print(f"  final-position drift difference = {dp[-1]:.3f} m\n")
+    print("  (Non-zero gap ⇒ train a causal model; run() no longer approximates.)\n")
 
 
 if __name__ == '__main__':

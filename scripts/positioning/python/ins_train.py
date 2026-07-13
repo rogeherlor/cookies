@@ -76,7 +76,8 @@ def _weight_exists(filter_name, seq, mode='loo'):
             'tlio':       _ARTIFACTS / 'tlio' / 'tlio_resnet.pt',
             'deep_kf':    _ARTIFACTS / 'deep_kf' / 'deep_kf.pt',
             'tartan_imu': _ARTIFACTS / 'tartan_imu' / 'lora_adapters.pt',
-            'ai_imu':     _ARTIFACTS / 'deep_iekf' / 'iekfnets.p',
+            # AI-IMU trains the causal (online) model by default → deep_iekf_online/.
+            'ai_imu':     _ARTIFACTS / 'deep_iekf_online' / 'iekfnets.p',
         }
     else:
         drive = KITTI_SEQ_TO_DRIVE.get(seq, seq)
@@ -84,7 +85,7 @@ def _weight_exists(filter_name, seq, mode='loo'):
             'tlio':       _ARTIFACTS / 'tlio' / f'fold_{seq}.pt',
             'deep_kf':    _ARTIFACTS / 'deep_kf' / f'fold_{seq}.pt',
             'tartan_imu': _ARTIFACTS / 'tartan_imu' / f'lora_fold_{seq}.pt',
-            'ai_imu':     _ARTIFACTS / 'deep_iekf' / f'fold_{seq}.p',
+            'ai_imu':     _ARTIFACTS / 'deep_iekf_online' / f'fold_{seq}.p',
         }
     return paths[filter_name].exists()
 
@@ -128,9 +129,13 @@ def _build_cmd_tartan(seq, epochs, mode='loo', dataset='kitti', val_metric_every
 
 
 def _build_cmd_ai_imu(seq, epochs, kitti_raw_dir, mode='loo', val_metric_every=None):
+    # Causal is the default AI-IMU (train_ai_imu.py --causal default) → weights go
+    # to artifacts/deep_iekf_online/, matching _weight_exists() and ins_compare's
+    # AI_IMU_ONLINE_WEIGHTS resolution. (The acausal batch model is opt-in: train
+    # it directly with `train_ai_imu.py --no-causal --output artifacts/deep_iekf`.)
     cmd = [sys.executable, str(_HERE / 'dl_filters/deep_iekf/train_ai_imu.py'),
            '--epochs', str(epochs),
-           '--output', str(_ARTIFACTS / 'deep_iekf')]
+           '--output', str(_ARTIFACTS / 'deep_iekf_online')]
     if kitti_raw_dir:
         cmd += ['--mode', 'kitti', '--kitti-raw-dir', str(kitti_raw_dir)]
     else:

@@ -144,10 +144,14 @@ def _resolve_seq_id(seq_id):
 def _find_weights(seq_id: str = None) -> Path:
     """
     Locate TLIO weights.  Search order:
-      1. TLIO_WEIGHTS env var
-      2. artifacts/tlio/fold_<seq_id>.pt  (LOO fold)
-      3. artifacts/tlio/tlio_resnet.pt    (all-sequences)
-      4. Any available fold_*.pt          (fallback with warning)
+      1. TLIO_WEIGHTS env var (explicit override / escape hatch)
+      2. artifacts/tlio/fold_<seq_id>.pt  (LOO fold — REQUIRED when seq_id is given)
+      3. artifacts/tlio/tlio_resnet.pt    (all-sequences, only when seq_id is None)
+
+    A missing exact fold raises instead of silently borrowing another fold or the
+    all-sequences checkpoint: for a held-out LOO sequence either of those would
+    train/test-leak (they were trained *including* the test sequence). For an
+    intentional non-LOO test, set TLIO_WEIGHTS to the checkpoint explicitly.
     """
     env = os.environ.get('TLIO_WEIGHTS')
     if env and Path(env).exists():
@@ -158,18 +162,17 @@ def _find_weights(seq_id: str = None) -> Path:
         fold = _ARTIFACTS / f'fold_{short_id}.pt'
         if fold.exists():
             return fold
+        raise RuntimeError(
+            f"TLIO fold_{short_id}.pt not found in {_ARTIFACTS}. Refusing to fall "
+            f"back to another fold or the all-sequences checkpoint (both would "
+            f"train/test-leak for held-out sequence {short_id}).\n"
+            f"  Train it:  python ins_train.py tlio --seqs {short_id}\n"
+            f"  Intentional non-LOO test: set TLIO_WEIGHTS to a checkpoint path."
+        )
 
     default = _ARTIFACTS / 'tlio_resnet.pt'
     if default.exists():
         return default
-
-    available = sorted(_ARTIFACTS.glob('fold_*.pt'))
-    available = [p for p in available if '_ckpt' not in p.name]
-    if available:
-        print(f"WARNING: TLIO fold_{short_id}.pt not found, "
-              f"falling back to {available[0].name}. "
-              f"Train the proper fold: python ins_train.py tlio --seqs {short_id}")
-        return available[0]
 
     raise RuntimeError(
         "TLIO weights not found.  Train the model first:\n"

@@ -44,10 +44,12 @@ Weights search order (base model):
   4. external/tartan_imu/checkpoints/foundation_model/checkpoint_<N>.pt
      (HuggingFace snapshot_download layout — highest N wins)
 
-LoRA adapter search (optional, applied after base model):
-  1. artifacts/tartan_imu/lora_fold_<seq_id>.pt
-  2. artifacts/tartan_imu/lora_adapters.pt
-  (If none found, runs zero-shot with car head.)
+LoRA adapter search (applied after base model):
+  1. artifacts/tartan_imu/lora_fold_<seq_id>.pt   (REQUIRED when a seq_id is given;
+     a missing exact fold raises rather than borrowing another fold / the
+     all-sequences adapter / zero-shot — see _find_lora_adapter)
+  2. artifacts/tartan_imu/lora_adapters.pt        (only when no seq_id is given)
+  (Zero-shot with the car head only when no seq_id is given and no adapter exists.)
 """
 
 import os
@@ -376,10 +378,16 @@ def _resolve_seq_id(seq_id):
 def _find_lora_adapter(seq_id=None):
     """
     Locate LoRA adapter weights.  Search order:
-      0. TARTAN_IMU_LORA env var       (lets training-time hooks override)
-      1. lora_fold_<seq_id>.pt         (LOO fold)
-      2. lora_adapters.pt              (all-sequences)
-      3. Any available lora_fold_*.pt  (fallback with warning)
+      0. TARTAN_IMU_LORA env var       (explicit override / escape hatch)
+      1. lora_fold_<seq_id>.pt         (LOO fold — REQUIRED when seq_id is given)
+      2. lora_adapters.pt              (all-sequences, only when seq_id is None)
+
+    When seq_id is given, a missing exact fold raises instead of silently
+    borrowing another fold, using the all-sequences adapter (both would
+    train/test-leak for the held-out sequence), or dropping to zero-shot (which
+    would misreport zero-shot numbers as LoRA-fine-tuned). Set TARTAN_IMU_LORA to
+    a checkpoint for an intentional non-LOO run. Returns None only when seq_id is
+    None and no all-sequences adapter exists (genuine zero-shot deployment).
     """
     env = os.environ.get('TARTAN_IMU_LORA')
     if env and Path(env).exists():
@@ -389,15 +397,17 @@ def _find_lora_adapter(seq_id=None):
         fold = _ARTIFACTS / f'lora_fold_{short_id}.pt'
         if fold.exists():
             return fold
+        raise RuntimeError(
+            f"Tartan lora_fold_{short_id}.pt not found in {_ARTIFACTS}. Refusing to "
+            f"fall back to another fold, the all-sequences adapter, or zero-shot "
+            f"(the first two train/test-leak for held-out sequence {short_id}; the "
+            f"last would misreport zero-shot as LoRA-fine-tuned).\n"
+            f"  Train it:  python ins_train.py tartan_imu --seqs {short_id}\n"
+            f"  Intentional non-LOO test: set TARTAN_IMU_LORA to a checkpoint path."
+        )
     general = _ARTIFACTS / 'lora_adapters.pt'
     if general.exists():
         return general
-    # Fallback: use any available LoRA fold
-    available = sorted(_ARTIFACTS.glob('lora_fold_*.pt'))
-    if available:
-        print(f"WARNING: Tartan lora_fold_{short_id}.pt not found, falling back to {available[0].name}. "
-              f"Train the proper fold with: python ins_train.py tartan_imu --seqs {short_id}")
-        return available[0]
     return None
 
 

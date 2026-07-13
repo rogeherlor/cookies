@@ -110,10 +110,14 @@ def _resolve_seq_id(seq_id):
 def _find_weights(seq_id: str = None) -> Path:
     """
     Locate Deep KF weights.  Search order:
-      1. DEEP_KF_WEIGHTS env var
-      2. artifacts/deep_kf/fold_<seq_id>.pt  (LOO fold)
-      3. artifacts/deep_kf/deep_kf.pt        (all-sequences checkpoint)
-      4. Any available fold_*.pt             (fallback with warning)
+      1. DEEP_KF_WEIGHTS env var (explicit override / escape hatch)
+      2. artifacts/deep_kf/fold_<seq_id>.pt  (LOO fold — REQUIRED when seq_id is given)
+      3. artifacts/deep_kf/deep_kf.pt        (all-sequences, only when seq_id is None)
+
+    A missing exact fold raises instead of silently borrowing another fold or the
+    all-sequences checkpoint: for a held-out LOO sequence either of those would
+    train/test-leak (they were trained *including* the test sequence). For an
+    intentional non-LOO test, set DEEP_KF_WEIGHTS to the checkpoint explicitly.
     """
     env = os.environ.get('DEEP_KF_WEIGHTS')
     if env and Path(env).exists():
@@ -124,18 +128,17 @@ def _find_weights(seq_id: str = None) -> Path:
         fold = _ARTIFACTS / f'fold_{short_id}.pt'
         if fold.exists():
             return fold
+        raise RuntimeError(
+            f"Deep KF fold_{short_id}.pt not found in {_ARTIFACTS}. Refusing to fall "
+            f"back to another fold or the all-sequences checkpoint (both would "
+            f"train/test-leak for held-out sequence {short_id}).\n"
+            f"  Train it:  python ins_train.py deep_kf --seqs {short_id}\n"
+            f"  Intentional non-LOO test: set DEEP_KF_WEIGHTS to a checkpoint path."
+        )
 
     default = _ARTIFACTS / 'deep_kf.pt'
     if default.exists():
         return default
-
-    # Fallback: use any available fold
-    available = sorted(_ARTIFACTS.glob('fold_*.pt'))
-    available = [p for p in available if '_ckpt' not in p.name]
-    if available:
-        print(f"WARNING: Deep KF fold_{short_id}.pt not found, falling back to {available[0].name}. "
-              f"Train the proper fold with: python ins_train.py deep_kf --seqs {short_id}")
-        return available[0]
 
     raise RuntimeError(
         "Deep KF weights not found.  Train the model first:\n"

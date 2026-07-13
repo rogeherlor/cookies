@@ -39,13 +39,19 @@ DEFAULT_FILTERS = [
     'iekf_vanilla',
     'iekf_enhanced',
     'imu_only',
-    'iekf_ai_imu',
+    'iekf_ai_imu_online',   # causal (online) Deep IEKF — see note below
     'tlio',
     'deep_kf',
     'tartan_imu',
     'isam2',
     'isam2_map',
 ]
+
+# NOTE: the "Deep IEKF" row uses the CAUSAL online AI-IMU (iekf_ai_imu_online),
+# not the acausal batch variant (iekf_ai_imu, which runs MesNet over the whole
+# sequence and peeks at future samples). This keeps the row on equal footing
+# with the other online/causal filters (TLIO, Deep KF, Tartan IMU). To report
+# the batch variant instead, pass --filters ... iekf_ai_imu ... explicitly.
 
 KITTI_SEQS    = ['01', '04', '06', '07', '08', '09', '10']
 COOKIES_SEQS  = ['c01', 'c02', 'c03', 'c04', 'c05']
@@ -132,7 +138,8 @@ def _filter_label(filter_key: str) -> str:
         'iekf_vanilla':    r'IEKF',
         'iekf_enhanced':   r'IEKF +',
         'imu_only':        r'IMU-only (AI-IMU, fixed $N$)',
-        'iekf_ai_imu':     r'Deep IEKF',
+        'iekf_ai_imu_online': r'Deep IEKF',
+        'iekf_ai_imu':     r'Deep IEKF (batch, acausal)',
         'tlio':            r'TLIO',
         'deep_kf':         r'DKF',
         'tartan_imu':      r'Tartan IMU',

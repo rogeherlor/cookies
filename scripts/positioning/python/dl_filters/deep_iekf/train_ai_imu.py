@@ -502,10 +502,13 @@ def main():
                    help='Output directory for weights and normalization factors '
                         '(default: artifacts/deep_iekf/, or artifacts/deep_iekf_online/ '
                         'when --causal)')
-    p.add_argument('--causal', action='store_true',
+    p.add_argument('--causal', action=argparse.BooleanOptionalAction, default=True,
                    help='Train a strictly causal (left-padded) CausalMesNet for online '
-                        'use (no future samples). Requires --mode loo or --held-out. '
-                        'Default output folder becomes artifacts/deep_iekf_online/.')
+                        'use (no future samples). DEFAULT — causal online is the primary '
+                        'AI-IMU. Output folder: artifacts/deep_iekf_online/. Pass '
+                        '--no-causal to train the acausal batch model instead '
+                        '(artifacts/deep_iekf/), kept only as a diagnostic reference. '
+                        'Requires --mode loo or --held-out.')
     p.add_argument('--warm-start', dest='warm_start', nargs='?', const='auto',
                    default=None,
                    help='[--causal] Warm-start the causal conv layers from acausal '
@@ -565,8 +568,14 @@ def main():
             seed=args.seed,
         )
     else:
+        # --mode single is a smoke path only and does not support causal training;
+        # fall back to the acausal model (and its folder) even though causal is the
+        # default elsewhere.
         if args.causal:
-            p.error('--causal is not supported for --mode single; use --mode loo')
+            print("  NOTE: --mode single does not support causal training; using the "
+                  "acausal batch model for this smoke run. Use --mode loo for causal.")
+            if args.output == str(_ARTIFACTS_ONLINE):
+                args.output = str(_ARTIFACTS)
         train_single(
             output_dir=args.output,
             epochs=args.epochs,

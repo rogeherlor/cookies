@@ -78,8 +78,10 @@ CLASSICAL_FILTERS = [
     'iekf_vanilla', 'iekf_enhanced',
 ]
 
-# All filter keys reported in the comparison table
-ALL_FILTER_KEYS = CLASSICAL_FILTERS + ['imu_only', 'iekf_ai_imu']
+# All filter keys reported in the comparison table. The AI-IMU entry is the
+# CAUSAL online model (iekf_ai_imu_online) — the default AI-IMU; the acausal batch
+# variant (iekf_ai_imu) is an opt-in diagnostic and not collected here.
+ALL_FILTER_KEYS = CLASSICAL_FILTERS + ['imu_only', 'iekf_ai_imu_online']
 
 
 def _run(cmd, desc, dry_run=False):

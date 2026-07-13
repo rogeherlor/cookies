@@ -382,6 +382,13 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             print(f"Warning: ONNX inference failed ({e}). Trying PyTorch weights.")
             measurements_covs_np = None
 
+    # Journal-grade runs MUST use the learned MesNet weights: a silent fallback to
+    # the hand-tuned KITTIParameters covariances would quietly degrade this filter
+    # to a non-learning baseline and invalidate the comparison. Require weights by
+    # default (crash if missing or unloadable); set IEKF_AI_IMU_REQUIRE_WEIGHTS=0
+    # to allow the fixed-covariance fallback (e.g. quick smoke tests only).
+    _require_weights = os.environ.get('IEKF_AI_IMU_REQUIRE_WEIGHTS', '1') != '0'
+
     # ── Fall back to PyTorch .p weights ───────────────────────────────────────
     if measurements_covs_np is None:
         weights_path = _find_weights()
@@ -431,13 +438,19 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 print(f"AI-IMU: loaded PyTorch weights from {weights_path}.")
 
             except Exception as e:
+                if _require_weights:
+                    raise RuntimeError(
+                        f"[iekf_ai_imu] Failed to load AI-IMU weights from "
+                        f"{weights_path} ({e}). Refusing to fall back to fixed "
+                        f"covariances; set IEKF_AI_IMU_REQUIRE_WEIGHTS=0 to allow it."
+                    ) from e
                 print(f"Warning: could not load AI-IMU weights ({e}). "
                       f"Falling back to fixed covariances.")
                 measurements_covs_np = None
 
     # ── Fallback: fixed measurement covariances ────────────────────────────────
     if measurements_covs_np is None:
-        if os.environ.get('IEKF_AI_IMU_REQUIRE_WEIGHTS', '') == '1':
+        if _require_weights:
             searched = [
                 os.environ.get('AI_IMU_WEIGHTS', '<AI_IMU_WEIGHTS env unset>'),
                 str(_ARTIFACTS / 'iekfnets.p'),
@@ -445,15 +458,17 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 str(_find_onnx() or _ARTIFACTS / 'iekfnets.onnx'),
             ]
             raise RuntimeError(
-                "[iekf_ai_imu] No learned MesNet weights found and "
-                "IEKF_AI_IMU_REQUIRE_WEIGHTS=1 is set. Searched: " + ', '.join(searched)
+                "[iekf_ai_imu] No learned MesNet weights found (required by "
+                "default). Searched: " + ', '.join(searched) +
+                ". Set IEKF_AI_IMU_REQUIRE_WEIGHTS=0 to allow the fixed-covariance "
+                "fallback (smoke tests only)."
             )
         cov_lat = iekf.cov_lat
         cov_up  = iekf.cov_up
         measurements_covs_np = np.tile([cov_lat, cov_up], (N, 1))
         print(f"[iekf_ai_imu] WARNING: using fallback KITTIParameters covariances "
               f"[cov_lat={cov_lat}, cov_up={cov_up}] (no CNN adapter). "
-              f"Set IEKF_AI_IMU_REQUIRE_WEIGHTS=1 to fail loudly when weights are missing.")
+              f"IEKF_AI_IMU_REQUIRE_WEIGHTS=0 is set — this is a non-learning baseline.")
 
     # ── GPS data preparation ───────────────────────────────────────────────────
     # Compute ENU positions from geodetic (round-trip exact for same lla0).

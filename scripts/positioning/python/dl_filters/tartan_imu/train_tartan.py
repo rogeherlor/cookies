@@ -190,32 +190,49 @@ def nll_velocity_loss(v_pred, log_std, v_gt):
 
 # ── LoRA injection ────────────────────────────────────────────────────────────
 
+# Backbone Linear layers to adapt with LoRA: the transformer trunk's attention
+# output projection and MLP. The Conv/LSTM backbone and the pretrained per-robot
+# heads stay frozen, matching the paper's "freeze the foundation model, update
+# only a small adapter" design (Sec. 3.3).
+LORA_TARGET_MODULES = ['fc1', 'fc2', 'out_proj']
+
+
 def _apply_lora_to_model(model, lora_rank: int):
     """
-    Apply LoRA adapters to linear layers in the model.
-    Falls back to making all parameters trainable if peft is not available.
+    Inject rank-`lora_rank` LoRA adapters into the frozen backbone's Linear layers.
 
-    Returns model with LoRA applied (or all params enabled).
+    Journal-grade fine-tuning MUST be LoRA on a frozen foundation model (paper
+    Sec. 3.3), never a full fine-tune. If peft is missing, the config matches no
+    modules, or too many parameters end up trainable, this RAISES rather than
+    silently full-fine-tuning (which would overwrite the pretrained weights and
+    contradict the method).
     """
     try:
-        from peft import LoraConfig, get_peft_model, TaskType
-        lora_config = LoraConfig(
-            r=lora_rank,
-            lora_alpha=lora_rank * 2,
-            target_modules=['weight'],   # inject into Linear layers
-            bias='none',
-        )
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-        print("Tartan fine-tune: LoRA adapters injected via peft.")
-    except ImportError:
-        print("Tartan fine-tune: peft not available. Fine-tuning all parameters.")
-        for p in model.parameters():
-            p.requires_grad_(True)
-    except Exception as e:
-        print(f"Tartan fine-tune: LoRA injection failed ({e}). Fine-tuning all parameters.")
-        for p in model.parameters():
-            p.requires_grad_(True)
+        from peft import LoraConfig, get_peft_model
+    except ImportError as e:
+        raise RuntimeError(
+            "Tartan fine-tune requires `peft` for LoRA (frozen foundation model). "
+            "Install it:  pip install 'peft>=0.6.0'. Refusing to full-fine-tune."
+        ) from e
+
+    model = get_peft_model(model, LoraConfig(
+        r=lora_rank, lora_alpha=lora_rank * 2,
+        target_modules=LORA_TARGET_MODULES, bias='none'))
+
+    n_lora  = sum(1 for n, _ in model.named_parameters() if 'lora_' in n)
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_total = sum(p.numel() for p in model.parameters())
+    if n_lora == 0 or n_train == 0:
+        raise RuntimeError(
+            f"Tartan fine-tune: LoRA matched no modules "
+            f"(target_modules={LORA_TARGET_MODULES}). Refusing to full-fine-tune.")
+    if n_train / n_total > 0.10:
+        raise RuntimeError(
+            f"Tartan fine-tune: {n_train:,}/{n_total:,} trainable "
+            f"({100*n_train/n_total:.1f}%) — backbone not frozen; refusing to proceed.")
+    model.print_trainable_parameters()
+    print(f"Tartan fine-tune: LoRA r={lora_rank} on {LORA_TARGET_MODULES} "
+          f"({n_train:,}/{n_total:,} trainable); backbone + heads frozen.")
     return model
 
 
@@ -403,14 +420,23 @@ def train(args):
 
 
 def _save_lora(model, epoch, val_loss, path: Path):
-    """Save only the trainable (LoRA) parameters."""
-    lora_state = {k: v for k, v in model.state_dict().items()
-                  if 'lora_' in k or any(p.requires_grad
-                                          for name, p in model.named_parameters()
-                                          if name == k)}
+    """
+    Save a deployable checkpoint. LoRA adapters are merged into the (frozen)
+    backbone and the resulting plain _TartanIMUModel state dict is saved, so the
+    runner — which loads an unwrapped model with strict=False — applies the
+    adaptation without needing peft at inference. (Saving raw lora_ tensors would
+    be ignored by the runner, silently running the un-adapted base model.)
+    """
+    import copy
+    try:
+        merged = copy.deepcopy(model).merge_and_unload()   # fold BA into W, unwrap peft
+        state  = merged.state_dict()
+    except AttributeError:
+        # Not a peft model (should not happen — LoRA is mandatory). Save as-is.
+        state = model.state_dict()
     torch.save({
         'epoch':           epoch,
-        'lora_state_dict': lora_state,
+        'lora_state_dict': state,
         'val_loss':        val_loss,
     }, path)
 
