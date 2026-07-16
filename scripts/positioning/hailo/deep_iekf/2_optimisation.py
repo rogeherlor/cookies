@@ -1,24 +1,22 @@
 """
-AI-IMU MesNet HAR optimisation and cross-backend comparison
-=============================================================
+AI-IMU CausalMesNet HAR optimisation and cross-backend comparison
+=================================================================
 Runs the same KITTI IMU sequence through multiple backends and compares:
 
-  1. PyTorch      — original iekfnets.p checkpoint (float64 reference)
+  1. PyTorch      — causal checkpoint, artifacts/deep_iekf_online/ (float64 ref)
   2. SDK_NATIVE   — Hailo emulator, no changes (full precision)
   3. SDK_FP_OPT   — after optimize_full_precision()
   4. SDK_QUANTIZED— after quantization with real KITTI calibration data
 
 What runs on Hailo vs Python
 -----------------------------
-Hailo executes only the cov_net Conv2d backbone (Conv1d converted to 4-D):
+Hailo executes the WHOLE CausalMesNet (Conv1d converted to 4-D Conv2d):
     Input : u_norm_conv (1, 6, 1, N) NCHW — normalized IMU with H=1 dummy dim
-    Output: cov_features (1, 32, 1, N) NCHW — raw CNN features
+    Output: measurement_covs (1, 2, 1, N) NCHW — final [cov_lat, cov_up]
 
-Python handles pre/postprocessing (params in deep_iekf_postproc.npz + .pt):
+Python handles only input normalisation (params in deep_iekf_postproc.npz):
     Pre : u_norm = (u - u_loc) / u_std → (1, 6, 1, N) NCHW
-    Post: features = cov_features[0, :, 0, :].T    # (N, 32)
-          z = cov_lin(features)                    # (N, 2) Sequential(Linear+Tanh)
-          covs = cov0 * (10.0 ** (beta * z))       # (N, 2)
+    Post: covs = measurement_covs[0, :, 0, :].T    # (N, 2) — reshape only
 
 Note on calibration data
 ------------------------
@@ -28,8 +26,10 @@ unrepresentative activation ranges in the Conv1d layers.
 
 Usage
 -----
-    python 2_optimisation.py [--weights  artifacts/deep_iekf/iekfnets.p]
-                             [--norm     artifacts/deep_iekf/iekfnets_norm.p]
+    python 2_optimisation.py [--weights  artifacts/deep_iekf_online/fold_01.p]
+
+Normalisation factors (u_loc, u_std) are auto-discovered from the sibling
+`<stem>_norm.p` next to the weights.
 """
 
 import argparse
@@ -48,7 +48,8 @@ _REPO_ROOT  = _HERE.parent.parent.parent.parent
 _IEKF_DIR   = _REPO_ROOT / "scripts/positioning/python/dl_filters/deep_iekf"
 _AI_IMU_SRC = _REPO_ROOT / "external/ai-imu-dr/src"
 _SCRIPTS    = _REPO_ROOT / "scripts/positioning/python"
-_ARTIFACTS  = _REPO_ROOT / "artifacts/deep_iekf"
+_ARTIFACTS        = _REPO_ROOT / "artifacts/deep_iekf"          # acausal (diagnostic)
+_ARTIFACTS_ONLINE = _REPO_ROOT / "artifacts/deep_iekf_online"   # causal (definitive)
 
 for _p in [str(_IEKF_DIR), str(_AI_IMU_SRC), str(_SCRIPTS)]:
     if _p not in sys.path:
@@ -59,7 +60,6 @@ ONNX_PATH          = _HERE / "deep_iekf.onnx"
 HAR_PATH           = _HERE / "deep_iekf_hailo_model.har"
 QUANTIZED_HAR_PATH = _HERE / "deep_iekf_quantized_model.har"
 POSTPROC_PATH      = _HERE / "deep_iekf_postproc.npz"
-COV_LIN_PATH       = _HERE / "deep_iekf_cov_lin.pt"
 
 SEQ_LEN      = 4544
 IMU_CHANNELS = 6
@@ -81,20 +81,14 @@ log = init_logging()
 
 # ── Pre/postprocessing ────────────────────────────────────────────────────────
 
-def load_postproc(npz_path: Path, cov_lin_path: Path):
-    """Load pre/postprocessing parameters saved by 0_onnx_converter.py."""
-    for p in [npz_path, cov_lin_path]:
-        if not p.exists():
-            raise FileNotFoundError(
-                f"Postprocessing file not found: {p}\n"
-                "Run 0_onnx_converter.py first."
-            )
+def load_postproc(npz_path: Path):
+    """Load the input-normalisation parameters saved by 0_onnx_converter.py."""
+    if not npz_path.exists():
+        raise FileNotFoundError(
+            f"Normalisation file not found: {npz_path}\nRun 0_onnx_converter.py first."
+        )
     d = np.load(str(npz_path))
-    pp = {k: d[k] for k in d.files}
-    pp["cov_lin"] = torch.load(str(cov_lin_path), map_location="cpu",
-                               weights_only=False).float()
-    pp["cov_lin"].eval()
-    return pp
+    return {k: d[k] for k in d.files}   # u_loc, u_std
 
 
 def preprocess(imu_np: np.ndarray, pp: dict) -> np.ndarray:
@@ -103,21 +97,17 @@ def preprocess(imu_np: np.ndarray, pp: dict) -> np.ndarray:
     return u_norm.T[np.newaxis, :, np.newaxis, :]  # (1, 6, 1, N)
 
 
-def postprocess(cov_features: np.ndarray, pp: dict) -> np.ndarray:
-    """Hailo/ONNX output → (N, 2) measurement covariances.
+def postprocess(covs_dev: np.ndarray, pp: dict) -> np.ndarray:
+    """Device output → (N, 2) measurement covariances (reshape only).
 
-    Accepts:
-      NCHW (1, 32, 1, N) — onnxruntime output
-      NHWC (1, 1, N, 32) or (1, N, 32) — Hailo SDK emulator output
+    The cov_lin head and output scaling now run on-device, so the model already
+    emits the final [cov_lat, cov_up].  Accepts:
+      NCHW (1, 2, 1, N)              — onnxruntime output
+      NHWC (1, 1, N, 2) or (1, N, 2) — Hailo SDK emulator output
     """
-    if cov_features.ndim == 4 and cov_features.shape[1] == 32:
-        features = cov_features[0, :, 0, :].T   # NCHW → (N, 32)
-    else:
-        features = cov_features.reshape(-1, 32)  # NHWC (any shape) → (N, 32)
-    with torch.no_grad():
-        z_cov = pp["cov_lin"](torch.from_numpy(features)).numpy()    # (N, 2)
-    z_scaled = pp["beta_measurement"] * z_cov
-    return pp["cov0_measurement"] * (10.0 ** z_scaled)               # (N, 2)
+    if covs_dev.ndim == 4 and covs_dev.shape[1] == COV_DIM:
+        return covs_dev[0, :, 0, :].T        # NCHW → (N, 2)
+    return covs_dev.reshape(-1, COV_DIM)     # NHWC (any shape) → (N, 2)
 
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
@@ -137,7 +127,7 @@ def infer_onnx(session, imu_np, pp):
     """Run onnxruntime on (N, 6) float32, return (N, 2)."""
     u_nchw = preprocess(imu_np, pp)             # (1, 6, 1, N)
     out = session.run(None, {"u_norm_conv": u_nchw})
-    return postprocess(out[0], pp)              # out[0]: (1, 32, 1, N)
+    return postprocess(out[0], pp)              # out[0]: (1, 2, 1, N)
 
 
 def _hailo_input_names(runner):
@@ -148,7 +138,7 @@ def infer_hailo(runner, ctx, imu_np, pp):
     """Run Hailo emulator on (N, 6) IMU, return (N, 2) covs.
 
     Model input  NCHW: (1, 6, 1, N) → Hailo NHWC: (1, 1, N, 6)
-    Model output NHWC: (1, 1, N, 32) → NCHW: (1, 32, 1, N)
+    Model output NHWC: (1, 1, N, 2) → (N, 2)  (head runs on-device)
     """
     names = _hailo_input_names(runner)
     if len(names) != 1:
@@ -156,8 +146,8 @@ def infer_hailo(runner, ctx, imu_np, pp):
     u_nchw = preprocess(imu_np, pp)                    # (1, 6, 1, N)
     u_nhwc = u_nchw.transpose(0, 2, 3, 1)             # (1, 1, N, 6) NHWC
     results = runner.infer(ctx, {names[0]: u_nhwc})
-    feats   = np.concatenate(results, axis=0)          # Hailo NHWC (..., 32)
-    return postprocess(feats, pp)                      # (N, 2)
+    covs    = np.concatenate(results, axis=0)          # Hailo NHWC (..., 2)
+    return postprocess(covs, pp)                       # (N, 2)
 
 
 # ── Comparison printout ───────────────────────────────────────────────────────
@@ -190,12 +180,14 @@ def print_comparison(backends: dict, reference: str = "PyTorch"):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--weights", type=Path, default=_ARTIFACTS / "iekfnets.p")
-    parser.add_argument("--norm",    type=Path, default=_ARTIFACTS / "iekfnets_norm.p")
+    parser.add_argument("--weights", type=Path,
+                        default=_ARTIFACTS_ONLINE / "iekfnets.p",
+                        help="Causal-trained weights (artifacts/deep_iekf_online/). "
+                             "If missing, a single fold in that folder is auto-discovered.")
     args = parser.parse_args()
 
     # ── Load postprocessing parameters ────────────────────────────────────────
-    pp = load_postproc(POSTPROC_PATH, COV_LIN_PATH)
+    pp = load_postproc(POSTPROC_PATH)
     log.info("Postprocessing params loaded: %s", POSTPROC_PATH.name)
 
     # ── Calibration data — real KITTI IMU ─────────────────────────────────────
@@ -220,24 +212,44 @@ def main():
 
     backends = {}
 
-    # ── 1. PyTorch (float64 reference) ────────────────────────────────────────
+    # ── 1. PyTorch (float64 reference — CAUSAL model) ─────────────────────────
+    from iekf_ai_imu_online import _find_online_weights
+    from causal_mesnet import attach_causal_mesnet
+    from iekf_ai_imu import _find_norm_factors
     from utils_torch_filter import TORCHIEKF
+
+    weights_path = args.weights
+    if not weights_path.exists():
+        weights_path = _find_online_weights()
+        if weights_path is None:
+            raise FileNotFoundError(
+                f"Causal weights not found: {args.weights}\n"
+                f"and none discoverable in {_ARTIFACTS_ONLINE}.\n"
+                "Train first: python dl_filters/deep_iekf/train_ai_imu.py --causal "
+                "--mode loo --held-out <drive>"
+            )
+
     try:
         from main_kitti import KITTIParameters
         torch_iekf = TORCHIEKF(KITTIParameters)
     except Exception:
         torch_iekf = TORCHIEKF()
+    if torch_iekf.cov0_measurement is None:
+        torch_iekf.cov0_measurement = torch.tensor([0.2, 300.0]).double()
 
-    log.info("Loading TORCHIEKF weights: %s", args.weights)
-    mondict = torch.load(args.weights, map_location="cpu", weights_only=False)
-    torch_iekf.load_state_dict(mondict)
+    attach_causal_mesnet(torch_iekf)                 # swap MesNet → CausalMesNet
+    log.info("Loading CAUSAL weights: %s", weights_path)
+    torch_iekf.load_state_dict(torch.load(weights_path, map_location="cpu",
+                                          weights_only=False))
     torch_iekf.eval()
 
-    norm = torch.load(args.norm, map_location="cpu", weights_only=False)
+    norm = _find_norm_factors(weights_path)
+    if norm is None:
+        raise FileNotFoundError(
+            f"Normalisation factors (<stem>_norm.p) not found next to {weights_path}."
+        )
     torch_iekf.u_loc = norm["u_loc"].double()
     torch_iekf.u_std = norm["u_std"].double()
-    if torch_iekf.cov0_measurement is None:
-        torch_iekf.set_param_attr()
 
     # Use the full calibration sequence — MesNet processes the entire sequence
     # at once; ONNX has a static input shape of SEQ_LEN samples.
