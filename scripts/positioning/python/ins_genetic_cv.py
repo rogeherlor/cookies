@@ -52,6 +52,7 @@ from filters import (
     esekfs_vanilla, esekfs_enhanced,
     iekf_vanilla, iekf_enhanced,
 )
+from smoothers import isam2_runner, isam2_fixedlag_runner, isam2_map_runner
 
 # ── Speed / quality ───────────────────────────────────────────────────────────
 # Defaults sized for full DE convergence on the journal-grade three-component
@@ -90,12 +91,29 @@ _FILTER_MODULES = {
     'esekfs_enhanced': esekfs_enhanced,
     'iekf_vanilla':  iekf_vanilla,
     'iekf_enhanced': iekf_enhanced,
+    # GTSAM smoothers — tuned with the same LOO machinery but a different
+    # (IMU-noise-density) search space, see _space_for().
+    'isam2':          isam2_runner,
+    'isam2_fixedlag': isam2_fixedlag_runner,
+    'isam2_map':      isam2_map_runner,
 }
+
+# Smoothers use the IMU-noise-density parameterisation (BOUNDS_SMOOTHER) instead
+# of the EKF process-noise one.  They are opt-in (not in ALL_FILTERS) — request
+# them explicitly, e.g.  ins_genetic_cv.py --3d isam2 --held-out <drive>.
+SMOOTHER_FILTERS = {'isam2', 'isam2_fixedlag', 'isam2_map'}
 
 # ── Parameter search bounds + decoder shared via ins_cost ────────────────────
 # (reuse the canonical 15-dimensional log10 search space)
 BOUNDS        = ins_cost.BOUNDS
 decode_params = ins_cost.decode_params
+
+
+def _space_for(filter_name):
+    """Return (bounds, decode_fn) for a filter — smoother or classical."""
+    if filter_name in SMOOTHER_FILTERS:
+        return ins_cost.BOUNDS_SMOOTHER, ins_cost.decode_params_smoother
+    return ins_cost.BOUNDS, ins_cost.decode_params
 
 
 # ── Dataset discovery ─────────────────────────────────────────────────────────
@@ -285,8 +303,17 @@ def _single_cost(filter_name: str, nd: NavigationData, params: dict,
     training so the optimiser can't game the cost by under-reporting
     covariance. `gate_anees=False` is used during validation where we
     want a finite number to report regardless of consistency.
+
+    Smoothers are exempt from the ANEES gate: their GTSAM marginal covariance
+    is a batch/window MAP covariance (not a per-step propagated filter
+    covariance) and is strongly over-confident relative to the true error, so
+    ANEES lands far outside [0.1, 10] by construction and the gate would reject
+    every candidate.  For them the cost reduces to the accuracy terms
+    ATE_outage + t_rel + r_rel, which is exactly what should be minimised.
     """
     module = _FILTER_MODULES[filter_name]
+    if filter_name in SMOOTHER_FILTERS:
+        gate_anees = False
     return ins_cost.single_window_cost(module, nd, params, t1, d, use_3d,
                                        gate_anees=gate_anees)
 
@@ -303,11 +330,13 @@ class CVFitness:
     """
 
     def __init__(self, filter_name: str, train_data: list,
-                 train_outages: list, use_3d: bool):
+                 train_outages: list, use_3d: bool, decode_fn=None):
         self.filter_name   = filter_name
         self.train_data    = train_data    # list[NavigationData]
         self.train_outages = train_outages # list[list[tuple(float,float)]]
         self.use_3d        = use_3d
+        # Per-filter decoder (smoother vs classical); default keeps back-compat.
+        self.decode_fn     = decode_fn if decode_fn is not None else decode_params
 
         # Build flat list of (NavigationData, t1, d) pairs for fast iteration
         self._pairs = []
@@ -316,7 +345,7 @@ class CVFitness:
                 self._pairs.append((nd, t1, d))
 
     def __call__(self, x: np.ndarray) -> float:
-        params = decode_params(x)
+        params = self.decode_fn(x)
         costs  = [
             _single_cost(self.filter_name, nd, params, t1, d, self.use_3d)
             for (nd, t1, d) in self._pairs
@@ -386,23 +415,29 @@ def run_cv_one(filter_name: str, mode_3d: bool,
     n_pairs     = sum(len(o) for o in train_outages)
     n_val_pairs = sum(len(o) for o in val_outages)
 
+    # Per-filter search space (smoother vs classical).
+    bounds, decode_fn = _space_for(filter_name)
+
     logger.info(f"\n{'─'*60}")
     logger.info(f"  {filter_name}  [{mode_str}]")
     logger.info(f"  train datasets : {[nd.dataset_name for nd in train_data]}")
     logger.info(f"  train pairs    : {n_pairs}  (datasets × outages per eval)")
     logger.info(f"  val datasets   : {[nd.dataset_name for nd in val_data]}")
     logger.info(f"  val pairs      : {n_val_pairs}")
+    logger.info(f"  search dims    : {len(bounds)}  "
+                f"({'smoother' if filter_name in SMOOTHER_FILTERS else 'classical'})")
     logger.info(f"  maxiter={maxiter}  popsize={popsize}  "
-                f"evals≈{maxiter * popsize * len(BOUNDS)}")
+                f"evals≈{maxiter * popsize * len(bounds)}")
     logger.info(f"  workers={workers}")
     logger.info(f"{'─'*60}")
 
-    fitness_obj = CVFitness(filter_name, train_data, train_outages, mode_3d)
+    fitness_obj = CVFitness(filter_name, train_data, train_outages, mode_3d,
+                            decode_fn=decode_fn)
 
     try:
         result = differential_evolution(
             fitness_obj,
-            BOUNDS,
+            bounds,
             strategy='best1bin',
             maxiter=maxiter,
             popsize=popsize,
@@ -419,7 +454,7 @@ def run_cv_one(filter_name: str, mode_3d: bool,
             logger.warning(f"  workers={workers} failed ({e}), retrying with workers=1")
             result = differential_evolution(
                 fitness_obj,
-                BOUNDS,
+                bounds,
                 strategy='best1bin',
                 maxiter=maxiter,
                 popsize=popsize,
@@ -434,7 +469,7 @@ def run_cv_one(filter_name: str, mode_3d: bool,
         else:
             raise
 
-    best_params = decode_params(result.x)
+    best_params = decode_fn(result.x)
     train_cost  = float(result.fun)
 
     logger.info(f"  → train cost={train_cost:.3f}  evals={result.nfev}  "

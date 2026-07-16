@@ -114,6 +114,42 @@ def decode_params(x):
     }
 
 
+# ── Smoother search space (GTSAM iSAM2 family) ────────────────────────────────
+# The factor-graph smoothers (isam2, isam2_fixedlag, isam2_map) do NOT use the
+# EKF process-noise parameterisation above.  They are parameterised by
+# continuous-time IMU noise densities, a GPS position sigma, and initial-state
+# sigmas — the arguments of GTSAM's PreintegrationCombinedParams / prior factors.
+# Tuned with the SAME genetic-CV / LOO machinery, just a different decoder.
+BOUNDS_SMOOTHER = [
+    (-2.0,  0.0),    # log10(acc_noise_sigma)  [m/s²/√s]   default 0.1
+    (-4.0, -2.0),    # log10(gyr_noise_sigma)  [rad/s/√s]  default 1e-3
+    (-4.0, -1.5),    # log10(acc_bias_sigma)   [m/s²/√Hz]  default 1e-3
+    (-6.0, -3.5),    # log10(gyr_bias_sigma)   [rad/s/√Hz] default 1e-5
+    (-1.0,  2.0),    # log10(Rpos)             [m]         default 4
+    (-1.0,  1.5),    # log10(P_pos_std)        [m]         default 1
+    (-1.0,  0.5),    # log10(P_vel_std)        [m/s]       default 0.3
+    (-2.0, -0.5),    # log10(P_orient_std)     [rad]       default 0.1
+    (-3.0, -1.0),    # log10(P_acc_std)        [m/s²]      default 1e-2
+    (-4.0, -2.0),    # log10(P_gyr_std)        [rad/s]     default 1e-3
+]
+
+
+def decode_params_smoother(x):
+    """Decode the 10-D log10 vector into the smoother `params` dict."""
+    return {
+        'acc_noise_sigma': 10**x[0],
+        'gyr_noise_sigma': 10**x[1],
+        'acc_bias_sigma':  10**x[2],
+        'gyr_bias_sigma':  10**x[3],
+        'Rpos':            10**x[4],
+        'P_pos_std':       10**x[5],
+        'P_vel_std':       10**x[6],
+        'P_orient_std':    10**x[7],
+        'P_acc_std':       10**x[8],
+        'P_gyr_std':       10**x[9],
+    }
+
+
 def _enu_ground_truth(nav_data):
     """Convert geodetic ground truth to ENU."""
     f = pm.geodetic2enu(nav_data.lla[:, 0], nav_data.lla[:, 1], nav_data.lla[:, 2],

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-iSAM2 Map-Aided Online Smoother
-================================
-Reference implementation following:
+iSAM2 Track-Constrained Online Smoother
+=======================================
+Reference (inspiration):
 
     D. Wilbers, C. Merfels, and C. Stachniss, "Localization with sliding window
     factor graphs on third-party maps for automated driving," in 2019 International
@@ -11,36 +11,56 @@ Reference implementation following:
 
 Core idea
 ---------
-A sparse "HD map" is extracted **offline** from the ground-truth trajectory by
-sampling one waypoint every `map_spacing_m` metres (default 200 m).  During the
-online iSAM2 run, whenever the IMU-propagated position prediction falls within
-`map_assoc_radius` metres of an unvisited waypoint, an additional `GPSFactor` is
-inserted into the factor graph at that node, constraining its translation to the
-map position with noise std `map_sigma`.
+A known track geometry (a surveyed / manually-labelled polyline — the railway
+track centre-line, or a third-party HD-map) is used as a drift-bounding prior
+during GNSS outages.  Unlike a raw position anchor, the track is incorporated as
+an **anisotropic point-to-curve constraint**: at every 1 Hz node inside the
+outage the *current estimated* position is projected onto the nearest point of
+the track and the pose is pulled **perpendicularly onto the track** (tight
+across-track and vertical, loose along-track).  The IMU decides how far *along*
+the track the vehicle is; the map decides only that it is *on* the track.  This
+is the position-domain analogue of a non-holonomic constraint.
 
-This is the factor-graph equivalent of Wilbers et al. §III-B (map-feature
-association and factor insertion).  The Bayes-tree re-linearisation/marginalisation
-already built into iSAM2 provides the sliding-window behaviour that is the
-architectural core of the Wilbers paper — no explicit window management is needed.
+Deviation from Wilbers et al.
+-----------------------------
+Wilbers keeps landmark variables in the graph and constrains those landmarks
+with the map (eq. 4), so the pose is corrected only *indirectly* through
+landmark-observation factors, and the data association is solved online with
+ICP + temporal smoothing.  Here there are no landmark variables and no landmark
+sensor: the map factor is applied **directly to the pose** as a lateral
+constraint, and "association" is a purely geometric **online nearest-point
+projection** of the estimated position onto the track polyline (gated by
+arc-length continuity and heading to avoid wrong-branch snapping).  Crucially the
+projection uses the *estimated* trajectory, never ground truth, so it is a
+realizable online scheme rather than an offline oracle.
+
+Anisotropy
+----------
+The constraint is realised by reusing ``gtsam.GPSFactor`` anchored at the
+projected foot point ``p*`` with a **full covariance** oriented to the local
+track frame::
+
+    R_track = A · diag(sigma_lon^2, sigma_lat^2, sigma_up^2) · A^T,
+    A = [ t_hat | n_hat | z_hat ]   (columns),
+
+with sigma_lon large ("free" along-track) and sigma_lat / sigma_up tight.  The
+huge along-track variance makes the anchor pull only in the perpendicular /
+vertical directions, i.e. exactly a lateral point-to-curve constraint.
 
 Differences from isam2_runner.py
----------------------------------
-1. build_navigation_map() creates a NavigationMap (list of {id,lat,lon,alt,enu}
-   dicts + scipy KDTree on ENU x-y) from the GT trajectory before the loop.
-2. Three new DEFAULT_PARAMS keys control map behaviour:
-       map_spacing_m      – inter-waypoint spacing [m]   (default 200)
-       map_sigma          – map position noise std [m]    (default 3.0)
-       map_assoc_radius   – pre-assignment gate radius [m] (default 25)
-3. _assign_map_to_epochs() runs offline using a KDTree on GPS positions
-   (O(M log K)) to find the GPS epoch closest to each waypoint.  The resulting
-   dict {sample_index: point_dict} is looked up in O(1) per GPS epoch.
-4. Each waypoint is assigned to at most one GPS epoch (independence preserved).
+--------------------------------
+1. A TrackMap (polyline + KDTree + cumulative arc-length + per-segment tangents)
+   is built from nav_data.lla before the loop.
+2. During the outage a node is instantiated at every 1 Hz epoch (as in the base
+   estimator's normal operation) so the track anchor has a node to attach to.
+3. The outage factor is the anisotropic point-to-curve GPSFactor described above,
+   inserted only when a valid projection is found.
 
 All other aspects (coordinate frames, IMU preintegration, GPS factors, output
-format, outage simulation) are identical to isam2_runner.py.
+format) are identical to isam2_runner.py.
 
-No public code was released by the original authors; the GTSAM patterns follow
-the official LocalizationExample.cpp in borglab/gtsam.
+NOTE — numpy compatibility: install the conda-forge gtsam build (the pip wheel
+gtsam==4.2 segfaults on numpy 2.x):  conda install -c conda-forge gtsam
 """
 
 import sys
@@ -64,7 +84,7 @@ def _import_gtsam():
         return gtsam, X, V, B
     except ImportError as e:
         raise ImportError(
-            "GTSAM is required for the iSAM2 Map smoother.\n"
+            "GTSAM is required for the iSAM2 Track smoother.\n"
             "Install with:  conda install -c conda-forge gtsam\n"
             f"Original error: {e}"
         ) from e
@@ -89,12 +109,16 @@ DEFAULT_PARAMS = {
     'P_orient_std': 0.1,     # [rad]
     'P_acc_std':    1e-2,    # [m/s²]  initial bias uncertainty
     'P_gyr_std':    1e-3,    # [rad/s]
-    # Map factor parameters (Wilbers et al. ICRA 2019)
-    'map_spacing_m':     200.0,   # waypoint extraction spacing [m]
-    'map_sigma':           1.0,   # map position noise std dev [m]; used only during
-                                  # GPS outages where no competing GPS factor exists,
-                                  # so tight sigma is correct (HD-map accuracy ~1 m)
-    'map_assoc_radius':   25.0,   # pre-assignment gate radius [m] (offline, vs GPS pos)
+    # Track constraint parameters (point-to-curve, applied during outage only)
+    'track_spacing_m':        5.0,    # polyline resample spacing [m]
+    'sigma_lat':              1.0,    # across-track std dev [m] (tight — HD-map accuracy)
+    'sigma_up':               1.0,    # vertical std dev [m] (tight)
+    'sigma_lon':           1000.0,    # along-track std dev [m] (loose — effectively free)
+    'track_search_window_m':  150.0,  # arc-length half-window for online projection [m]
+    'track_heading_gate':     0.6,    # max |tangent − heading| for a valid match [rad]
+    'track_gate_m':           25.0,   # reject the anchor if the predicted position is
+                                      # farther than this from the projected track point
+                                      # (outlier / lost-lock guard — prevents divergence)
 }
 
 
@@ -142,112 +166,133 @@ def _mat_to_rot3(gtsam, R):
     )
 
 
-# ── Navigation map ────────────────────────────────────────────────────────────
+# ── Track map (surveyed polyline + online projection) ─────────────────────────
 
-class NavigationMap:
+class TrackMap:
     """
-    Scalable navigation map with KD-tree spatial index.
+    Known track geometry as an ENU polyline with an online point-to-curve query.
 
-    Each waypoint is stored as a dict::
+    Built once from a source trajectory (the surveyed / manually-labelled track;
+    here simulated by resampling nav_data.lla by arc length).  Stores:
 
-        {
-            'id':  int,          # sequential index
-            'lat': float,        # geodetic latitude  [°]
-            'lon': float,        # geodetic longitude [°]
-            'alt': float,        # geodetic altitude  [m]
-            'enu': np.ndarray,   # (3,) ENU position  [m]
-        }
+        verts   : (M, 3) ENU vertices of the polyline.
+        seg_dir : (M-1, 2) unit tangents of each segment in the horizontal plane.
+        seg_len : (M-1,)   segment lengths [m] (horizontal).
+        s_vert  : (M,)     cumulative arc length at each vertex [m].
 
-    A ``scipy.spatial.KDTree`` is built on the 2-D ENU (x, y) plane, giving
-    O(log M) nearest-neighbour queries regardless of map size.  Altitude is
-    stored but not used for association (vehicles stay on-road).
-
-    Design notes
-    ------------
-    * ENU is the right coordinate frame here: it is metric (1 m = 1 m in every
-      direction), so KDTree Euclidean distances are correct.  Raw lat/lon is NOT
-      metric (1° lat ≠ 1° lon), so building a KDTree on lat/lon would give wrong
-      distances.
-    * For global maps spanning thousands of kilometres, replace ENU with ECEF
-      (``pm.geodetic2ecef``) and build the tree on (X, Y, Z).  The rest of the
-      interface stays the same.
-    * Each point's lat/lon/alt are kept for logging, serialisation (e.g. export
-      to GeoJSON), and human inspection — they are never used for computation.
+    A ``scipy.spatial.KDTree`` on the 2-D vertices gives an O(log M) coarse
+    nearest-vertex lookup; ``project`` then refines to the exact perpendicular
+    foot on the neighbouring segments, gated by arc-length continuity and heading.
     """
 
-    def __init__(self, points: list, lla0: np.ndarray):
+    def __init__(self, verts: np.ndarray):
+        self.verts = verts                      # (M, 3)
+        d = np.diff(verts[:, :2], axis=0)       # (M-1, 2) horizontal segment vectors
+        seg_len = np.linalg.norm(d, axis=1)     # (M-1,)
+        seg_len = np.maximum(seg_len, 1e-9)
+        self.seg_len = seg_len
+        self.seg_dir = d / seg_len[:, None]     # (M-1, 2) unit tangents
+        self.s_vert = np.concatenate([[0.0], np.cumsum(seg_len)])  # (M,)
+        self._kdtree = KDTree(verts[:, :2])
+
+    @property
+    def n_segments(self) -> int:
+        return len(self.seg_len)
+
+    def _foot_on_segment(self, j: int, q_xy: np.ndarray):
         """
+        Perpendicular foot of q_xy on segment j (clamped to the segment).
+
+        Returns (foot_xy, t_on_seg, along_len) where t_on_seg ∈ [0, 1] is the
+        fractional position along the segment and along_len its metric offset from
+        the segment start.
+        """
+        a = self.verts[j, :2]
+        t = float(np.clip((q_xy - a) @ self.seg_dir[j], 0.0, self.seg_len[j]))
+        foot_xy = a + t * self.seg_dir[j]
+        return foot_xy, t / self.seg_len[j], t
+
+    def project(self, pos_enu: np.ndarray, s_prev: float, heading: float,
+                window_m: float, heading_gate: float):
+        """
+        Project ``pos_enu`` onto the track, online.
+
+        Candidate segments are those whose start-vertex arc length lies within
+        ``window_m`` of ``s_prev`` (continuity gate) and whose tangent agrees with
+        ``heading`` to within ``heading_gate`` (branch gate).  Among candidates the
+        one giving the smallest perpendicular distance is chosen.
+
         Args:
-            points : list of point dicts (see class docstring).
-            lla0   : (3,) ENU reference origin [lat0°, lon0°, alt0_m].
-        """
-        self.points = points          # list of dicts — the map "database"
-        self.lla0   = lla0            # reference origin
-
-        if points:
-            enu_xy = np.array([p['enu'][:2] for p in points])  # (M, 2)
-            self._kdtree = KDTree(enu_xy)
-            self._enu_xy = enu_xy
-        else:
-            self._kdtree = None
-            self._enu_xy = np.empty((0, 2))
-
-    def __len__(self):
-        return len(self.points)
-
-    def __repr__(self):
-        return f'NavigationMap({len(self.points)} waypoints, lla0={self.lla0})'
-
-    def query_nearest(self, pos_enu: np.ndarray, radius: float,
-                      used_ids: set = None):
-        """
-        Find the nearest unvisited waypoint within ``radius`` metres.
-
-        Uses the KD-tree for an O(log M) range query, then filters used IDs
-        and picks the closest remaining candidate.
-
-        Args:
-            pos_enu  : (3,) query position in ENU [m].
-            radius   : search radius [m].
-            used_ids : set of point ``'id'`` values to skip (already consumed).
+            pos_enu      : (3,) estimated ENU position.
+            s_prev       : previous along-track arc length [m] (search centre).
+            heading      : estimated heading atan2(E, N)-consistent angle [rad]
+                           of the horizontal velocity/tangent; NaN disables the gate.
+            window_m     : arc-length half-window [m].
+            heading_gate : max tangent/heading mismatch [rad].
 
         Returns:
-            Nearest matching point dict, or ``None`` if nothing qualifies.
+            (p_star, t_hat, n_hat, s_new) or None if nothing qualifies.
+            p_star : (3,) foot point on the track (altitude interpolated).
+            t_hat  : (2,) horizontal unit tangent at the foot.
+            n_hat  : (2,) horizontal unit normal (left of tangent).
+            s_new  : updated along-track arc length [m].
         """
-        if self._kdtree is None:
+        q_xy = pos_enu[:2]
+
+        # Coarse candidates from arc-length window around s_prev.
+        lo = np.searchsorted(self.s_vert, s_prev - window_m) - 1
+        hi = np.searchsorted(self.s_vert, s_prev + window_m) + 1
+        lo = max(lo, 0)
+        hi = min(hi, self.n_segments)
+        if hi <= lo:
+            # Fall back to KDTree nearest vertex (e.g. first call / s_prev unknown).
+            _, jv = self._kdtree.query(q_xy)
+            lo = max(int(jv) - 3, 0)
+            hi = min(int(jv) + 3, self.n_segments)
+
+        best = None  # (dist, foot_xy, t_hat2, along_len, j)
+        for j in range(lo, hi):
+            t_hat2 = self.seg_dir[j]
+            if np.isfinite(heading):
+                seg_ang = atan2(t_hat2[0], t_hat2[1])  # atan2(E, N)
+                dang = abs((seg_ang - heading + np.pi) % (2 * np.pi) - np.pi)
+                if dang > heading_gate:
+                    continue
+            foot_xy, _, along = self._foot_on_segment(j, q_xy)
+            dist = np.linalg.norm(q_xy - foot_xy)
+            if best is None or dist < best[0]:
+                best = (dist, foot_xy, t_hat2, along, j)
+
+        if best is None:
             return None
 
-        candidates = self._kdtree.query_ball_point(pos_enu[:2], radius)
-        if not candidates:
-            return None
+        _, foot_xy, t_hat2, along, j = best
+        s_new = self.s_vert[j] + along
 
-        if used_ids:
-            candidates = [i for i in candidates
-                          if self.points[i]['id'] not in used_ids]
-        if not candidates:
-            return None
+        # Interpolate altitude along the chosen segment.
+        frac = along / self.seg_len[j]
+        alt = (1.0 - frac) * self.verts[j, 2] + frac * self.verts[j + 1, 2]
+        p_star = np.array([foot_xy[0], foot_xy[1], alt])
 
-        dists = np.linalg.norm(self._enu_xy[candidates] - pos_enu[:2], axis=1)
-        return self.points[candidates[int(np.argmin(dists))]]
+        n_hat2 = np.array([-t_hat2[1], t_hat2[0]])   # left normal
+        return p_star, t_hat2, n_hat2, s_new
 
 
-def build_navigation_map(lla: np.ndarray, lla0: np.ndarray,
-                         spacing_m: float = 200.0) -> NavigationMap:
+def build_track_map(lla: np.ndarray, lla0: np.ndarray,
+                    spacing_m: float = 5.0) -> TrackMap:
     """
-    Extract waypoints every ``spacing_m`` metres from a ground-truth trajectory
-    and return a :class:`NavigationMap` with KD-tree spatial index.
+    Build a TrackMap by resampling a source trajectory in ENU by arc length.
 
-    In a real deployment the map would come from a third-party provider
-    (HERE, TomTom, OSM) as a list of lat/lon waypoints; this function
-    simulates that by sub-sampling the GT trajectory.
+    In a real deployment the polyline would come from the surveyed railway track
+    or a third-party HD-map; here it is simulated by resampling nav_data.lla.
 
     Args:
-        lla       : (N, 3) geodetic positions [lat°, lon°, alt_m] — source.
+        lla       : (N, 3) geodetic positions [lat°, lon°, alt_m] — source track.
         lla0      : (3,)   ENU reference origin [lat0°, lon0°, alt0_m].
-        spacing_m : minimum 3-D ENU distance between consecutive waypoints [m].
+        spacing_m : target vertex spacing along the track [m].
 
     Returns:
-        NavigationMap with M ≪ N waypoints and a pre-built KD-tree.
+        TrackMap with M ≤ N resampled vertices.
     """
     e, n, u = pm.geodetic2enu(
         lla[:, 0], lla[:, 1], lla[:, 2],
@@ -255,108 +300,56 @@ def build_navigation_map(lla: np.ndarray, lla0: np.ndarray,
     )
     p_all = np.column_stack([e, n, u])   # (N, 3)
 
-    points  = []
-    last_pt = p_all[0]
-    pt_id   = 0
-
-    # Always include the start position
-    points.append({
-        'id':  pt_id,
-        'lat': float(lla[0, 0]),
-        'lon': float(lla[0, 1]),
-        'alt': float(lla[0, 2]),
-        'enu': p_all[0].copy(),
-    })
-
+    verts = [p_all[0]]
+    last = p_all[0]
     for i in range(1, len(p_all)):
-        if np.linalg.norm(p_all[i] - last_pt) >= spacing_m:
-            pt_id += 1
-            points.append({
-                'id':  pt_id,
-                'lat': float(lla[i, 0]),
-                'lon': float(lla[i, 1]),
-                'alt': float(lla[i, 2]),
-                'enu': p_all[i].copy(),
-            })
-            last_pt = p_all[i]
-
-    return NavigationMap(points=points, lla0=lla0)
+        if np.linalg.norm(p_all[i, :2] - last[:2]) >= spacing_m:
+            verts.append(p_all[i])
+            last = p_all[i]
+    if np.linalg.norm(p_all[-1, :2] - verts[-1][:2]) > 1e-6:
+        verts.append(p_all[-1])
+    verts = np.asarray(verts)
+    if len(verts) < 2:                    # degenerate: pad so segments exist
+        verts = np.vstack([p_all[0], p_all[-1]])
+    return TrackMap(verts)
 
 
-def _assign_map_to_epochs(nav_map: NavigationMap, p_gps: np.ndarray,
-                           gps_available: np.ndarray,
-                           assoc_radius: float) -> dict:
+def _track_covariance(gtsam, t_hat2, n_hat2, s_lon, s_lat, s_up):
     """
-    Offline pre-assignment: for each map waypoint, find the GPS epoch whose
-    actual GPS position is closest to it (Wilbers et al. §III-A).
+    Full 3×3 GPS-factor covariance oriented to the local track frame:
 
-    Uses a temporary KD-tree on GPS positions for O(M log K) total cost —
-    efficient even for large maps (M large) and long sequences (K large).
+        R = A · diag(s_lon², s_lat², s_up²) · Aᵀ,  A = [t̂ | n̂ | ẑ].
 
-    The result is a dict ``{sample_index: point_dict}`` used in the main loop
-    for O(1) lookup: at GPS epoch i+1, check ``epoch_to_map.get(i+1)``.
-
-    All GPS-rate epochs (including outage epochs) are eligible for assignment,
-    because map factors are specifically intended for outage periods where GPS
-    is absent.
-
-    Returns:
-        epoch_to_map : dict mapping sample index → NavigationMap point dict.
+    The large along-track variance makes the anchor pull only perpendicularly and
+    vertically — an anisotropic point-to-curve (lateral) constraint.
     """
-    # Include ALL GPS-rate epochs (outage epochs are the primary target)
-    gps_idx = np.where(gps_available)[0]  # sample indices of GPS-rate ticks
-    if len(gps_idx) == 0:
-        return {}
-
-    p_gps_valid = p_gps[gps_idx, :2]     # (K, 2) — KDTree on x-y plane
-    gps_kdtree  = KDTree(p_gps_valid)    # O(K log K) build, O(log K) per query
-
-    epoch_to_map     = {}                 # sample_index → point dict
-    assigned_epochs  = set()
-
-    # Skip points[0] — it coincides with the initial prior at the start
-    for pt in nav_map.points[1:]:
-        dist, best = gps_kdtree.query(pt['enu'][:2])
-        if dist > assoc_radius:
-            continue
-        sample_idx = int(gps_idx[best])
-        if sample_idx in assigned_epochs:
-            # Resolve conflict: keep the point closer to this GPS epoch
-            existing = epoch_to_map[sample_idx]
-            existing_dist = np.linalg.norm(
-                p_gps[sample_idx, :2] - existing['enu'][:2]
-            )
-            if dist < existing_dist:
-                epoch_to_map[sample_idx] = pt
-        else:
-            epoch_to_map[sample_idx] = pt
-            assigned_epochs.add(sample_idx)
-
-    return epoch_to_map
+    A = np.array([
+        [t_hat2[0], n_hat2[0], 0.0],
+        [t_hat2[1], n_hat2[1], 0.0],
+        [0.0,       0.0,       1.0],
+    ])
+    D = np.diag([s_lon ** 2, s_lat ** 2, s_up ** 2])
+    R = A @ D @ A.T
+    return gtsam.noiseModel.Gaussian.Covariance(R)
 
 
 # ── Public interface ──────────────────────────────────────────────────────────
 
 def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     """
-    Run iSAM2 map-aided online smoother and return navigation estimates.
+    Run the iSAM2 track-constrained online smoother and return navigation
+    estimates.
 
-    Identical to isam2_runner.run() except that an additional GPSFactor is
-    inserted at each GPS update epoch whenever the current predicted position
-    falls within `map_assoc_radius` of an unvisited map waypoint.
-
-    Map waypoints are extracted from nav_data.lla (ground truth) at a spacing of
-    `map_spacing_m` metres before the main loop begins.  Each waypoint is then
-    pre-assigned offline to the GPS epoch whose actual GPS position is closest to
-    it (Wilbers et al. §III-A), bounding the map-factor offset to ≤ half the GPS
-    inter-epoch spacing and keeping the factor within map_sigma.
+    Identical to isam2_runner.run() except that, during a GNSS outage, each 1 Hz
+    node receives an anisotropic point-to-curve constraint pulling its position
+    perpendicularly onto a known track polyline (see module docstring).  Outside
+    the outage the ordinary GPS factor is used unchanged.
 
     Args:
         nav_data       : NavigationData dataclass (data_loader.py).
         params         : Optional dict overriding DEFAULT_PARAMS.
         outage_config  : Optional {'start': t1_s, 'duration': d_s} for GPS
-                         blackout.  GPS and map factors are both omitted in this
-                         window.
+                         blackout.  Track constraints are applied in this window.
         use_3d_rotation: Accepted for interface compatibility; always ignored.
 
     Returns:
@@ -385,15 +378,9 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     )
     p_gps = np.column_stack([e, n, u])     # (N, 3) ENU positions from GPS
 
-    # ── Map pre-processing (offline) ──────────────────────────────────────────
-    # Extract sparse waypoints, then pre-assign each to the GPS epoch closest
-    # to it.  This ensures the map factor offset ≤ half the GPS inter-epoch
-    # spacing (~5 m), avoiding the outlier problem caused by online association
-    # which fires ~20 m before the vehicle reaches each waypoint.
-    nav_map      = build_navigation_map(lla, lla0, p_cfg['map_spacing_m'])
-    epoch_to_map = _assign_map_to_epochs(
-        nav_map, p_gps, nav_data.gps_available, p_cfg['map_assoc_radius'],
-    )
+    # ── Track map (surveyed polyline; used for online projection in outage) ────
+    track = build_track_map(lla, lla0, p_cfg['track_spacing_m'])
+    s_track = 0.0          # running along-track arc-length estimate [m]
 
     # ── Output arrays ─────────────────────────────────────────────────────────
     p_out        = np.zeros((N, 3))
@@ -467,13 +454,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     graph  = gtsam.NonlinearFactorGraph()
     values = gtsam.Values()
 
-    # GPS noise model
+    # GPS noise model (normal operation)
     gps_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([
         p_cfg['Rpos'], p_cfg['Rpos'], p_cfg['Rpos'],
     ]))
-
-    # Map noise model — tighter than GPS to reflect HD-map accuracy
-    map_noise = gtsam.noiseModel.Diagonal.Sigmas(np.full(3, p_cfg['map_sigma']))
 
     nav_state_prev = gtsam.NavState(pose_prev, vel_prev)
     k = 0   # variable key index
@@ -497,13 +481,13 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         b_acc_out[i + 1]  = b_acc_out[i]
         b_gyr_out[i + 1]  = b_gyr_out[i]
 
-        # ── Three-way branch: normal GPS / outage+map / IMU-only ────────────
+        # ── Three-way branch: normal GPS / outage+track / IMU-only ──────────
         is_gps_tick = nav_data.gps_available[i + 1]
         in_outage   = _in_outage(i + 1, nav_data.sample_rate, outage_config)
         do_update   = False       # whether to run iSAM2 update this step
 
         if is_gps_tick and not in_outage:
-            # ── NORMAL GPS: identical to vanilla isam2_runner (no map) ───
+            # ── NORMAL GPS: identical to vanilla isam2_runner ────────────
             k += 1
             nav_pred = pim.predict(nav_state_prev, bias_prev)
 
@@ -518,11 +502,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             do_update = True
 
         elif is_gps_tick and in_outage:
-            # ── OUTAGE: IMU + map factors only (Wilbers et al. §III-B) ───
-            # Create a graph node at GPS rate even though GPS is absent.
-            # The IMU factor maintains dynamic consistency; the map factor
-            # (if a waypoint is pre-assigned to this epoch) provides a
-            # position anchor that prevents pure dead-reckoning drift.
+            # ── OUTAGE: IMU + anisotropic track constraint ───────────────
+            # Instantiate a node at GPS rate even though GPS is absent, so the
+            # track anchor has a node to attach to.  Project the *predicted*
+            # position onto the track and pull it perpendicularly onto it.
             k += 1
             nav_pred = pim.predict(nav_state_prev, bias_prev)
 
@@ -534,10 +517,31 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 X(k - 1), V(k - 1), X(k), V(k), B(k - 1), B(k), pim,
             ))
 
-            if (i + 1) in epoch_to_map:
-                graph.push_back(gtsam.GPSFactor(
-                    X(k), epoch_to_map[i + 1]['enu'], map_noise,
-                ))
+            pos_pred = np.asarray(nav_pred.pose().translation())
+            vel_pred = np.asarray(nav_pred.velocity())
+            speed_h  = float(np.linalg.norm(vel_pred[:2]))
+            heading  = atan2(vel_pred[0], vel_pred[1]) if speed_h > 0.1 else np.nan
+
+            proj = track.project(
+                pos_pred, s_track, heading,
+                p_cfg['track_search_window_m'], p_cfg['track_heading_gate'],
+            )
+            if proj is not None:
+                p_star, t_hat, n_hat, s_new = proj
+                # Outlier / lost-lock guard: only anchor when the predicted
+                # position is close to the projected track point.  During a long
+                # outage the dead-reckoned prediction can drift beyond the track's
+                # local search window and snap onto a wrong (e.g. parallel or
+                # returning) segment; anchoring there injects a catastrophic pull.
+                # Rejecting the association (and not advancing the arc-length lock)
+                # bounds the error to the pure dead-reckoning level instead.
+                if np.linalg.norm(pos_pred[:2] - p_star[:2]) <= p_cfg['track_gate_m']:
+                    s_track = s_new
+                    track_noise = _track_covariance(
+                        gtsam, t_hat, n_hat,
+                        p_cfg['sigma_lon'], p_cfg['sigma_lat'], p_cfg['sigma_up'],
+                    )
+                    graph.push_back(gtsam.GPSFactor(X(k), p_star, track_noise))
             do_update = True
 
         # ── Shared iSAM2 solve + state extraction ───────────────────────
@@ -560,6 +564,15 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             nav_state_prev = gtsam.NavState(pose_k, vel_k)
 
             pim.resetIntegrationAndSetBias(bias_k)
+
+            # Keep the along-track estimate consistent with the corrected pose.
+            if not in_outage:
+                proj_c = track.project(
+                    np.asarray(pose_k.translation()), s_track, np.nan,
+                    p_cfg['track_search_window_m'], np.pi,
+                )
+                if proj_c is not None:
+                    s_track = proj_c[3]
 
             # Overwrite propagated output with corrected (smoothed) values
             p_out[i + 1] = pose_k.translation()

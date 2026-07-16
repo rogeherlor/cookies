@@ -44,6 +44,7 @@ DEFAULT_FILTERS = [
     'deep_kf',
     'tartan_imu',
     'isam2',
+    'isam2_fixedlag',
     'isam2_map',
 ]
 
@@ -144,7 +145,8 @@ def _filter_label(filter_key: str) -> str:
         'deep_kf':         r'DKF',
         'tartan_imu':      r'Tartan IMU',
         'isam2':           r'iSAM2',
-        'isam2_map':       r'iSAM2 Map',
+        'isam2_fixedlag':  r'iSAM2 FL',
+        'isam2_map':       r'iSAM2 Track',
     }
     return pretty.get(filter_key, filter_key.replace('_', r'\_'))
 

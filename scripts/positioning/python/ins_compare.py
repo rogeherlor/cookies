@@ -48,7 +48,8 @@ from filters import (
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
-from smoothers import rts_smoother, isam2_runner, isam2_map_runner, fgo_batch_runner
+from smoothers import (rts_smoother, isam2_runner, isam2_map_runner,
+                       isam2_fixedlag_runner, fgo_batch_runner)
 from dl_filters.deep_iekf  import iekf_ai_imu, iekf_ai_imu_online
 from dl_filters.tlio       import tlio_runner
 from dl_filters.deep_kf    import deep_kf_runner
@@ -82,6 +83,22 @@ def _load_tuned_params(nav_data, mode_3d):
              or fp.get(key, mode_3d, cv_key))
         if p is not None:
             result[key] = p
+
+    # ── GTSAM smoothers (tuned by ins_genetic_cv with the smoother search space) ─
+    # The iSAM2 family shares one IMU-preintegration/GPS backbone, so the base
+    # 'isam2' tuning is applied to the fixed-lag and track variants too (their
+    # variant-specific keys — smoother_lag, sigma_lat … — stay at DEFAULT_PARAMS).
+    for key in ['isam2', 'isam2_fixedlag', 'isam2_map']:
+        p = (fp.get(key, mode_3d, loo_key)
+             or fp.get(key, mode_3d, nav_data.dataset_name)
+             or fp.get(key, mode_3d, cv_key))
+        if p is not None:
+            result[key] = p
+    _base_isam2 = result.get('isam2')
+    if _base_isam2 is not None:
+        for k in ['isam2_fixedlag', 'isam2_map']:
+            if k not in result:
+                result[k] = dict(_base_isam2)
 
     # ── Derive DL-filter classical params from best tuned classical filter ────
     # TLIO / Deep-KF / Tartan-IMU all have a traditional KF layer whose
@@ -137,7 +154,8 @@ FILTER_CONFIGS = [
     {'name': 'Tartan IMU',   'key': 'tartan_imu',   'module': tartan_runner},
     # Online smoothers
     {'name': 'iSAM2',        'key': 'isam2',        'module': isam2_runner},
-    {'name': 'iSAM2 Map',    'key': 'isam2_map',    'module': isam2_map_runner},
+    {'name': 'iSAM2 FL',     'key': 'isam2_fixedlag', 'module': isam2_fixedlag_runner},
+    {'name': 'iSAM2 Track',  'key': 'isam2_map',    'module': isam2_map_runner},
 ]
 
 

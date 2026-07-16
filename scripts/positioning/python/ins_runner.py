@@ -40,7 +40,7 @@ from filters import (
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
-from smoothers import rts_smoother, isam2_runner
+from smoothers import rts_smoother, isam2_runner, isam2_fixedlag_runner
 from dl_filters.deep_iekf  import iekf_ai_imu
 from dl_filters.tlio       import tlio_runner
 from dl_filters.deep_kf    import deep_kf_runner
@@ -58,6 +58,7 @@ FILTERS = {
     # Smoothers
     "rts_smoother":  rts_smoother,
     "isam2":         isam2_runner,
+    "isam2_fixedlag": isam2_fixedlag_runner,
     # Deep learning filters
     "iekf_ai_imu":   iekf_ai_imu,
     "tlio":          tlio_runner,
