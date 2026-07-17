@@ -106,10 +106,16 @@ def postprocess(covs_dev: np.ndarray, pp: dict) -> np.ndarray:
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
 
-def infer_pytorch(torch_iekf, imu_np):
+def infer_pytorch(torch_iekf, imu_np, pp):
     """Run float64 MesNet on (N, 6), return (N, 2) covs.
-    MesNet.cov_net is Conv1d and expects (1, 6, N) NCL format."""
-    u = torch.from_numpy(imu_np.astype(np.float64)).T.unsqueeze(0)  # (1, 6, N)
+    MesNet.cov_net is Conv1d and expects (1, 6, N) NCL format. mes_net has no
+    internal normalisation — production code normalises before calling it
+    (TORCHIEKF.forward_nets() in utils_torch_filter.py); must match that here
+    with the same u_loc/u_std saved to deep_iekf_postproc.npz."""
+    u_loc = pp["u_loc"].astype(np.float64)
+    u_std = pp["u_std"].astype(np.float64)
+    u_norm = (imu_np.astype(np.float64) - u_loc) / u_std
+    u = torch.from_numpy(u_norm).T.unsqueeze(0)  # (1, 6, N)
     with torch.no_grad():
         return torch_iekf.mes_net(u, torch_iekf).numpy()  # (N, 2)
 
@@ -135,8 +141,11 @@ def infer_hef(hef_path: Path, imu_np: np.ndarray, pp: dict) -> np.ndarray:
     with hp.VDevice(params) as vdevice:
         infer_model = vdevice.create_infer_model(str(hef_path))
         infer_model.set_batch_size(1)
+        infer_model.input().set_format_type(hp.FormatType.FLOAT32)
+        infer_model.output().set_format_type(hp.FormatType.FLOAT32)
 
         with infer_model.configure() as configured_model:
+            configured_model.activate()
             bindings = configured_model.create_bindings()
             input_name  = infer_model.input().name
             output_name = infer_model.output().name
@@ -146,7 +155,8 @@ def infer_hef(hef_path: Path, imu_np: np.ndarray, pp: dict) -> np.ndarray:
             out_buf = np.empty(out_shape, dtype=np.float32)
             bindings.input(input_name).set_buffer(u_nhwc)
             bindings.output(output_name).set_buffer(out_buf)
-            configured_model.run([bindings], timeout_ms=5000)
+            configured_model.run([bindings], 5000)
+            configured_model.deactivate()
 
     return postprocess(out_buf, pp)               # postprocess handles any NHWC shape
 
@@ -155,20 +165,32 @@ def _fmt(arr):
     return np.array2string(arr, precision=6, suppress_small=True, separator=", ")
 
 
+EDGE_SAMPLES = 20  # ReplicationPad->ZeroPad causal-padding approximation only
+                    # affects the first ~16 samples (see 0_onnx_converter.py) —
+                    # comparing there mixes in a known, unavoidable transient
+                    # instead of measuring steady-state accuracy.
+
+
 def print_comparison(pt_covs, hef_covs, n_show=8):
     print("\n" + "=" * 72)
     print("MEASUREMENT COVARIANCES  [cov_lat, cov_up]")
     print("=" * 72)
-    for i in range(n_show):
+    print(f"(first {EDGE_SAMPLES} samples affected by the ReplicationPad->ZeroPad "
+          "causal-padding approximation — shown separately below)")
+    for i in range(EDGE_SAMPLES, EDGE_SAMPLES + n_show):
         print(f"\nTimestep {i}:")
         print(f"  PyTorch (f64)  {_fmt(pt_covs[i])}")
         print(f"  HEF            {_fmt(hef_covs[i])}")
 
-    mae = float(np.mean(np.abs(
-        hef_covs[:n_show] - pt_covs[:n_show].astype(np.float32)
+    mae_edge = float(np.mean(np.abs(
+        hef_covs[:EDGE_SAMPLES] - pt_covs[:EDGE_SAMPLES].astype(np.float32)
+    )))
+    mae_steady = float(np.mean(np.abs(
+        hef_covs[EDGE_SAMPLES:] - pt_covs[EDGE_SAMPLES:].astype(np.float32)
     )))
     print("\n" + "-" * 72)
-    print(f"MAE (HEF vs PyTorch): {mae:.6e}")
+    print(f"MAE (HEF vs PyTorch), first {EDGE_SAMPLES} samples (padding transient): {mae_edge:.6e}")
+    print(f"MAE (HEF vs PyTorch), steady-state (excl. first {EDGE_SAMPLES} samples): {mae_steady:.6e}")
     print("=" * 72 + "\n")
 
 
@@ -240,7 +262,7 @@ def main():
     torch_iekf.u_std = norm["u_std"].double()
 
     log.info("PyTorch inference ...")
-    pt_covs = infer_pytorch(torch_iekf, test_imu)
+    pt_covs = infer_pytorch(torch_iekf, test_imu, pp)
 
     # ── HEF on-device inference ───────────────────────────────────────────────
     if not args.hef.exists():

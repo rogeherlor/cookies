@@ -41,7 +41,7 @@ FILE_DIR   = Path(__file__).resolve().parent
 ONNX_PATH  = FILE_DIR / "deep_kf.onnx"
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CHOSEN_HW_ARCH  = "hailo8"
+CHOSEN_HW_ARCH  = "hailo8l"
 ONNX_MODEL_NAME = "deep_kf"
 
 NAV_DIM    = 15

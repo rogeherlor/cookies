@@ -286,7 +286,8 @@ class _TartanIMUBackbone(nn.Module):
         full (B, T, 64) sequence when return_sequence=True (per-window training).
         """
         B, T, S, C = x.shape
-        feats = self.forward_cnn(x.reshape(B * T, C, S))  # (B*T, 1664)
+        x = x.permute(0, 1, 3, 2).reshape(B * T, C, S)     # (B*T, 6, step_samples)
+        feats = self.forward_cnn(x)                        # (B*T, 1664)
         feats = feats.reshape(B, T, -1)                    # (B, T, 1664)
         lstm_out, _ = self.lstm(feats)                     # (B, T, 64)
         trunk_out   = self.IMU_Trunk(lstm_out)             # (B, T, 64)

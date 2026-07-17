@@ -13,7 +13,7 @@ Usage
 
 Input interface (matches 0_onnx_converter.py)
 ---------------------------------------------
-    imu_window  [1, 6, 200]   gravity-aligned IMU window
+    imu_window  [1, 6, 1, 200] NCHW  gravity-aligned IMU window
 
 Output
 ------
@@ -42,9 +42,10 @@ import torch
 _HERE      = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent.parent.parent
 _MODEL_DIR = _REPO_ROOT / "scripts/positioning/python/dl_filters/tlio/network"
+_TLIO_DIR  = _REPO_ROOT / "scripts/positioning/python/dl_filters/tlio"
 _SCRIPTS   = _REPO_ROOT / "scripts/positioning/python"
 
-for _p in [str(_MODEL_DIR), str(_SCRIPTS)]:
+for _p in [str(_MODEL_DIR), str(_TLIO_DIR), str(_SCRIPTS)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -94,8 +95,26 @@ def infer_pytorch(model, windows_np):
     return np.concatenate(results, axis=0)
 
 
-def infer_hef(hef_path: Path, windows_np: np.ndarray) -> np.ndarray:
+def _apply_head(feat_nhwc: np.ndarray, hs: dict) -> np.ndarray:
+    """Host-side head (bn1 + flatten + fc1/2/3): (1, inter_dim, 128) NHWC -> (1, 3)."""
+    x = torch.from_numpy(feat_nhwc).float().unsqueeze(0).permute(0, 3, 1, 2)  # -> (1,128,1,inter_dim) NCHW
+    x = torch.nn.functional.batch_norm(
+        x, hs["bn1.running_mean"], hs["bn1.running_var"],
+        hs["bn1.weight"], hs["bn1.bias"], training=False, eps=hs["bn1.eps"],
+    )
+    x = torch.flatten(x, 1)
+    x = torch.relu(torch.nn.functional.linear(x, hs["fc1.weight"], hs["fc1.bias"]))
+    x = torch.relu(torch.nn.functional.linear(x, hs["fc2.weight"], hs["fc2.bias"]))
+    x = torch.nn.functional.linear(x, hs["fc3.weight"], hs["fc3.bias"])
+    return x.detach().numpy()
+
+
+def infer_hef(hef_path: Path, windows_np: np.ndarray, head1_state: dict, head2_state: dict) -> np.ndarray:
     """Run inference on a physical Hailo-8 device.
+
+    Hailo only runs the CNN backbone up to the prep1 1x1-convs (two outputs,
+    one per head); the bn1+flatten+fc1/2/3 head runs on the host from the
+    weights saved to tlio_postproc.pt (see 0_onnx_converter.py).
 
     Parameters
     ----------
@@ -121,21 +140,33 @@ def infer_hef(hef_path: Path, windows_np: np.ndarray) -> np.ndarray:
     with hp.VDevice(params) as vdevice:
         infer_model = vdevice.create_infer_model(str(hef_path))
         infer_model.set_batch_size(1)
+        input_name = infer_model.input_names[0]
+        out_name1, out_name2 = infer_model.output_names  # head1 (mean), head2 (logstd)
+        infer_model.input().set_format_type(hp.FormatType.FLOAT32)
+        infer_model.output(out_name1).set_format_type(hp.FormatType.FLOAT32)
+        infer_model.output(out_name2).set_format_type(hp.FormatType.FLOAT32)
+        out_shape = infer_model.output(out_name1).shape  # (inter_dim, 128)
 
         with infer_model.configure() as configured_model:
+            configured_model.activate()
             bindings = configured_model.create_bindings()
-            input_name  = infer_model.input().name
-            output_name = infer_model.output().name
 
             for i in range(n_samples):
-                sample = windows_np[i].astype(np.float32)  # [6, W]
+                sample_nchw = windows_np[i][:, np.newaxis, :].astype(np.float32)  # (6, 1, W)
+                sample = np.ascontiguousarray(sample_nchw.transpose(1, 2, 0))      # (1, W, 6) NHWC
                 bindings.input(input_name).set_buffer(sample)
 
-                out_buf = np.empty((1, OUT_COMBINED), dtype=np.float32)
-                bindings.output(output_name).set_buffer(out_buf)
+                out_buf1 = np.empty(out_shape, dtype=np.float32)
+                out_buf2 = np.empty(out_shape, dtype=np.float32)
+                bindings.output(out_name1).set_buffer(out_buf1)
+                bindings.output(out_name2).set_buffer(out_buf2)
 
-                configured_model.run([bindings], timeout_ms=1000)
-                results.append(out_buf.copy())
+                configured_model.run([bindings], 1000)
+
+                mean   = _apply_head(out_buf1, head1_state)
+                logstd = _apply_head(out_buf2, head2_state)
+                results.append(np.concatenate([mean, logstd], axis=-1))
+            configured_model.deactivate()
 
     return np.concatenate(results, axis=0)  # [N, 6]
 
@@ -172,6 +203,7 @@ def main():
                         default=_HERE / "tlio.hef")
     parser.add_argument("--n-samples", type=int, default=8)
     parser.add_argument("--window",    type=int, default=WINDOW_SIZE)
+    parser.add_argument("--postproc",  type=Path, default=_HERE / "tlio_postproc.pt")
     args = parser.parse_args()
 
     # ── Test data — real KITTI gravity-aligned windows ────────────────────────
@@ -223,8 +255,13 @@ def main():
         log.error("HEF not found: %s — run 3_compilation.py first.", args.hef)
         return
 
+    if not args.postproc.exists():
+        log.error("Postproc weights not found: %s — run 0_onnx_converter.py first.", args.postproc)
+        return
+    postproc = torch.load(args.postproc, map_location="cpu")
+
     log.info("HEF inference on Hailo-8: %s", args.hef)
-    hef_out = infer_hef(args.hef, test_windows)
+    hef_out = infer_hef(args.hef, test_windows, postproc["head1"], postproc["head2"])
 
     # ── Print comparison ──────────────────────────────────────────────────────
     print_comparison(pt_out, hef_out)

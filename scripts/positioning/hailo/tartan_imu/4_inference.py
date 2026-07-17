@@ -9,9 +9,15 @@ Usage
     python 4_inference.py [--hef scripts/positioning/hailo/tartan_imu/tartan_imu.hef]
                           [--n-samples 4]
 
+Architecture split
+------------------
+Hailo only runs the CNN backbone, one LSTM step at a time; the LSTM +
+IMU_Trunk (transformer) + robot head run on the host from the weights saved
+to tartan_imu_postproc.pt (see 0_onnx_converter.py / 2_optimisation.py).
+
 Input interface (matches 0_onnx_converter.py)
 ---------------------------------------------
-    imu_lstm   [1, 10, 200, 6]   10 LSTM steps × 200 samples × [accel_gf|gyro]
+    imu_step   [1, 6, 1, 200]   one LSTM step (10 calls per window)
 
 Output
 ------
@@ -50,7 +56,12 @@ for _p in [str(_TARTAN_DIR), str(_SCRIPTS)]:
 LSTM_STEPS   = 10
 STEP_SAMPLES = 200
 IMU_CHANNELS = 6
+CNN_OUT_CH   = 128
+CNN_OUT_T    = 13
+CNN_FEAT_DIM = CNN_OUT_CH * CNN_OUT_T  # 1664
 OUT_DIM      = 6   # vel(3) + log_std(3)
+POSTPROC_PATH = _HERE / "tartan_imu_postproc.pt"
+ROBOT_TYPE   = "car"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -78,6 +89,33 @@ class TartanWrapperHailo(torch.nn.Module):
         return torch.cat([v, log_std], dim=-1)
 
 
+# ── Host-side postproc: LSTM + IMU_Trunk + robot head ─────────────────────────
+
+class TartanPostproc(torch.nn.Module):
+    """Runs after Hailo's per-step CNN backbone: LSTM -> IMU_Trunk -> robot head."""
+
+    def __init__(self, postproc_path: Path, robot_type: str = ROBOT_TYPE):
+        super().__init__()
+        from tartan_runner import _IMUTrunk, _RobotHead
+
+        pp = torch.load(postproc_path, map_location="cpu")
+        self.lstm = torch.nn.LSTM(input_size=CNN_FEAT_DIM, hidden_size=64, batch_first=True)
+        self.lstm.load_state_dict(pp["lstm_state"])
+        self.trunk = _IMUTrunk()
+        self.trunk.load_state_dict(pp["trunk_state"])
+        heads = torch.nn.ModuleDict({r: _RobotHead() for r in ("car", "dog", "human", "drone")})
+        heads.load_state_dict(pp["heads_state"])
+        self.head = heads[robot_type]
+        self.eval()
+
+    def forward(self, feats_seq: torch.Tensor):
+        """feats_seq: (B, T, 1664) per-step CNN features -> (v_body(B,3), log_std(B,3))."""
+        lstm_out, _ = self.lstm(feats_seq)
+        trunk_out   = self.trunk(lstm_out)
+        feat        = trunk_out[:, -1, :]
+        return self.head(feat)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def infer_pytorch(model, windows_np):
@@ -90,8 +128,17 @@ def infer_pytorch(model, windows_np):
     return np.concatenate(results, axis=0)
 
 
-def infer_hef(hef_path: Path, windows_np: np.ndarray) -> np.ndarray:
+def _step_to_nhwc(step_np):
+    """(T, 200, 6) -> (T, 1, 200, 6) NHWC, one Hailo input per LSTM step."""
+    step_nchw = step_np.transpose(0, 2, 1)[:, :, np.newaxis, :]  # (T, 6, 1, 200)
+    return np.ascontiguousarray(step_nchw.transpose(0, 2, 3, 1))  # (T, 1, 200, 6)
+
+
+def infer_hef(hef_path: Path, windows_np: np.ndarray, postproc: TartanPostproc) -> np.ndarray:
     """Run inference on a physical Hailo-8 device.
+
+    Hailo only runs the CNN backbone, one LSTM step at a time; the
+    LSTM + IMU_Trunk + robot head run on the host (see TartanPostproc).
 
     Parameters
     ----------
@@ -117,21 +164,35 @@ def infer_hef(hef_path: Path, windows_np: np.ndarray) -> np.ndarray:
     with hp.VDevice(params) as vdevice:
         infer_model = vdevice.create_infer_model(str(hef_path))
         infer_model.set_batch_size(1)
+        infer_model.input().set_format_type(hp.FormatType.FLOAT32)
+        infer_model.output().set_format_type(hp.FormatType.FLOAT32)
 
         with infer_model.configure() as configured_model:
-            bindings = configured_model.create_bindings()
+            configured_model.activate()
             input_name  = infer_model.input().name
             output_name = infer_model.output().name
+            out_shape   = infer_model.output().shape  # (1, 13, 128) per step
 
             for i in range(n_samples):
-                sample = windows_np[i].astype(np.float32)  # [10, 200, 6]
-                bindings.input(input_name).set_buffer(sample)
+                step_nhwc = _step_to_nhwc(windows_np[i])  # (10, 1, 200, 6)
 
-                out_buf = np.empty((1, OUT_DIM), dtype=np.float32)
-                bindings.output(output_name).set_buffer(out_buf)
+                feats = []
+                for t in range(LSTM_STEPS):
+                    bindings = configured_model.create_bindings()
+                    bindings.input(input_name).set_buffer(step_nhwc[t])
 
-                configured_model.run([bindings], timeout_ms=1000)
-                results.append(out_buf.copy())
+                    out_buf = np.empty(out_shape, dtype=np.float32)
+                    bindings.output(output_name).set_buffer(out_buf)
+
+                    configured_model.run([bindings], 1000)
+                    # NHWC (1,13,128) -> (128,13) to match forward_cnn's channel-then-width flatten
+                    feats.append(out_buf.squeeze(0).T.reshape(1, -1))
+
+                feats_seq = np.concatenate(feats, axis=0)[np.newaxis]  # (1, 10, 1664)
+                with torch.no_grad():
+                    v, log_std = postproc(torch.from_numpy(feats_seq.astype(np.float32)))
+                results.append(torch.cat([v, log_std], dim=-1).numpy())
+            configured_model.deactivate()
 
     return np.concatenate(results, axis=0)  # [N, 6]
 
@@ -221,8 +282,13 @@ def main():
         log.error("HEF not found: %s — run 3_compilation.py first.", args.hef)
         return
 
+    if not POSTPROC_PATH.exists():
+        log.error("Postproc weights not found: %s — run 0_onnx_converter.py first.", POSTPROC_PATH)
+        return
+    postproc = TartanPostproc(POSTPROC_PATH, robot_type=ROBOT_TYPE)
+
     log.info("HEF inference on Hailo-8: %s", args.hef)
-    hef_out = infer_hef(args.hef, test_np)
+    hef_out = infer_hef(args.hef, test_np, postproc)
 
     # ── Print comparison ──────────────────────────────────────────────────────
     print_comparison(pt_out, hef_out)

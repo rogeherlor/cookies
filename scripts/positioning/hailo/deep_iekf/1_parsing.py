@@ -45,7 +45,7 @@ FILE_DIR  = Path(__file__).resolve().parent
 ONNX_PATH = FILE_DIR / "deep_iekf.onnx"
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CHOSEN_HW_ARCH  = "hailo8"
+CHOSEN_HW_ARCH  = "hailo8l"
 ONNX_MODEL_NAME = "deep_iekf"
 
 SEQ_LEN          = 4544   # fixed — must match 0_onnx_converter.py

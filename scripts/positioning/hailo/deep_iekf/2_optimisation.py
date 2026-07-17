@@ -112,12 +112,20 @@ def postprocess(covs_dev: np.ndarray, pp: dict) -> np.ndarray:
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
 
-def infer_pytorch(torch_iekf, imu_np):
+def infer_pytorch(torch_iekf, imu_np, pp):
     """Run float64 MesNet on (N, 6), return (N, 2) covs.
 
-    MesNet.cov_net is Conv1d and expects (1, 6, N) NCL format.
+    MesNet.cov_net is Conv1d and expects (1, 6, N) NCL format. mes_net has no
+    internal normalisation — production code normalises before calling it
+    (TORCHIEKF.forward_nets() in utils_torch_filter.py: u_n = (u-u_loc)/u_std).
+    Must apply the same normalisation here, using the identical u_loc/u_std
+    saved to deep_iekf_postproc.npz, or this "ground truth" silently diverges
+    from what the model was actually trained/run on.
     """
-    u = torch.from_numpy(imu_np.astype(np.float64)).T.unsqueeze(0)  # (1, 6, N)
+    u_loc = pp["u_loc"].astype(np.float64)
+    u_std = pp["u_std"].astype(np.float64)
+    u_norm = (imu_np.astype(np.float64) - u_loc) / u_std
+    u = torch.from_numpy(u_norm).T.unsqueeze(0)  # (1, 6, N)
     with torch.no_grad():
         covs = torch_iekf.mes_net(u, torch_iekf)
     return covs.numpy()  # (N, 2)
@@ -156,22 +164,37 @@ def _fmt(arr):
     return np.array2string(arr, precision=6, suppress_small=True, separator=", ")
 
 
+EDGE_SAMPLES = 20  # ReplicationPad->ZeroPad causal-padding approximation only
+                    # affects the first ~16 samples (see 0_onnx_converter.py) —
+                    # comparing there mixes in a known, unavoidable transient
+                    # instead of measuring steady-state accuracy.
+
+
 def print_comparison(backends: dict, reference: str = "PyTorch"):
     ref = backends[reference]
     print("\n" + "=" * 72)
     print("MEASUREMENT COVARIANCES  [cov_lat, cov_up]")
     print("=" * 72)
-    for i in range(N_INFER):
+    print(f"(first {EDGE_SAMPLES} samples affected by the ReplicationPad->ZeroPad "
+          "causal-padding approximation — shown separately below)")
+    for i in range(EDGE_SAMPLES, EDGE_SAMPLES + N_INFER):
         print(f"\nTimestep {i}:")
         for name, arr in backends.items():
             print(f"  {name:<14} {_fmt(arr[i])}")
 
     print("\n" + "-" * 72)
-    print(f"MAE vs {reference}:")
+    print(f"MAE vs {reference}, first {EDGE_SAMPLES} samples (padding transient):")
     for name, arr in backends.items():
         if name == reference:
             continue
-        mae = float(np.mean(np.abs(arr[:N_INFER] - ref[:N_INFER])))
+        mae = float(np.mean(np.abs(arr[:EDGE_SAMPLES] - ref[:EDGE_SAMPLES])))
+        print(f"  {name:<14} {mae:.6e}")
+    print("\n" + "-" * 72)
+    print(f"MAE vs {reference}, steady-state (excl. first {EDGE_SAMPLES} samples):")
+    for name, arr in backends.items():
+        if name == reference:
+            continue
+        mae = float(np.mean(np.abs(arr[EDGE_SAMPLES:] - ref[EDGE_SAMPLES:])))
         print(f"  {name:<14} {mae:.6e}")
     print("=" * 72 + "\n")
 
@@ -255,7 +278,7 @@ def main():
     # at once; ONNX has a static input shape of SEQ_LEN samples.
     # print_comparison displays only the first N_INFER timesteps.
     log.info("PyTorch inference ...")
-    backends["PyTorch"] = infer_pytorch(torch_iekf, calib_imu.astype(np.float64))
+    backends["PyTorch"] = infer_pytorch(torch_iekf, calib_imu.astype(np.float64), pp)
 
     # ── 2. ONNX ───────────────────────────────────────────────────────────────
     if ONNX_PATH.exists():

@@ -39,17 +39,21 @@ FILE_DIR  = Path(__file__).resolve().parent
 ONNX_PATH = FILE_DIR / "tlio.onnx"
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CHOSEN_HW_ARCH  = "hailo8"
+CHOSEN_HW_ARCH  = "hailo8l"
 ONNX_MODEL_NAME = "tlio"
 
 WINDOW_SIZE  = 200
 IMU_CHANNELS = 6
 
 START_NODES = ["imu_window"]
-END_NODES   = ["disp_logstd"]
+# Hailo can't run the Flatten->FC head (UnsupportedShuffleLayerError); the DFC
+# itself recommends ending the graph at the two prep1 1x1-convs. The
+# BN+Flatten+FC head that follows runs on the host (see 2_optimisation.py /
+# 4_inference.py), same split pattern as tartan_imu's CNN/LSTM split.
+END_NODES   = ["/net/output_block1/prep1/Conv", "/net/output_block2/prep1/Conv"]
 
 NET_INPUT_SHAPES = {
-    "imu_window": [1, IMU_CHANNELS, WINDOW_SIZE],  # [1, 6, 200]
+    "imu_window": [1, IMU_CHANNELS, 1, WINDOW_SIZE],  # [1, 6, 1, 200]
 }
 
 # ── Parse ─────────────────────────────────────────────────────────────────────

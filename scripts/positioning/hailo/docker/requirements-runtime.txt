@@ -1,0 +1,7 @@
+# Runtime-only deps for deployed inference scripts (not the DFC/training stack).
+# torch is needed for the host-side post-processing steps that run alongside
+# Hailo (tlio's bn1+FC head, tartan_imu's LSTM/IMU_Trunk/robot-head) — both
+# have official CPU wheels for linux/amd64 and linux/arm64 on PyPI.
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy
+torch

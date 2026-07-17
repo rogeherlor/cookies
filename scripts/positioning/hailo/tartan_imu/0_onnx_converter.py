@@ -243,11 +243,17 @@ def main():
             input_names=["imu_step"],
             output_names=["cnn_feat"],
             opset_version=args.opset,
-            do_constant_folding=True,
+            # See tlio/0_onnx_converter.py: constant folding can fuse Conv+BN
+            # pairs into a single node in a way that diverges from Hailo's own
+            # execution of the unfused graph. Keep it off for safety.
+            do_constant_folding=False,
             dynamo=False,
         )
 
-    _simplify_onnx(out_path)
+    # NOTE: onnxsim is intentionally NOT run here (see tlio/0_onnx_converter.py
+    # for the same decision). With do_constant_folding=False, onnxsim's own
+    # optimizer crashes on this graph (unrelated ONNX-optimizer assertion);
+    # the raw, unsimplified export parses correctly on Hailo regardless.
 
     print("Done.")
     print()
