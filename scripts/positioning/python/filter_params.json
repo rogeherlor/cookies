@@ -770,7 +770,11 @@
           "P_vel_std": 2.89328048961058,
           "P_orient_std": 0.013743091520073197,
           "P_acc_std": 0.04844908126326846,
-          "P_gyr_std": 0.001149942466314506
+          "P_gyr_std": 0.001149942466314506,
+          "Rnhc": 3.3661402941747163,
+          "Rzupt": 0.00013202731354301932,
+          "zupt_accel_threshold": 4.188817507462275,
+          "zupt_gyro_threshold": 0.014404645796793408
         },
         "cost": 435.9627644827874,
         "metadata": {
@@ -859,6 +863,21 @@
               ]
             ]
           ]
+        },
+        "nhc_zupt_tuning": {
+          "method": "nested_loo_pooled",
+          "pool_seqs": [
+            "06",
+            "07",
+            "08",
+            "09",
+            "10"
+          ],
+          "baseline_cost": 200480.42010002353,
+          "tuned_cost": 339.6073767488103,
+          "maxiter": 10,
+          "popsize": 10,
+          "seed": 42
         }
       },
       "__loo_held_2011_09_30_drive_0016_extract__": {
@@ -984,7 +1003,11 @@
           "P_vel_std": 0.2081090496238077,
           "P_orient_std": 0.07457692702616252,
           "P_acc_std": 0.015037547838046238,
-          "P_gyr_std": 0.002874045711120353
+          "P_gyr_std": 0.002874045711120353,
+          "Rnhc": 7.3230698575903,
+          "Rzupt": 0.0969943651633015,
+          "zupt_accel_threshold": 0.026163499646738447,
+          "zupt_gyro_threshold": 0.013036046204118298
         },
         "cost": 308.07806881153465,
         "metadata": {
@@ -1073,6 +1096,21 @@
               ]
             ]
           ]
+        },
+        "nhc_zupt_tuning": {
+          "method": "nested_loo_pooled",
+          "pool_seqs": [
+            "01",
+            "07",
+            "08",
+            "09",
+            "10"
+          ],
+          "baseline_cost": 200480.42010002353,
+          "tuned_cost": 200268.10234216365,
+          "maxiter": 10,
+          "popsize": 10,
+          "seed": 42
         }
       },
       "__loo_held_2011_09_30_drive_0027_extract__": {
@@ -1091,7 +1129,11 @@
           "P_vel_std": 2.0174277946322814,
           "P_orient_std": 0.025615661518986334,
           "P_acc_std": 0.0013885047764525642,
-          "P_gyr_std": 0.0008011918874738966
+          "P_gyr_std": 0.0008011918874738966,
+          "Rnhc": 0.055295305838656675,
+          "Rzupt": 0.037836614123206457,
+          "zupt_accel_threshold": 0.02439262759587025,
+          "zupt_gyro_threshold": 0.009081026891596731
         },
         "cost": 532.0966652191134,
         "metadata": {
@@ -1180,6 +1222,21 @@
               ]
             ]
           ]
+        },
+        "nhc_zupt_tuning": {
+          "method": "nested_loo_pooled",
+          "pool_seqs": [
+            "01",
+            "06",
+            "08",
+            "09",
+            "10"
+          ],
+          "baseline_cost": 400361.8938519491,
+          "tuned_cost": 586.6003257146713,
+          "maxiter": 10,
+          "popsize": 10,
+          "seed": 42
         }
       },
       "__loo_held_2011_09_30_drive_0028_extract__": {
@@ -1198,7 +1255,11 @@
           "P_vel_std": 0.16391001397419025,
           "P_orient_std": 0.011481219114142906,
           "P_acc_std": 0.0018990307659187138,
-          "P_gyr_std": 0.00124772914486868
+          "P_gyr_std": 0.00124772914486868,
+          "Rnhc": 0.04076877236466863,
+          "Rzupt": 0.06613474890762103,
+          "zupt_accel_threshold": 8.775598322754226,
+          "zupt_gyro_threshold": 0.0027462804285829697
         },
         "cost": 492.27119217407983,
         "metadata": {
@@ -1287,6 +1348,21 @@
               ]
             ]
           ]
+        },
+        "nhc_zupt_tuning": {
+          "method": "nested_loo_pooled",
+          "pool_seqs": [
+            "01",
+            "06",
+            "07",
+            "09",
+            "10"
+          ],
+          "baseline_cost": 400408.5644724146,
+          "tuned_cost": 721.9689839088744,
+          "maxiter": 10,
+          "popsize": 10,
+          "seed": 42
         }
       },
       "__loo_held_2011_09_30_drive_0033_extract__": {
@@ -1305,7 +1381,11 @@
           "P_vel_std": 0.7234050675138654,
           "P_orient_std": 0.01071811544800246,
           "P_acc_std": 0.010557082802434479,
-          "P_gyr_std": 0.0010465200593147946
+          "P_gyr_std": 0.0010465200593147946,
+          "Rnhc": 3.3941862999952495,
+          "Rzupt": 0.5588155361475855,
+          "zupt_accel_threshold": 5.000512694145639,
+          "zupt_gyro_threshold": 0.009548726212484529
         },
         "cost": 200413.0269029506,
         "metadata": {
@@ -1394,6 +1474,21 @@
               ]
             ]
           ]
+        },
+        "nhc_zupt_tuning": {
+          "method": "nested_loo_pooled",
+          "pool_seqs": [
+            "01",
+            "06",
+            "07",
+            "08",
+            "10"
+          ],
+          "baseline_cost": 400369.6679634935,
+          "tuned_cost": 200220.9502571709,
+          "maxiter": 10,
+          "popsize": 10,
+          "seed": 42
         }
       },
       "__loo_held_2011_09_30_drive_0034_extract__": {
@@ -1412,7 +1507,11 @@
           "P_vel_std": 0.2483739578810735,
           "P_orient_std": 0.034510900276954797,
           "P_acc_std": 0.0688316342757653,
-          "P_gyr_std": 0.0031031157569097103
+          "P_gyr_std": 0.0031031157569097103,
+          "Rnhc": 7.29594393565908,
+          "Rzupt": 0.001825005074146437,
+          "zupt_accel_threshold": 0.9407227073958769,
+          "zupt_gyro_threshold": 0.04005541445825867
         },
         "cost": 200326.77680868882,
         "metadata": {
@@ -1501,6 +1600,21 @@
               ]
             ]
           ]
+        },
+        "nhc_zupt_tuning": {
+          "method": "nested_loo_pooled",
+          "pool_seqs": [
+            "01",
+            "06",
+            "07",
+            "08",
+            "09"
+          ],
+          "baseline_cost": 400301.13401221344,
+          "tuned_cost": 200263.58733090168,
+          "maxiter": 10,
+          "popsize": 10,
+          "seed": 42
         }
       }
     }

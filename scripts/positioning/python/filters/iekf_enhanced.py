@@ -112,6 +112,10 @@ DEFAULT_PARAMS = {
     # NHC — Non-Holonomic Constraints (Dissanayake 2001)
     'Rnhc': 0.1,
     # ZUPT — Zero-Velocity Update (Groves §15.4.1)
+    # These four are textbook defaults, used only as a fallback when no
+    # per-fold tuned override exists in filter_params.json (see
+    # tune_nhc_zupt_loo.py — proper nested-LOO tuning writes fold-specific
+    # values directly into filter_params.json, not here).
     'Rzupt':                0.01,
     'zupt_accel_threshold': 0.3,
     'zupt_gyro_threshold':  0.05,

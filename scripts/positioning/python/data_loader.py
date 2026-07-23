@@ -71,6 +71,23 @@ class NavigationData:
         return True
 
 
+# Real first-GPS-fix [lat, lon, alt] per KITTI drive, read directly from each
+# drive's own oxts/data/0000000000.txt (fetched via a ranged HTTP read of the
+# official raw-data zip at s3://avg-kitti/raw_data/<drive>/<drive>_extract.zip
+# — no need to download the full ~GB archive, just the first oxts record).
+# Falls back to a generic Karlsruhe city-center guess for any drive not listed
+# here (e.g. non-KITTI datasets, or a KITTI drive added later).
+KITTI_REAL_ORIGINS = {
+    '2011_10_03_drive_0042_extract': np.array([49.006763070319, 8.4893497989892, 122.62101745605]),
+    '2011_09_30_drive_0016_extract': np.array([49.033553228861, 8.3950119439646, 112.42118835449]),
+    '2011_09_30_drive_0020_extract': np.array([49.053498758668, 8.3973145055449, 113.0516204834]),
+    '2011_09_30_drive_0027_extract': np.array([48.985238952087, 8.3936370760087, 116.37191009521]),
+    '2011_09_30_drive_0028_extract': np.array([48.985122186805, 8.3939808937919, 116.35473632812]),
+    '2011_09_30_drive_0033_extract': np.array([48.972109387979, 8.4761310645018, 201.80104064941]),
+    '2011_09_30_drive_0034_extract': np.array([48.972534837934, 8.4785928180311, 220.36427307129]),
+}
+
+
 def load_kitti_pickle(filepath: str, sample_rate: float = 100.0,
                       gps_rate: float = 1.0) -> NavigationData:
     """
@@ -112,11 +129,17 @@ def load_kitti_pickle(filepath: str, sample_rate: float = 100.0,
     vel_enu   = v_gt        # [East, North, Up]
     orient    = ang_gt      # [roll, pitch, yaw]
 
-    # Back-convert relative ENU positions to approximate geodetic coordinates.
-    # Using Karlsruhe, Germany as reference (KITTI recording area).
-    # The round-trip enu2geodetic → geodetic2enu is exact for the same lla0,
-    # so all filters receive consistent relative positions.
-    lla0 = np.array([49.0, 8.4, 110.0])
+    # Back-convert relative ENU positions to geodetic coordinates, anchored at
+    # this drive's own true first-GPS-fix lat/lon/alt (from the official KITTI
+    # raw OXTS data, oxts/data/0000000000.txt) rather than a generic Karlsruhe
+    # city-center guess — needed so lat/lon overlaid on a real map (see
+    # gt_comparison_satellite.py) actually lines up with the street the
+    # vehicle drove on. This has NO effect on any filter/benchmark metric:
+    # every consumer (ins_runner.py, ins_compare.py) round-trips lla back to
+    # ENU via geodetic2enu using this same lla0, which is mathematically
+    # exact regardless of which origin is chosen.
+    dataset_name_ = Path(filepath).stem
+    lla0 = KITTI_REAL_ORIGINS.get(dataset_name_, np.array([49.0, 8.4, 110.0]))
     lat, lon, alt = pm.enu2geodetic(p_gt[:, 0], p_gt[:, 1], p_gt[:, 2],
                                     lla0[0], lla0[1], lla0[2])
     lla = np.column_stack([lat, lon, alt])
