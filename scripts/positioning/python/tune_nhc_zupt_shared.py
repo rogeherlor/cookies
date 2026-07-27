@@ -110,8 +110,10 @@ class _PooledCost:
             if (OUTAGE_START + OUTAGE_DURATION) * nav.sample_rate >= len(nav.lla):
                 continue
             merged = {**base, **cand}
+            gt = ins_cost.get_fgo_batch_gt(nav)
             costs.append(ins_cost.single_window_cost(
-                module, nav, merged, t1=OUTAGE_START, d=OUTAGE_DURATION, use_3d=True))
+                module, nav, merged, t1=OUTAGE_START, d=OUTAGE_DURATION, use_3d=True,
+                gt=gt))
         return float(np.mean(costs)) if costs else ins_cost.COST_REJECT
 
 

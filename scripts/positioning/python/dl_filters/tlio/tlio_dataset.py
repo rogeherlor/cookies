@@ -25,8 +25,16 @@ set to 200.0, IMU is linearly upsampled before windowing so that W=200 covers
 exactly 1 s — matching the original paper's architecture and time scale.
 """
 
+import sys
+from pathlib import Path
+
 import numpy as np
 from scipy.interpolate import interp1d as _interp1d
+
+# Make ins_cost importable (scripts/positioning/python/) regardless of caller.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 
 TARGET_HZ = 200.0   # original TLIO paper frequency
@@ -114,20 +122,28 @@ def build_windows(nav_data, window_size: int, stride: int,
     window_starts : np.ndarray (M,) int
         Index into the (possibly upsampled) arrays at which each window begins.
     """
+    import ins_cost
+
     src_rate = nav_data.sample_rate
 
+    # Ground truth — FGO-Batch (matches the final benchmark's GT_SOURCE), not
+    # raw KITTI OXTS. Cached per-sequence by ins_cost.get_fgo_batch_gt.
+    gt = ins_cost.get_fgo_batch_gt(nav_data)
+
     if target_rate is not None and abs(target_rate - src_rate) > 0.5:
-        accel_flu, gyro_flu, orient, vel_enu, _ = upsample_imu(
-            nav_data.accel_flu, nav_data.gyro_flu, nav_data.orient,
-            nav_data.vel_enu, src_rate, target_rate,
+        accel_flu, gyro_flu, orient, vel_enu, t_up = upsample_imu(
+            nav_data.accel_flu, nav_data.gyro_flu, gt['r'],
+            gt['v'], src_rate, target_rate,
         )
-        dt = 1.0 / target_rate
+        t_src = np.arange(len(gt['p'])) / src_rate
+        p_gt_native = _interp1d(t_src, gt['p'], axis=0, kind='linear',
+                                bounds_error=False, fill_value='extrapolate')(t_up)
     else:
         accel_flu = nav_data.accel_flu
         gyro_flu  = nav_data.gyro_flu
-        orient    = nav_data.orient
-        vel_enu   = nav_data.vel_enu
-        dt        = 1.0 / src_rate
+        orient    = gt['r']
+        vel_enu   = gt['v']
+        p_gt_native = gt['p']
 
     N = accel_flu.shape[0]
 
@@ -139,8 +155,11 @@ def build_windows(nav_data, window_size: int, stride: int,
     Rz_list      = []
     window_starts = starts.copy()
 
-    # Ground-truth position in ENU from velocity integration
-    p_gt = _integrate_velocity(vel_enu, dt)   # (N, 3)
+    # Ground-truth position in ENU — FGO-Batch's own position output,
+    # resampled onto the same time base as the IMU windows (rather than
+    # re-deriving it from vel_enu integration, which is a separate numerical
+    # procedure and would drift from FGO-Batch's own reported position).
+    p_gt = p_gt_native   # (N, 3)
 
     for k, i in enumerate(starts):
         roll_i  = orient[i, 0]
@@ -173,18 +192,6 @@ def build_windows(nav_data, window_size: int, stride: int,
         Rz_list.append(_Rz(yaw_i))
 
     return imu_windows, dp_gt, Rz_list, window_starts
-
-
-def _integrate_velocity(vel_enu: np.ndarray, dt: float) -> np.ndarray:
-    """
-    Integrate ENU velocity to produce ENU position (relative to first sample).
-    Uses trapezoidal rule for consistency with strapdown propagation.
-    """
-    N = vel_enu.shape[0]
-    p = np.zeros((N, 3), dtype=np.float64)
-    for i in range(1, N):
-        p[i] = p[i - 1] + 0.5 * dt * (vel_enu[i - 1] + vel_enu[i])
-    return p
 
 
 def ga_to_enu(dp_ga: np.ndarray, Rz: np.ndarray) -> np.ndarray:

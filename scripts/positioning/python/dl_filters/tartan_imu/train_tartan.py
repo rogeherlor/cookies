@@ -89,12 +89,18 @@ def build_tartan_dataset(nav, target_hz=TARGET_HZ,
                    velocity v_{j→j+1} = Δp/dt rotated into the body frame, one
                    target per 1-second window rather than a single last-window one.
     """
+    import ins_cost
+
     accel_flu = nav.accel_flu
     gyro_flu  = nav.gyro_flu
-    orient    = nav.orient
-    vel_enu   = nav.vel_enu
     N         = accel_flu.shape[0]
     src_rate  = nav.sample_rate
+
+    # Ground truth — FGO-Batch (matches the final benchmark's GT_SOURCE), not
+    # raw KITTI OXTS. Cached per-sequence by ins_cost.get_fgo_batch_gt.
+    gt        = ins_cost.get_fgo_batch_gt(nav)
+    orient    = gt['r']
+    vel_enu   = gt['v']
 
     t_src = np.arange(N) / src_rate
     t_up  = np.arange(0., t_src[-1], 1.0 / target_hz)

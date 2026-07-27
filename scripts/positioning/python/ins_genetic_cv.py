@@ -289,7 +289,7 @@ def generate_outage_configs(nav_data: NavigationData, n_outages: int,
 
 def _single_cost(filter_name: str, nd: NavigationData, params: dict,
                  t1: float, d: float, use_3d: bool,
-                 gate_anees: bool = True) -> float:
+                 gate_anees: bool = True, gt: dict = None) -> float:
     """
     Run one filter on one (dataset, outage) pair and return the cost.
 
@@ -314,8 +314,10 @@ def _single_cost(filter_name: str, nd: NavigationData, params: dict,
     module = _FILTER_MODULES[filter_name]
     if filter_name in SMOOTHER_FILTERS:
         gate_anees = False
+    if gt is None:
+        gt = ins_cost.get_fgo_batch_gt(nd)
     return ins_cost.single_window_cost(module, nd, params, t1, d, use_3d,
-                                       gate_anees=gate_anees)
+                                       gate_anees=gate_anees, gt=gt)
 
 
 # ── Picklable CV fitness class (required for workers > 1) ────────────────────
@@ -338,6 +340,15 @@ class CVFitness:
         # Per-filter decoder (smoother vs classical); default keeps back-compat.
         self.decode_fn     = decode_fn if decode_fn is not None else decode_params
 
+        # Precompute FGO-Batch ground truth ONCE per sequence, here in the
+        # parent process before scipy pickles this instance to worker
+        # processes — each worker then reuses these already-computed arrays
+        # instead of independently re-running the (expensive, GTSAM-based)
+        # batch solve for every evaluation.
+        self._gt_by_name = {
+            nd.dataset_name: ins_cost.get_fgo_batch_gt(nd) for nd in train_data
+        }
+
         # Build flat list of (NavigationData, t1, d) pairs for fast iteration
         self._pairs = []
         for nd, outages in zip(train_data, train_outages):
@@ -347,7 +358,8 @@ class CVFitness:
     def __call__(self, x: np.ndarray) -> float:
         params = self.decode_fn(x)
         costs  = [
-            _single_cost(self.filter_name, nd, params, t1, d, self.use_3d)
+            _single_cost(self.filter_name, nd, params, t1, d, self.use_3d,
+                        gt=self._gt_by_name[nd.dataset_name])
             for (nd, t1, d) in self._pairs
         ]
         if not costs:

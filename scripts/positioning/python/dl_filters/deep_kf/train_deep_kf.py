@@ -81,7 +81,7 @@ def generate_error_targets(nav):
     err : (N, 15) float32 — [δp(3), δv(3), δθ(3), b_acc(3), b_gyr(3)]
     """
     import esekfs_enhanced
-    import pymap3d as pm
+    import ins_cost
     from deep_kf_runner import _free_dead_reckoning, _qfrom_euler, _wrap
 
     result = esekfs_enhanced.run(nav)
@@ -90,13 +90,16 @@ def generate_error_targets(nav):
 
     N  = p_a.shape[0]
     Ts = 1.0 / nav.sample_rate
-    e_enu, n_enu, u_enu = pm.geodetic2enu(
-        nav.lla[:, 0], nav.lla[:, 1], nav.lla[:, 2],
-        nav.lla0[0], nav.lla0[1], nav.lla0[2])
-    p_gps0 = np.array([e_enu[0], n_enu[0], u_enu[0]])
-    q0 = _qfrom_euler(nav.orient[0, 0], nav.orient[0, 1], nav.orient[0, 2])
+    # Dead-reckoning init state — FGO-Batch ground truth (matches the final
+    # benchmark's GT_SOURCE), not raw KITTI OXTS. Only the initial sample is
+    # used (single-sample seed for the free-running integrator below); the
+    # loss target itself is esekfs_enhanced's posterior minus this dead
+    # reckoning, neither of which is raw ground truth directly.
+    gt = ins_cost.get_fgo_batch_gt(nav)
+    p_gps0 = gt['p'][0]
+    q0 = _qfrom_euler(gt['r'][0, 0], gt['r'][0, 1], gt['r'][0, 2])
     p_dr, v_dr, th_dr = _free_dead_reckoning(
-        nav.accel_flu, nav.gyro_flu, p_gps0, nav.vel_enu[0], q0, Ts, N)
+        nav.accel_flu, nav.gyro_flu, p_gps0, gt['v'][0], q0, Ts, N)
 
     err = np.concatenate([
         p_a  - p_dr,

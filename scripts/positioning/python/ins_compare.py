@@ -332,6 +332,8 @@ def main():
     if dr_mode:
         p_rts_vis = None
         p_gt      = p_kitti
+        v_gt      = nav_data.vel_enu
+        r_gt      = nav_data.orient
         gt_label  = 'KITTI GPS GT'
         logger.info("DR_MODE: ground truth = KITTI GPS")
     elif gt_source == 'batch':
@@ -341,6 +343,8 @@ def main():
             params=TUNED_PARAMS.get('isam2', None),
         )
         p_gt      = batch_result['p']
+        v_gt      = batch_result['v']
+        r_gt      = batch_result['r']
         p_rts_vis = None
         gt_label  = 'Ground Truth (FGO-Batch)'
         logger.info("  FGO-Batch done.")
@@ -356,11 +360,15 @@ def main():
         logger.info("  RTS smoother done.")
         if gt_source == 'rts':
             p_gt      = p_rts
+            v_gt      = rts_result['v']
+            r_gt      = rts_result['r']
             p_rts_vis = None
             gt_label  = 'Ground Truth (RTS)'
             logger.info("Ground truth: RTS smoother")
         else:   # 'kitti'
             p_gt      = p_kitti
+            v_gt      = nav_data.vel_enu
+            r_gt      = nav_data.orient
             p_rts_vis = p_rts
             gt_label  = 'KITTI GPS GT'
             logger.info("Ground truth: KITTI GPS")
@@ -415,7 +423,7 @@ def main():
         try:
             mets = metrics.evaluate_navigation_performance(
                 p_est=p, v_est=v, r_est=r,
-                p_gt=p_gt, v_gt=nav_data.vel_enu, r_gt=nav_data.orient,
+                p_gt=p_gt, v_gt=v_gt, r_gt=r_gt,
                 dataset_name=nav_data.dataset_name,
                 gnss_outage_info=gnss_outage_info,
                 sample_rate=frecIMU,
@@ -428,10 +436,11 @@ def main():
         pos_rmse_2d = mets.get('position_rmse', {}).get('2D', float('nan'))
         logger.info(f"  ATE 2D = {ate_2d:.2f} m  |  pos RMSE 2D = {pos_rmse_2d:.2f} m")
 
-        # KITTI t_rel / r_rel — always vs raw KITTI GPS, full sequence (no outage)
+        # KITTI t_rel / r_rel — full sequence (no outage), vs the same ground
+        # truth as the rest of this run's metrics (GT_SOURCE, default 'batch').
         kitti_mets = metrics.compute_kitti_metrics(
             p_est=p, r_est=r,
-            p_gt=p_kitti, r_gt=nav_data.orient,
+            p_gt=p_gt, r_gt=r_gt,
         )
         logger.info(f"  t_rel = {kitti_mets['t_rel']:.2f} %  |  r_rel = {kitti_mets['r_rel']:.2f} deg/km"
                     f"  (n_seg={kitti_mets['n_segments']}, dist={kitti_mets['total_dist_m']:.0f} m,"
@@ -459,7 +468,7 @@ def main():
         np.savez(
             ind_dir / f'{run_id}_trajectories.npz',
             p_est=p, v_est=v, r_est=r,
-            p_gt=p_gt, v_gt=nav_data.vel_enu, r_gt=nav_data.orient,
+            p_gt=p_gt, v_gt=v_gt, r_gt=r_gt,
             bias_acc=result['bias_acc'], bias_gyr=result['bias_gyr'],
             std_pos=result['std_pos'], std_vel=result['std_vel'],
             std_orient=result['std_orient'],
@@ -537,7 +546,7 @@ def main():
               f"{outagm:>16.2f} {trel:>11.2f} {rrel:>13.2f} {elapsed:>14.1f}")
     print("=" * 112)
     print("NOTE: Tune parameters with ins_genetic.py before drawing conclusions.\n"
-          "      t_rel / r_rel are KITTI odometry metrics (full sequence, vs raw GPS).\n"
+          "      t_rel / r_rel are KITTI odometry metrics (full sequence, vs GT_SOURCE).\n"
           "      Proc wall = total dev-machine wall-clock to process the whole\n"
           "      sequence in Python; it is a relative throughput proxy, NOT the\n"
           "      per-sample real-time / embedded latency of a live deployment.\n")

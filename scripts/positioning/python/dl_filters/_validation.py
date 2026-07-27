@@ -11,6 +11,10 @@ time, each DL training script reports this same J on the held-out sequence
 during training. The hook is DISPLAY-ONLY — it never enters backprop. Each
 filter keeps its original published loss as the optimisation objective.
 
+Ground truth for J is FGO-Batch (via `ins_cost.get_fgo_batch_gt`), matching
+what the final benchmark (ins_compare.py, GT_SOURCE='batch') scores against —
+not raw KITTI OXTS.
+
 Usage in a training script
 --------------------------
 
@@ -88,11 +92,12 @@ def validate_with_journal_metric(
     import ins_cost
 
     nav_data = data_loader.get_kitti_dataset(val_seq)
+    gt = ins_cost.get_fgo_batch_gt(nav_data)
 
     components = ins_cost.single_window_cost(
         filter_module, nav_data, params or {},
         float(outage_start), float(outage_duration), use_3d,
-        return_components=True, gate_anees=False,
+        return_components=True, gate_anees=False, gt=gt,
     )
 
     if components.get('cost', ins_cost.COST_REJECT) >= ins_cost.COST_REJECT:

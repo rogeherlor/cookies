@@ -151,10 +151,34 @@ def decode_params_smoother(x):
 
 
 def _enu_ground_truth(nav_data):
-    """Convert geodetic ground truth to ENU."""
+    """Convert geodetic ground truth to ENU (raw KITTI OXTS fallback)."""
     f = pm.geodetic2enu(nav_data.lla[:, 0], nav_data.lla[:, 1], nav_data.lla[:, 2],
                         nav_data.lla0[0], nav_data.lla0[1], nav_data.lla0[2])
     return np.column_stack([f[0], f[1], f[2]])
+
+
+# ── FGO-Batch ground truth, cached per sequence ───────────────────────────────
+# Tuning/training should be scored against the same reference the final
+# benchmark uses (ins_compare.py, GT_SOURCE='batch') rather than raw KITTI
+# OXTS — otherwise a parameter set can look better during tuning yet perform
+# worse on the real benchmark (this is what happened to the NHC/ZUPT search).
+# Cached by dataset_name (not object identity) since some callers reload
+# nav_data from disk repeatedly (e.g. per validation epoch) but the FGO-Batch
+# solve itself is expensive (GTSAM LM optimisation) and gives the same answer
+# every time for the same sequence.
+_FGO_GT_CACHE = {}
+
+
+def get_fgo_batch_gt(nav_data, params=None):
+    """Return {'p','v','r'} FGO-Batch ground truth for nav_data, cached by
+    nav_data.dataset_name so repeated calls (e.g. one per validation epoch)
+    don't re-run the batch solve."""
+    key = nav_data.dataset_name
+    if key not in _FGO_GT_CACHE:
+        from smoothers import fgo_batch_runner
+        res = fgo_batch_runner.run(nav_data=nav_data, params=params)
+        _FGO_GT_CACHE[key] = {'p': res['p'], 'v': res['v'], 'r': res['r']}
+    return _FGO_GT_CACHE[key]
 
 
 def _kitti_metrics(p_est, r_est, p_gt, r_gt):
@@ -178,7 +202,7 @@ def _anees(pos_err, std_pos, A, B, N, stride=10, eps=1e-12):
 
 
 def single_window_cost(filter_module, nav_data, params, t1, d, use_3d,
-                      *, return_components=False, gate_anees=True):
+                      *, return_components=False, gate_anees=True, gt=None):
     """
     Run one filter on one (dataset, outage-window) pair and return the cost.
 
@@ -195,6 +219,10 @@ def single_window_cost(filter_module, nav_data, params, t1, d, use_3d,
 
     If `return_components=True` returns a dict with raw component values
     (used by loggers / post-tune diagnostic reports).
+
+    `gt`: optional {'p': (N,3), 'r': (N,3)} precomputed ground truth (e.g.
+    from `get_fgo_batch_gt`). When omitted, falls back to raw KITTI OXTS
+    (`_enu_ground_truth`/`nav_data.orient`) for standalone/backward-compat use.
     """
     try:
         frecIMU = nav_data.sample_rate
@@ -209,7 +237,12 @@ def single_window_cost(filter_module, nav_data, params, t1, d, use_3d,
                 return {'cost': COST_REJECT, 'reason': 'window_too_long'}
             return COST_REJECT
 
-        p_gt = _enu_ground_truth(nav_data)
+        if gt is not None:
+            p_gt = gt['p']
+            r_gt = gt['r']
+        else:
+            p_gt = _enu_ground_truth(nav_data)
+            r_gt = nav_data.orient
 
         res = filter_module.run(nav_data, params,
                                 {'start': t1, 'duration': d}, use_3d)
@@ -228,7 +261,7 @@ def single_window_cost(filter_module, nav_data, params, t1, d, use_3d,
         ate_outage = float(np.sqrt(np.mean(err_out**2)))
 
         # KITTI relative metrics (whole trajectory, official KITTI segments)
-        t_rel, r_rel = _kitti_metrics(p, r, p_gt, nav_data.orient)
+        t_rel, r_rel = _kitti_metrics(p, r, p_gt, r_gt)
 
         # Filter-consistency check (ANEES on the GPS-aided phase only)
         anees = _anees(pos_err, std_pos, A, B, len(p_gt))
@@ -272,7 +305,8 @@ def single_window_cost(filter_module, nav_data, params, t1, d, use_3d,
 
 def fitness(filter_module, nav_data, params, use_3d,
             outage_starts=DEFAULT_OUTAGE_STARTS,
-            outage_duration=DEFAULT_OUTAGE_DURATION):
+            outage_duration=DEFAULT_OUTAGE_DURATION,
+            gt=None):
     """
     Multi-window fitness for one (filter, dataset) pair.
 
@@ -283,7 +317,7 @@ def fitness(filter_module, nav_data, params, use_3d,
     costs = []
     for t1 in outage_starts:
         c = single_window_cost(filter_module, nav_data, params, t1,
-                               outage_duration, use_3d)
+                               outage_duration, use_3d, gt=gt)
         if c >= COST_REJECT:
             # Hard rejection on any window keeps the filter consistent across
             # outage placements — better to reject than to mask a bad window.

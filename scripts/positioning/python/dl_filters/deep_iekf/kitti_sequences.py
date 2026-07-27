@@ -75,8 +75,17 @@ def nav_data_to_aimu_tensors(nav_data):
     The AI-IMU body frame is FLU and navigation frame is ENU — exactly matching ours.
     IMU input u = [gyro_flu(3), accel_flu(3)], same as in the AI-IMU OXTS extraction
     (gyro_bis = wx,wy,wz ≈ FLU axes for the RT3003 on KITTI).
+
+    ang_gt/p_gt/v_gt are FGO-Batch ground truth (`ins_cost.get_fgo_batch_gt`),
+    matching the final benchmark's GT_SOURCE — not raw KITTI OXTS. Only applies
+    to callers going through `data_loader`/`NavigationData` (--mode loo/single);
+    --mode kitti's raw-OXTS `KITTIDataset` path bypasses this function entirely.
     """
-    import pymap3d as pm
+    # Make ins_cost importable (scripts/positioning/python/)
+    scripts_str = str(_SCRIPTS_DIR)
+    if scripts_str not in sys.path:
+        sys.path.insert(0, scripts_str)
+    import ins_cost
 
     N = len(nav_data.accel_flu)
 
@@ -87,19 +96,19 @@ def nav_data_to_aimu_tensors(nav_data):
         dt = 1.0 / nav_data.sample_rate
         t = np.arange(N, dtype=np.float64) * dt
 
+    # Ground truth — FGO-Batch (matches the final benchmark's GT_SOURCE), not
+    # raw KITTI OXTS. Cached per-sequence by ins_cost.get_fgo_batch_gt.
+    gt = ins_cost.get_fgo_batch_gt(nav_data)
+
     # Orientation [roll, pitch, yaw]
-    ang_gt = nav_data.orient.astype(np.float64)  # (N, 3)
+    ang_gt = gt['r'].astype(np.float64)  # (N, 3)
 
     # ENU position (origin-relative)
-    lla = nav_data.lla
-    lla0 = nav_data.lla0
-    e, n, u = pm.geodetic2enu(lla[:, 0], lla[:, 1], lla[:, 2],
-                               lla0[0], lla0[1], lla0[2])
-    p_gt = np.column_stack([e, n, u]).astype(np.float64)
+    p_gt = gt['p'].astype(np.float64).copy()
     p_gt -= p_gt[0]  # origin-relative (AI-IMU convention)
 
     # ENU velocity
-    v_gt = nav_data.vel_enu.astype(np.float64)
+    v_gt = gt['v'].astype(np.float64)
 
     # IMU: [gyro_flu, accel_flu]
     u_arr = np.hstack([nav_data.gyro_flu, nav_data.accel_flu]).astype(np.float64)

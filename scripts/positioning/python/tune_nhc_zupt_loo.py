@@ -127,19 +127,26 @@ def load_base_params_per_seq(filter_key: str) -> dict:
 # ── Worker-local globals — populated ONCE per worker process via the pool
 # initializer, never re-pickled per evaluation ─────────────────────────────
 _W_NAV_BY_SEQ = None
+_W_GT_BY_SEQ = None
 _W_FILTER_KEY = None
 _W_POOL_SEQS = None
 _W_BASE_PARAMS = None
 
 
-def _worker_init(filter_key, pool_seqs, base_params_per_seq):
-    global _W_NAV_BY_SEQ, _W_FILTER_KEY, _W_POOL_SEQS, _W_BASE_PARAMS
+def _worker_init(filter_key, pool_seqs, base_params_per_seq, gt_by_seq):
+    global _W_NAV_BY_SEQ, _W_GT_BY_SEQ, _W_FILTER_KEY, _W_POOL_SEQS, _W_BASE_PARAMS
     _W_FILTER_KEY = filter_key
     _W_POOL_SEQS = pool_seqs
     _W_BASE_PARAMS = base_params_per_seq
     # Each worker loads its own copy directly from disk — avoids shipping
     # large NavigationData arrays over IPC on every evaluation.
     _W_NAV_BY_SEQ = {seq: get_kitti_dataset(SEQ_TO_DRIVE[seq]) for seq in pool_seqs}
+    # FGO-Batch ground truth — precomputed ONCE in main() (not per worker, not
+    # per fold's Pool) and shipped in via initargs, since re-running the
+    # GTSAM batch solve independently in every one of N worker processes
+    # would multiply an already-expensive computation by N for no benefit
+    # (same reference the final benchmark scores against, for every worker).
+    _W_GT_BY_SEQ = gt_by_seq
 
 
 def _worker_eval(x):
@@ -150,7 +157,8 @@ def _worker_eval(x):
         merged = {**_W_BASE_PARAMS[seq], **cand}
         costs.append(ins_cost.single_window_cost(
             module, _W_NAV_BY_SEQ[seq], merged,
-            t1=OUTAGE_START, d=OUTAGE_DURATION, use_3d=True))
+            t1=OUTAGE_START, d=OUTAGE_DURATION, use_3d=True,
+            gt=_W_GT_BY_SEQ[seq]))
     return float(np.mean(costs)) if costs else ins_cost.COST_REJECT
 
 
@@ -187,6 +195,15 @@ def main():
              f"(seq04 skipped) = {len(args.filters) * n_folds} DE searches, "
              f"~{n_evals_est} evaluations each filter.")
 
+    if not args.dry_run:
+        log.info("Precomputing FGO-Batch ground truth for all sequences "
+                 "(once, shared across every fold/filter/worker)…")
+        nav_by_seq_all = {seq: get_kitti_dataset(SEQ_TO_DRIVE[seq])
+                          for seq in OUTAGE_ELIGIBLE_SEQS}
+        gt_by_seq_all = {seq: ins_cost.get_fgo_batch_gt(nd)
+                         for seq, nd in nav_by_seq_all.items()}
+        log.info("  done.")
+
     for filt in args.filters:
         base_params = load_base_params_per_seq(filt)
         all_params = json.load(open(_PARAMS_PATH))
@@ -199,9 +216,10 @@ def main():
             if args.dry_run:
                 continue
 
+            gt_by_pool = {seq: gt_by_seq_all[seq] for seq in pool}
             _ACTIVE_POOL = multiprocessing.Pool(
                 args.workers, initializer=_worker_init,
-                initargs=(filt, pool, base_params))
+                initargs=(filt, pool, base_params, gt_by_pool))
             try:
                 x0 = [np.log10(default_nhc_zupt[k]) for k in NHC_ZUPT_KEYS]
                 baseline_cost = _pool_map(_worker_eval, [x0])[0]
