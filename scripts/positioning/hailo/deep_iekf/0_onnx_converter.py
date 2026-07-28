@@ -280,13 +280,16 @@ def main():
     from utils_torch_filter import TORCHIEKF
     from causal_mesnet import attach_causal_mesnet
     from iekf_ai_imu import _find_norm_factors
-    try:
-        from main_kitti import KITTIParameters
-        torch_iekf = TORCHIEKF(KITTIParameters)
-    except Exception:
-        torch_iekf = TORCHIEKF()
+    # cov0_measurement (the base [cov_lat, cov_up]) is BAKED INTO the exported
+    # ONNX/HEF here, so it MUST be the trained value. get_kitti_parameters()
+    # guarantees the correct [1.0, 10.0] on every machine (see kitti_params.py);
+    # the old 'except Exception -> bare TORCHIEKF() -> [0.2, 300.0]' fallback
+    # silently baked the WRONG base covariance into the quantized model on any
+    # host without navpy.
+    from kitti_params import get_kitti_parameters
+    torch_iekf = TORCHIEKF(get_kitti_parameters())
     if torch_iekf.cov0_measurement is None:
-        torch_iekf.cov0_measurement = torch.tensor([0.2, 300.0]).double()
+        torch_iekf.cov0_measurement = torch.tensor([1.0, 10.0]).double()
 
     attach_causal_mesnet(torch_iekf)                 # swap MesNet → CausalMesNet
     print(f"Loading CAUSAL weights: {weights_path}")

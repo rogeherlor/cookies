@@ -58,6 +58,7 @@ If no weights found, run() raises RuntimeError.
 
 import os
 import sys
+import time
 import numpy as np
 from pathlib import Path
 
@@ -275,7 +276,8 @@ def _free_dead_reckoning(accel_flu, gyro_flu, p0, v0, q0, Ts, N,
 
 # ── Main filter ───────────────────────────────────────────────────────────────
 
-def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
+def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
+        backend='cpu', hailo_net=None):
     """
     Run the Deep KF filter on nav_data.
 
@@ -289,13 +291,26 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     params         : Optional dict overriding DEFAULT_PARAMS.
     outage_config  : Optional {'start': t1_s, 'duration': d_s}.
     use_3d_rotation: True -> full 3D strapdown; False -> yaw-only (2D).
+    backend        : 'cpu' (default, unchanged behaviour — error-state EKF
+                     with the LSTM run on torch) or 'hailo' (see
+                     _run_hailo below — a different, simplified algorithm;
+                     the Hailo-compiled network is NOT calibration-
+                     compatible with the error-state input the CPU path
+                     uses, see hailo_backend.HailoDeepKF's docstring).
+    hailo_net      : Required when backend='hailo' — an already-activated
+                     hailo_backend.HailoDeepKF instance (caller owns its
+                     lifecycle so device open/close isn't timed).
 
     Returns
     -------
     dict with keys: p, v, r, bias_acc, bias_gyr,
-                    std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr.
-    All arrays shape (N, 3), dtype float64.
+                    std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr,
+                    net_latency_s (per-network-call wall time, seconds).
+    All arrays shape (N, 3), dtype float64 (net_latency_s is 1-D).
     """
+    if backend == 'hailo':
+        return _run_hailo(nav_data, params, outage_config, hailo_net)
+
     import torch
 
     p_cfg = dict(DEFAULT_PARAMS)
@@ -326,10 +341,14 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     print(f"Deep KF: loaded weights from {weights_path} (device={device})")
 
     # ── GPS outage mask ────────────────────────────────────────────────────
+    # Narrow to ImportError (don't mask a bug inside ins_config) and surface the
+    # fallback — dr_mode toggles GPS aiding, so a silent wrong default drifts.
     try:
         import ins_config as _ic
         dr_mode = getattr(_ic, 'DR_MODE', False)
-    except Exception:
+    except ImportError as _e:
+        print(f"Deep KF: WARNING — ins_config not importable ({_e}); "
+              "defaulting DR_MODE=False (GPS aiding ON).")
         dr_mode = False
 
     gps_avail = nav_data.gps_available.copy()
@@ -403,6 +422,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
     # ── LSTM (feedforward error model) state ────────────────────────────────
     hidden = model.init_hidden(batch_size=1, device=device)
+    net_latency_s = np.zeros(N - 1)
 
     print(f"Deep KF: running feedforward error filter on {N} samples ...")
 
@@ -432,10 +452,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         # only kept warm (output ignored); under outage the LSTM prediction is
         # the prior.  Either way the network sees the previous error once/step.
         e_norm_in = (e - norm_mean) / norm_std
+        _t0 = time.perf_counter()
         with torch.no_grad():
             e_t = torch.from_numpy(e_norm_in).float().unsqueeze(0).to(device)
             e_pred_t, hidden = model(e_t, hidden)
             e_lstm = e_pred_t[0].cpu().numpy() * norm_std + norm_mean
+        net_latency_s[i] = time.perf_counter() - _t0
 
         if gps_avail[i + 1]:
             # ── C. AIDING: analytic feedforward EKF prior + GPS position update
@@ -477,4 +499,101 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         'std_orient':   std_orient,
         'std_bias_acc': std_b_acc,
         'std_bias_gyr': std_b_gyr,
+        'net_latency_s': net_latency_s,
+    }
+
+
+def _run_hailo(nav_data, params, outage_config, hailo_net):
+    """
+    backend='hailo' path — a standalone autoregressive full-state predictor,
+    NOT the error-state EKF the CPU path runs (see hailo_backend.HailoDeepKF's
+    docstring for why: the compiled HEF was quantisation-calibrated on real
+    full nav states, not on the small normalised error-state residuals the
+    CPU EKF feeds its LSTM — feeding it error-state values would be invalid,
+    out-of-distribution input for its INT8 quantisation range).
+
+    Same trained LSTM+decoder weights, applied causally tick-by-tick via
+    HailoRT's persistent recurrent state across calls (one continuous
+    `activate()` for the whole run — see hailo_backend._BaseHailoNet).  GPS,
+    when available, hard-resets the position component (no covariance-based
+    gain — this path has no P/std to report); the network's own prediction
+    carries velocity/orientation/biases forward at all times, and *is* the
+    whole state during outage.  This is the only role the HEF is actually
+    compatible with, so it's what gets measured.
+    """
+    p_cfg = dict(DEFAULT_PARAMS)
+    if params:
+        p_cfg.update(params)
+
+    accel_flu = nav_data.accel_flu
+    orient    = nav_data.orient
+    lla       = nav_data.lla
+    vel_enu   = nav_data.vel_enu
+    lla0      = nav_data.lla0
+    sample_rate = nav_data.sample_rate
+
+    import pymap3d as pm
+    N = accel_flu.shape[0]
+
+    # Narrow to ImportError + surface the fallback (see the CPU-path note above);
+    # this is the Hailo backend path, same dr_mode semantics.
+    try:
+        import ins_config as _ic
+        dr_mode = getattr(_ic, 'DR_MODE', False)
+    except ImportError as _e:
+        print(f"Deep KF (hailo): WARNING — ins_config not importable ({_e}); "
+              "defaulting DR_MODE=False (GPS aiding ON).")
+        dr_mode = False
+
+    gps_avail = nav_data.gps_available.copy()
+    if outage_config is not None:
+        t1 = outage_config.get('start', 0.)
+        d  = outage_config.get('duration', 0.)
+        A  = int(t1 * sample_rate)
+        B  = int((t1 + d) * sample_rate)
+        gps_avail[A:B] = False
+    if dr_mode:
+        gps_avail[:] = False
+
+    e, n, u = pm.geodetic2enu(lla[:, 0], lla[:, 1], lla[:, 2], lla0[0], lla0[1], lla0[2])
+    p_gps_enu = np.column_stack([e, n, u])
+
+    pos       = np.zeros((N, 3))
+    vel       = np.zeros((N, 3))
+    rpy_out   = np.zeros((N, 3))
+    b_acc_out = np.zeros((N, 3))
+    b_gyr_out = np.zeros((N, 3))
+    zeros3    = np.zeros((N, 3))
+    net_latency_s = np.zeros(N - 1)
+
+    pos[0]     = p_gps_enu[0]
+    vel[0]     = vel_enu[0]
+    rpy_out[0] = orient[0]
+
+    x_full = np.concatenate([pos[0], vel[0], rpy_out[0], np.zeros(3), np.zeros(3)])
+
+    print(f"Deep KF (Hailo, standalone full-state predictor): running on {N} samples ...")
+
+    for i in range(N - 1):
+        x_pred, dt = hailo_net.step(x_full)
+        net_latency_s[i] = dt
+
+        if gps_avail[i + 1]:
+            x_full = x_pred.copy()
+            x_full[0:3] = p_gps_enu[i + 1]
+        else:
+            x_full = x_pred
+
+        pos[i+1]       = x_full[0:3]
+        vel[i+1]       = x_full[3:6]
+        rpy_out[i+1]   = _wrap(x_full[6:9])
+        b_acc_out[i+1] = x_full[9:12]
+        b_gyr_out[i+1] = x_full[12:15]
+
+    return {
+        'p': pos, 'v': vel, 'r': rpy_out,
+        'bias_acc': b_acc_out, 'bias_gyr': b_gyr_out,
+        'std_pos': zeros3, 'std_vel': zeros3, 'std_orient': zeros3,
+        'std_bias_acc': zeros3, 'std_bias_gyr': zeros3,
+        'net_latency_s': net_latency_s,
     }

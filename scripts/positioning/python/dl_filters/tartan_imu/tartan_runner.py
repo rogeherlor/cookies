@@ -54,6 +54,7 @@ LoRA adapter search (applied after base model):
 
 import os
 import sys
+import time
 import numpy as np
 from pathlib import Path
 import torch
@@ -431,25 +432,45 @@ def _load_tartan_model(weights_path: Path, lora_path, lora_rank: int,
             else:
                 print("Tartan IMU: checkpoint loaded successfully into _TartanIMUModel.")
         except Exception as e:
-            print(f"Tartan IMU: could not load state dict ({e}). Using stub.")
-            model = _TartanImuStub()
+            if os.environ.get('TARTAN_ALLOW_STUB') == '1':
+                print(f"Tartan IMU: could not load state dict ({e}). "
+                      "TARTAN_ALLOW_STUB=1 — using non-learned stub (smoke test).")
+                model = _TartanImuStub()
+            else:
+                raise RuntimeError(
+                    f"Tartan IMU: failed to load the trained checkpoint state_dict "
+                    f"({type(e).__name__}: {e}). Refusing to silently substitute the "
+                    f"non-learned _TartanImuStub physics integrator (which would report "
+                    f"stub numbers as if they were the model's). Fix the checkpoint. "
+                    f"Set TARTAN_ALLOW_STUB=1 only for explicit smoke tests."
+                ) from e
     else:
-        print(f"Tartan IMU: unrecognised checkpoint type ({type(ckpt)}). Using stub.")
-        model = _TartanImuStub()
+        if os.environ.get('TARTAN_ALLOW_STUB') == '1':
+            print(f"Tartan IMU: unrecognised checkpoint type ({type(ckpt)}). "
+                  "TARTAN_ALLOW_STUB=1 — using non-learned stub (smoke test).")
+            model = _TartanImuStub()
+        else:
+            raise RuntimeError(
+                f"Tartan IMU: checkpoint at {weights_path} is neither an nn.Module "
+                f"nor a state_dict (got {type(ckpt)}). Refusing to silently "
+                f"substitute the non-learned _TartanImuStub. Set TARTAN_ALLOW_STUB=1 "
+                f"only for explicit smoke tests.")
 
     model = model.to(device)
 
     use_lora = False
     if lora_path is not None:
-        try:
-            lora_ckpt = torch.load(lora_path, map_location=device, weights_only=False)
-            if isinstance(lora_ckpt, dict):
-                sd = lora_ckpt.get('lora_state_dict') or lora_ckpt
-                model.load_state_dict(sd, strict=False)
-            print(f"Tartan IMU: LoRA adapter loaded from {lora_path.name}")
-            use_lora = True
-        except Exception as e:
-            print(f"Tartan IMU: WARNING — LoRA load failed: {e}")
+        # lora_path was already resolved by _find_lora_adapter, which RAISES for a
+        # missing required fold precisely so a run never silently drops to zero-shot.
+        # If the found adapter then fails to LOAD, that is equally a real error —
+        # raise rather than silently continuing zero-shot with the wrong effective
+        # model for this LOO fold.
+        lora_ckpt = torch.load(lora_path, map_location=device, weights_only=False)
+        if isinstance(lora_ckpt, dict):
+            sd = lora_ckpt.get('lora_state_dict') or lora_ckpt
+            model.load_state_dict(sd, strict=False)
+        print(f"Tartan IMU: LoRA adapter loaded from {lora_path.name}")
+        use_lora = True
     else:
         print("Tartan IMU: no LoRA adapter — zero-shot inference.")
 
@@ -500,13 +521,20 @@ def _qto_Rbn(q):
 
 # ── Main filter ───────────────────────────────────────────────────────────────
 
-def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
+def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
+        backend='cpu', hailo_net=None):
     """
     Run Tartan IMU filter on nav_data.
 
+    backend   : 'cpu' (default) or 'hailo' — same ES-EKF/outage logic either
+                way, only the 1 Hz velocity-network call swaps.
+    hailo_net : Required when backend='hailo' — an already-activated
+                hailo_backend.HailoTartanIMU instance.
+
     Returns dict: p, v, r, bias_acc, bias_gyr,
-                  std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr.
-    All arrays (N, 3) float64.
+                  std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr,
+                  net_latency_s (one entry per Tartan network update, seconds).
+    All arrays (N, 3) float64 (net_latency_s is 1-D, shorter than N).
     """
     from scipy.interpolate import interp1d
 
@@ -562,10 +590,13 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         accel_gf_up[k] = accel_up[k] - g_body
 
     # ── GPS outage mask ────────────────────────────────────────────────────
+    # Narrow to ImportError + surface the fallback — dr_mode toggles GPS aiding.
     try:
         import ins_config as _ic
         dr_mode = getattr(_ic, 'DR_MODE', False)
-    except Exception:
+    except ImportError as _e:
+        print(f"Tartan IMU: WARNING — ins_config not importable ({_e}); "
+              "defaulting DR_MODE=False (GPS aiding ON).")
         dr_mode = False
 
     gps_avail = nav_data.gps_available.copy()
@@ -582,6 +613,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     p_gps_enu = np.column_stack([e, n, u])
 
     # ── Output arrays ──────────────────────────────────────────────────────
+    net_latency_s = []
     pos        = np.zeros((N, 3))
     vel        = np.zeros((N, 3))
     rpy_out    = np.zeros((N, 3))
@@ -671,12 +703,17 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                     imu_block[0, step, :, 0:3] = accel_gf_up[ss:ee].astype(np.float32)
                     imu_block[0, step, :, 3:6] = gyro_up[ss:ee].astype(np.float32)
 
-                imu_t = torch.from_numpy(imu_block).to(device)
-                with torch.no_grad():
-                    v_body_t, log_std_t = model(imu_t, robot_type='car')
-
-                v_body  = v_body_t[0].cpu().numpy().astype(np.float64)
-                log_std = log_std_t[0].cpu().numpy().astype(np.float64)
+                if backend == 'hailo':
+                    (v_body, log_std), dt = hailo_net.step(imu_block[0])
+                    net_latency_s.append(dt)
+                else:
+                    imu_t = torch.from_numpy(imu_block).to(device)
+                    _t0 = time.perf_counter()
+                    with torch.no_grad():
+                        v_body_t, log_std_t = model(imu_t, robot_type='car')
+                    net_latency_s.append(time.perf_counter() - _t0)
+                    v_body  = v_body_t[0].cpu().numpy().astype(np.float64)
+                    log_std = log_std_t[0].cpu().numpy().astype(np.float64)
                 log_std = np.clip(log_std, -10.0, 10.0)   # prevent exp underflow/overflow
 
                 # Body-frame velocity update — observes attitude (esp. yaw):
@@ -745,4 +782,5 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         'bias_acc': b_acc_out, 'bias_gyr': b_gyr_out,
         'std_pos': std_pos, 'std_vel': std_vel, 'std_orient': std_orient,
         'std_bias_acc': std_b_acc, 'std_bias_gyr': std_b_gyr,
+        'net_latency_s': np.array(net_latency_s),
     }

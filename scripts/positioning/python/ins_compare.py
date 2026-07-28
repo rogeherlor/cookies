@@ -118,15 +118,16 @@ def _load_tuned_params(nav_data, mode_3d):
                    'P_acc_std', 'P_gyr_std']
         _dl_base = {k: _best_classical[k] for k in _shared if k in _best_classical}
 
-        # Anisotropic orient / gyro noise: average X/Y and Z components
+        # Anisotropic orient / gyro noise: average X/Y and Z components. If a
+        # tuned filter has no separate Z component, fall back to its OWN XY value
+        # (isotropic assumption) rather than an arbitrary hardcoded constant that
+        # silently substitutes a value unrelated to this filter's tuning.
         if 'QorientXY' in _best_classical:
-            _dl_base['Qorient'] = (
-                _best_classical.get('QorientXY', 1e-5) +
-                _best_classical.get('QorientZ', 1e-5)) / 2.0
+            _xy = _best_classical['QorientXY']
+            _dl_base['Qorient'] = (_xy + _best_classical.get('QorientZ', _xy)) / 2.0
         if 'QgyrXY' in _best_classical:
-            _dl_base['Qgyr'] = (
-                _best_classical.get('QgyrXY', 1e-7) +
-                _best_classical.get('QgyrZ', 1e-7)) / 2.0
+            _xy = _best_classical['QgyrXY']
+            _dl_base['Qgyr'] = (_xy + _best_classical.get('QgyrZ', _xy)) / 2.0
 
         for dl_key in ['tlio', 'deep_kf', 'tartan_imu', 'iekf_ai_imu', 'iekf_ai_imu_online']:
             if dl_key not in result:   # don't overwrite if already tuned directly
@@ -288,6 +289,23 @@ def main():
         _repo_root / f'artifacts/deep_iekf_online/iekfnets_held_{_drive}.p',
     ]
     _ai_online_weights = next((p for p in _online_candidates if p.exists()), None)
+
+    # Fail loudly if a SELECTED Deep-IEKF filter has no LOO fold weights: silently
+    # letting it fall back to the generic non-held-out iekfnets.p would leak test
+    # data into a leave-one-out evaluation and quietly invalidate the result.
+    _active_keys = {cfg['key'] for cfg in FILTER_CONFIGS}
+    if _ai_online_weights is None and 'iekf_ai_imu_online' in _active_keys:
+        raise FileNotFoundError(
+            f"Deep IEKF (online, iekf_ai_imu_online) is selected but no LOO fold "
+            f"weights exist for seq '{_seq_id}' / drive '{_drive}' (looked for "
+            f"artifacts/deep_iekf_online/fold_{_seq_id}.p and "
+            f"iekfnets_held_{_drive}.p). Refusing to run rather than silently use "
+            f"generic non-held-out weights (LOO leak). Train the fold first: "
+            f"train_ai_imu.py --causal --mode loo --held-out {_drive}.")
+    if _ai_weights is None and 'iekf_ai_imu' in _active_keys:
+        print(f"WARNING: batch AI-IMU (iekf_ai_imu) is selected but has no fold "
+              f"weights for seq '{_seq_id}' — it will fall back to internal "
+              f"defaults (opt-in diagnostic filter; not a journal-grade result).")
 
     # ── Output directories ─────────────────────────────────────────────────────
     if dr_mode:

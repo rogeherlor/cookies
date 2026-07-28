@@ -252,13 +252,13 @@ def main():
                 "--mode loo --held-out <drive>"
             )
 
-    try:
-        from main_kitti import KITTIParameters
-        torch_iekf = TORCHIEKF(KITTIParameters)
-    except Exception:
-        torch_iekf = TORCHIEKF()
+    # Base [cov_lat, cov_up] must match training (and the on-device HEF) exactly;
+    # get_kitti_parameters() yields the correct [1.0, 10.0] on every host, unlike
+    # the old silent 'except -> [0.2, 300.0]' fallback (see kitti_params.py).
+    from kitti_params import get_kitti_parameters
+    torch_iekf = TORCHIEKF(get_kitti_parameters())
     if torch_iekf.cov0_measurement is None:
-        torch_iekf.cov0_measurement = torch.tensor([0.2, 300.0]).double()
+        torch_iekf.cov0_measurement = torch.tensor([1.0, 10.0]).double()
 
     attach_causal_mesnet(torch_iekf)                 # swap MesNet → CausalMesNet
     log.info("Loading CAUSAL weights: %s", weights_path)

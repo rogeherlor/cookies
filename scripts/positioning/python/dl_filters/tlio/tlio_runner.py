@@ -40,6 +40,7 @@ Weights search order:
 
 import os
 import sys
+import time
 import numpy as np
 from pathlib import Path
 
@@ -272,33 +273,55 @@ def _R_to_rpy(R):
 
 # ── Network inference helper ──────────────────────────────────────────────────
 
-def _predict_displacement(model, imu_window: np.ndarray, device: str = 'cpu'):
+def _predict_displacement(model, imu_window: np.ndarray, device: str = 'cpu',
+                          hailo_net=None, _timing=None):
     """
     Run one TLIO forward pass and decode displacement + covariance.
 
     Parameters
     ----------
     imu_window : (6, W) float32 — [gyro_ga(3) | accel_ga_motion(3)]
+    hailo_net  : Optional hailo_backend.HailoTLIO — when given, runs the
+                 Hailo backbone + host head instead of the torch model.
+    _timing    : Optional list — per-call wall-clock seconds get appended.
 
     Returns
     -------
     dp_ga    : (3,) float64 — predicted displacement in gravity-aligned frame
     Sigma_ga : (3, 3) float64 — diagonal covariance
     """
-    import torch
-    x = torch.from_numpy(imu_window[None]).float().to(device)   # (1, 6, W)
-    with torch.no_grad():
-        mean, logstd = model(x)    # each (1, 3)
-    dp_ga   = mean[0].cpu().numpy().astype(np.float64)
-    log_std = logstd[0].cpu().numpy().astype(np.float64)
+    if hailo_net is not None:
+        (dp_ga, log_std), dt = hailo_net.step(imu_window.astype(np.float32))
+        if _timing is not None:
+            _timing.append(dt)
+    else:
+        import torch
+        _t0 = time.perf_counter()
+        x = torch.from_numpy(imu_window[None]).float().to(device)   # (1, 6, W)
+        with torch.no_grad():
+            mean, logstd = model(x)    # each (1, 3)
+        dp_ga   = mean[0].cpu().numpy().astype(np.float64)
+        log_std = logstd[0].cpu().numpy().astype(np.float64)
+        if _timing is not None:
+            _timing.append(time.perf_counter() - _t0)
+    # A trained TLIO network must never emit NaN/Inf. If it does, that signals a
+    # real defect (wrong/corrupt weights, bad normalisation, malformed input) —
+    # exactly the kind of thing that, if silently replaced with a plausible
+    # hardcoded fallback (zero displacement + inflated covariance), produces a
+    # degraded-but-believable trajectory that costs hours to trace. Fail loudly.
     if not np.all(np.isfinite(dp_ga)):
-        return np.zeros(3), np.eye(3) * 100.0
+        raise RuntimeError(
+            "TLIO network produced non-finite displacement "
+            f"(dp={dp_ga}). Refusing to substitute a zero-displacement fallback; "
+            "check the weights/normalisation for this sequence.")
     # Eq. 3: Σ = diag(exp(2·logstd)).  Floor: 10 cm or 5% of predicted displacement.
     log_std  = np.clip(log_std, -10.0, 10.0)
     min_std  = np.maximum(0.05 * np.abs(dp_ga), 0.1)
     std2     = np.maximum(np.exp(2.0 * log_std), min_std ** 2)
     if not np.all(np.isfinite(std2)):
-        std2 = np.full(3, 1.0)
+        raise RuntimeError(
+            f"TLIO network produced non-finite covariance (logstd={log_std}). "
+            "Refusing to substitute a hardcoded covariance fallback.")
     return dp_ga, np.diag(std2)
 
 
@@ -341,7 +364,8 @@ def _gps_update(filt, gps_pos_enu: np.ndarray, gps_noise_var: float):
 
 # ── Main filter ───────────────────────────────────────────────────────────────
 
-def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
+def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
+        backend='cpu', hailo_net=None):
     """
     Run TLIO on nav_data using the original ImuMSCKF (stochastic cloning EKF).
 
@@ -351,12 +375,18 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     params         : Optional dict overriding DEFAULT_PARAMS.
     outage_config  : Optional {'start': t1_s, 'duration': d_s}.
     use_3d_rotation: Accepted for API compatibility; SCEKF always uses full 3D.
+    backend        : 'cpu' (default) or 'hailo' — same SCEKF/outage logic
+                     either way, only the displacement-network call swaps
+                     (see _predict_displacement).
+    hailo_net      : Required when backend='hailo' — an already-activated
+                     hailo_backend.HailoTLIO instance.
 
     Returns
     -------
     dict with keys: p, v, r, bias_acc, bias_gyr,
-                    std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr.
-    All arrays shape (N, 3), dtype float64.
+                    std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr,
+                    net_latency_s (one entry per TLIO network update, seconds).
+    All arrays shape (N, 3), dtype float64 (net_latency_s is 1-D, shorter than N).
     """
     import torch
 
@@ -389,6 +419,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
     # ── Weights and network ───────────────────────────────────────────────
     seq_id       = getattr(nav_data, 'dataset_name', None)
+    if seq_id is None:
+        print("TLIO: WARNING — nav_data has no dataset_name; _find_weights will "
+              "select the ALL-sequences checkpoint, NOT a LOO-held-out fold. "
+              "Only valid for non-LOO runs — a LOO evaluation would leak.")
     weights_path = _find_weights(seq_id)
     model        = _load_model(weights_path, _TLIO_NET_WINDOW, device)
     print(f"TLIO: loaded weights from {weights_path}  "
@@ -396,10 +430,15 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
           f"clone every {_UPDATE_STRIDE} steps, device={device})")
 
     # ── GPS outage mask ───────────────────────────────────────────────────
+    # Narrow to ImportError so a genuine bug INSIDE ins_config (AttributeError,
+    # etc.) is not masked, and make the fallback visible — dr_mode toggles GPS
+    # aiding, so a silent wrong default changes the trajectory.
     try:
         import ins_config as _ic
         dr_mode = getattr(_ic, 'DR_MODE', False)
-    except Exception:
+    except ImportError as _e:
+        print(f"TLIO: WARNING — ins_config not importable ({_e}); "
+              "defaulting DR_MODE=False (GPS aiding ON).")
         dr_mode = False
 
     gps_avail = nav_data.gps_available.copy()
@@ -419,6 +458,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     p_gps_enu = np.column_stack([e, n_arr, u])   # (N, 3)
 
     # ── Output arrays ─────────────────────────────────────────────────────
+    net_latency_s = []
     pos        = np.zeros((N, 3))
     vel        = np.zeros((N, 3))
     rpy_out    = np.zeros((N, 3))
@@ -502,7 +542,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
                 imu_win = np.vstack([gyro_ga, accel_ga]).astype(np.float32)  # (6, W_net)
 
-                dp_ga, Sigma_ga = _predict_displacement(model, imu_win, device)
+                dp_ga, Sigma_ga = _predict_displacement(
+                    model, imu_win, device,
+                    hailo_net=(hailo_net if backend == 'hailo' else None),
+                    _timing=net_latency_s)
 
                 # SCEKF update: meas = dp in GA frame; filter computes pred = Rz.T@(p_end−p_begin)
                 # Mahalanobis gate is built-in (active after 10 s).
@@ -550,4 +593,5 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         'std_orient':   std_orient,
         'std_bias_acc': std_b_acc,
         'std_bias_gyr': std_b_gyr,
+        'net_latency_s': np.array(net_latency_s),
     }

@@ -106,9 +106,19 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     """
     Run FGO-Batch smoother and return full-rate navigation estimates.
 
-    Builds a GTSAM factor graph with all GPS measurements (outage_config is
-    intentionally ignored — this is the ground truth, not a filter) and
-    solves it in one Levenberg-Marquardt pass.
+    Transparently dispatches to whichever environment actually has GTSAM:
+    if it's importable in the current process (e.g. a PC with a native
+    gtsam install), runs natively, in-process. If not (e.g. this repo's
+    Raspberry Pi target, where GTSAM only exists in the isolated
+    /opt/conda-gtsam env — see docker/Dockerfile's GTSAM section — and the
+    main interpreter has torch/scipy for the other filters instead), the
+    same computation is bridged through /opt/conda-gtsam via
+    hailo/_isam2_conda_worker.py (--runner fgo_batch) as a subprocess, so
+    every caller (ins_compare.py, ins_cost.get_fgo_batch_gt, ...) gets a
+    working run() either way without needing to know which. Returns the
+    exact same schema either way, except std_pos/std_vel/std_orient/
+    std_bias_acc/std_bias_gyr, which the subprocess path leaves as zeros
+    (no caller in this repo uses the GT's own std, only its p/v/r).
 
     Args:
         nav_data       : NavigationData dataclass (data_loader.py).
@@ -121,6 +131,18 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         dict with keys: p, v, r, bias_acc, bias_gyr,
                         std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr.
     """
+    try:
+        import gtsam  # noqa: F401
+    except ImportError:
+        from ._conda_gtsam_bridge import run_via_conda_subprocess
+        return run_via_conda_subprocess("fgo_batch", nav_data, params)
+    return _run_native(nav_data, params)
+
+
+def _run_native(nav_data, params=None, outage_config=None, use_3d_rotation=True):
+    """The original, in-process GTSAM implementation — see run()'s docstring
+    for the dispatch logic that calls this only when gtsam is importable
+    here directly."""
     gtsam, X, V, B = _import_gtsam()
 
     p_cfg = dict(DEFAULT_PARAMS)
@@ -306,7 +328,9 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 so  = np.sqrt(np.maximum(np.diag(cov_pose[0:3, 0:3]), 0))
                 sba = np.sqrt(np.maximum(np.diag(cov_bias[0:3, 0:3]), 0))
                 sbg = np.sqrt(np.maximum(np.diag(cov_bias[3:6, 3:6]), 0))
-            except Exception:
+            except RuntimeError:
+                # Indeterminate marginal for this epoch (GTSAM RuntimeError) —
+                # skip it, std_* stays 0 there. Narrowed from `except Exception`.
                 continue
 
             # Hold constant until next GPS epoch
@@ -316,8 +340,13 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             std_orient[i_ep:i_next] = so
             std_b_acc[i_ep:i_next]  = sba
             std_b_gyr[i_ep:i_next]  = sbg
-    except Exception:
-        pass   # covariance is optional; zeros are safe defaults
+    except RuntimeError:
+        # The FGO-Batch ground truth's OWN uncertainty (std_*) is never consumed
+        # by any caller in this repo (they use only p/v/r), so a failed Marginals
+        # build here cannot affect any reported result — zeros are a genuinely
+        # inert default. Narrowed from `except Exception` so an unrelated bug in
+        # the std extraction is not masked.
+        pass
 
     return {
         'p':            p_out,

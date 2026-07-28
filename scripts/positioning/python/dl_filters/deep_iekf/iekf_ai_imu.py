@@ -154,11 +154,20 @@ def _find_norm_factors(weights_path):
             seen.add(norm_path)
             continue
         seen.add(norm_path)
+        # The file EXISTS — a load failure here means it is corrupt or was
+        # written by an incompatible torch. Don't silently `continue` (which
+        # treats it as absent and makes the caller recompute per-sequence
+        # normalisation — "not deployable" and silently drift-inducing).
+        # Surface it and stop.
+        import torch
         try:
-            import torch
             return torch.load(norm_path)
-        except Exception:
-            continue
+        except Exception as e:
+            raise RuntimeError(
+                f"Normalisation factors file {norm_path} exists but could not "
+                f"be loaded ({type(e).__name__}: {e}). Refusing to silently fall "
+                f"back to per-sequence stats. Regenerate it (train_ai_imu.py)."
+            ) from e
     return None
 
 
@@ -355,13 +364,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     # ── Load IEKF with KITTI-tuned parameters ──────────────────────────────────
     from utils_numpy_filter import NUMPYIEKF
 
-    # Import KITTIParameters from AI-IMU
-    try:
-        sys.path.insert(0, str(_AI_IMU_SRC))
-        from main_kitti import KITTIParameters
-        iekf = NUMPYIEKF(KITTIParameters)
-    except Exception:
-        iekf = NUMPYIEKF()   # fallback: base Parameters
+    # Import KITTIParameters (dependency-light; see kitti_params.py for why the
+    # direct `from main_kitti import KITTIParameters` cannot be used on every
+    # target — it drags in navpy/matplotlib/... absent on the Pi).
+    sys.path.insert(0, str(_AI_IMU_SRC))
+    from kitti_params import get_kitti_parameters
+    iekf = NUMPYIEKF(get_kitti_parameters())
 
     # Make gravity a numpy array (in case KITTIParameters stores it as list)
     if not isinstance(iekf.g, np.ndarray):
@@ -397,14 +405,11 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 import torch
                 from utils_torch_filter import TORCHIEKF
 
-                try:
-                    from main_kitti import KITTIParameters as _KP
-                    torch_iekf = TORCHIEKF(_KP)
-                except Exception:
-                    torch_iekf = TORCHIEKF()
+                from kitti_params import get_kitti_parameters
+                torch_iekf = TORCHIEKF(get_kitti_parameters())
                 if torch_iekf.cov0_measurement is None:
-                    # Fallback baseline: KITTIParameters defaults
-                    torch_iekf.cov0_measurement = torch.tensor([0.2, 300.0]).double()
+                    # Fallback baseline: KITTIParameters defaults (cov_lat, cov_up)
+                    torch_iekf.cov0_measurement = torch.tensor([1.0, 10.0]).double()
                 if isinstance(torch_iekf.g, np.ndarray):
                     torch_iekf.g = torch.from_numpy(torch_iekf.g).double()
 
@@ -480,7 +485,9 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     try:
         import ins_config as _ic
         dr_mode = getattr(_ic, 'DR_MODE', False)
-    except Exception:
+    except ImportError as _e:
+        print(f"[iekf_ai_imu] WARNING: ins_config not importable ({_e}); "
+              "defaulting DR_MODE=False (GPS aiding ON).")
         dr_mode = False
 
     if not dr_mode and hasattr(nav_data, 'gps_available') and nav_data.gps_available.any():

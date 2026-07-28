@@ -190,10 +190,24 @@ def _kitti_metrics(p_est, r_est, p_gt, r_gt):
 
 
 def _anees(pos_err, std_pos, A, B, N, stride=10, eps=1e-12):
-    """Average NEES over the GPS-aided phase (epochs outside [A:B])."""
+    """
+    Average NEES over the GPS-aided phase (epochs outside [A:B]).
+
+    Skips k=0: every filter initialises std_pos[0] == 0 (zero uncertainty
+    assigned before the first propagation step), while p_gt[0] is now a
+    globally-smoothed ground truth (FGO-Batch/RTS) — generally a few cm-dm
+    away from the filter's own zero-initialised origin even though the
+    filter's t=0 error is operationally meaningless. That one epoch's
+    pos_err**2/eps term is ~1e11-1e12, large enough to single-handedly swamp
+    the whole average (nc ~ N/stride) and reject every parameter set
+    regardless of actual filter quality. (Under raw-KITTI-GPS ground truth
+    this never triggered, since the filter was initialised FROM that same
+    raw GPS fix, making pos_err[0] exactly zero — a coincidence of the old
+    ground-truth source, not a real distinction worth preserving.)
+    """
     ns, nc = 0.0, 0
     for k in range(0, N, stride):
-        if A <= k < B:
+        if k == 0 or (A <= k < B):
             continue
         var_p = std_pos[k]**2 + eps
         ns += float(np.sum(pos_err[k]**2 / var_p))
