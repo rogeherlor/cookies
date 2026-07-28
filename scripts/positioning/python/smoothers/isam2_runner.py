@@ -147,9 +147,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     """
     Run iSAM2 online smoother and return navigation estimates.
 
-    iSAM2 updates the factor graph at 1 Hz (every GPS measurement).  Between
-    GPS updates, the current NavState is propagated forward with raw IMU at
-    100 Hz to fill the output arrays.
+    Transparently dispatches to whichever environment actually has GTSAM —
+    native in-process if importable here, otherwise bridged through the
+    isolated /opt/conda-gtsam interpreter as a subprocess (see
+    fgo_batch_runner.run()'s docstring for the full rationale; same pattern).
 
     Args:
         nav_data       : NavigationData dataclass (data_loader.py).
@@ -163,6 +164,16 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         dict with keys: p, v, r, bias_acc, bias_gyr,
                         std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr.
     """
+    try:
+        import gtsam  # noqa: F401
+    except ImportError:
+        from ._conda_gtsam_bridge import run_via_conda_subprocess
+        return run_via_conda_subprocess("isam2", nav_data, params, outage_config, use_3d_rotation)
+    return _run_native(nav_data, params, outage_config, use_3d_rotation)
+
+
+def _run_native(nav_data, params=None, outage_config=None, use_3d_rotation=True):
+    """The original, in-process GTSAM implementation — see run()'s docstring."""
     gtsam, X, V, B = _import_gtsam()
 
     p_cfg = dict(DEFAULT_PARAMS)
@@ -365,8 +376,13 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 std_orient[i + 1] = np.sqrt(np.maximum(np.diag(cov_pose[0:3, 0:3]), 0))
                 std_b_acc[i + 1]  = np.sqrt(np.maximum(np.diag(cov_bias[0:3, 0:3]), 0))
                 std_b_gyr[i + 1]  = np.sqrt(np.maximum(np.diag(cov_bias[3:6, 3:6]), 0))
-            except Exception:
-                pass    # marginal covariance may fail on first steps; keep zeros
+            except RuntimeError:
+                # GTSAM raises RuntimeError when a marginal is indeterminate —
+                # legitimately possible on the first GPS steps before the graph is
+                # well-constrained; std_* stays 0 there (reported uncertainty only,
+                # trajectory unaffected). Narrowed from `except Exception` so a real
+                # bug in the std extraction above is no longer silently masked.
+                pass
 
     return {
         'p':           p_out,

@@ -83,12 +83,14 @@ def export(weights_path, output_path, seq_len=4544):
                                    (dynamic axes allow any length at runtime)
     """
     _add_aimu_path()
+    if str(_HERE) not in sys.path:
+        sys.path.insert(0, str(_HERE))
     from utils_torch_filter import TORCHIEKF
-    try:
-        from main_kitti import KITTIParameters
-        torch_iekf = TORCHIEKF(KITTIParameters)
-    except Exception:
-        torch_iekf = TORCHIEKF()
+    # cov0_measurement is embedded as a buffer in the exported ONNX (see
+    # MesNetWrapper), so it MUST be the trained [1.0, 10.0]; get_kitti_parameters()
+    # guarantees that on every host, unlike the old silent-fallback (kitti_params.py).
+    from kitti_params import get_kitti_parameters
+    torch_iekf = TORCHIEKF(get_kitti_parameters())
 
     # Load weights
     mondict = torch.load(weights_path, map_location='cpu')

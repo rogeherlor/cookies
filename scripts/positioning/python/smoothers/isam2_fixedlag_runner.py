@@ -151,11 +151,26 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     IncrementalFixedLagSmoother that marginalises nodes older than
     ``smoother_lag`` seconds, bounding state size and per-update cost.
 
+    Transparently dispatches to whichever environment actually has GTSAM —
+    native in-process if importable here, otherwise bridged through the
+    isolated /opt/conda-gtsam interpreter as a subprocess (see
+    fgo_batch_runner.run()'s docstring for the full rationale; same pattern).
+
     Returns:
         dict with keys: p, v, r, bias_acc, bias_gyr,
                         std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr,
                         and (extra, for the timing study) update_ms, n_vars.
     """
+    try:
+        import gtsam  # noqa: F401
+    except ImportError:
+        from ._conda_gtsam_bridge import run_via_conda_subprocess
+        return run_via_conda_subprocess("isam2_fixedlag", nav_data, params, outage_config, use_3d_rotation)
+    return _run_native(nav_data, params, outage_config, use_3d_rotation)
+
+
+def _run_native(nav_data, params=None, outage_config=None, use_3d_rotation=True):
+    """The original, in-process GTSAM implementation — see run()'s docstring."""
     (gtsam, X, V, B,
      IncrementalFixedLagSmoother, TSMap) = _import_gtsam()
 
@@ -350,8 +365,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 std_orient[i + 1] = np.sqrt(np.maximum(np.diag(cov_pose[0:3, 0:3]), 0))
                 std_b_acc[i + 1]  = np.sqrt(np.maximum(np.diag(cov_bias[0:3, 0:3]), 0))
                 std_b_gyr[i + 1]  = np.sqrt(np.maximum(np.diag(cov_bias[3:6, 3:6]), 0))
-            except Exception:
-                pass    # keep previous values if marginal covariance fails
+            except RuntimeError:
+                # Indeterminate marginal (GTSAM RuntimeError), legitimate on the
+                # first GPS steps — keep previous std_* there (reported uncertainty
+                # only, trajectory unaffected). Narrowed from `except Exception` so
+                # a real bug in the std extraction above is no longer masked.
+                pass
 
     return {
         'p':           p_out,

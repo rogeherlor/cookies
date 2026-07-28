@@ -35,11 +35,25 @@ _STORE = Path(__file__).parent / 'filter_params.json'
 
 
 def _load() -> dict:
-    """Load the JSON store.  Returns empty dict if file does not exist."""
+    """Load the JSON store.
+
+    A MISSING file is the legitimate "nothing tuned yet" case → empty dict.
+    A file that EXISTS but fails to parse (truncated/half-written by an
+    interrupted optimiser, merge conflict, corruption) must NOT be silently
+    treated as "no tuning": that would make every filter fall back to default
+    parameters with no warning — the exact silent-degradation this project
+    forbids. Fail loudly instead so the corrupt store is fixed, not ignored.
+    """
+    if not _STORE.exists():
+        return {}
     try:
         return json.loads(_STORE.read_text(encoding='utf-8'))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"filter_params store {_STORE} exists but is not valid JSON "
+            f"({e}). Refusing to silently fall back to default parameters for "
+            f"every filter. Restore or regenerate the file (ins_genetic.py)."
+        ) from e
 
 
 def _save(data: dict) -> None:

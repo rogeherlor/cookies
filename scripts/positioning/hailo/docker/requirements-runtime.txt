@@ -2,6 +2,19 @@
 # torch is needed for the host-side post-processing steps that run alongside
 # Hailo (tlio's bn1+FC head, tartan_imu's LSTM/IMU_Trunk/robot-head) — both
 # have official CPU wheels for linux/amd64 and linux/arm64 on PyPI.
+#
+# numpy<2: HailoRT's compiled _pyhailort extension is built against the
+# numpy 1.x C-API (Debian bookworm ships python3-numpy 1.24.2 alongside
+# HailoRT 4.20.0). numpy 2.x broke C-API ABI compatibility — using it here
+# doesn't fail to import, it corrupts buffer-protocol interop at runtime
+# (observed as "Input buffer size 0" from hailort during inference).
 --extra-index-url https://download.pytorch.org/whl/cpu
-numpy
+numpy<2
 torch
+pymap3d
+matplotlib
+scipy
+termcolor
+numba
+tqdm
+scikit-learn

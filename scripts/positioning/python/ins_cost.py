@@ -190,14 +190,23 @@ def _kitti_metrics(p_est, r_est, p_gt, r_gt):
 
 
 def _anees(pos_err, std_pos, A, B, N, stride=10, eps=1e-12):
-    """Average NEES over the GPS-aided phase (epochs outside [A:B]).
+    """
+    Average NEES over the GPS-aided phase (epochs outside [A:B]).
 
-    Starts sampling at k=stride, not k=0: every filter's std_pos[0] is a
-    zero-initialised placeholder (the covariance-history array is never
-    actually populated with the true initial covariance at index 0 before
-    being returned), so k=0 divides a real position error by ~0, producing a
-    ~1e10-scale NEES term that swamps the entire average regardless of the
-    other ~N/stride samples or the parameters being evaluated.
+    Starts sampling at k=stride (skips k=0): every filter initialises
+    std_pos[0] == 0 (zero uncertainty assigned before the first propagation
+    step), while p_gt[0] is now a globally-smoothed ground truth
+    (FGO-Batch/RTS) — generally a few cm-dm away from the filter's own
+    zero-initialised origin even though the filter's t=0 error is
+    operationally meaningless. That one epoch's pos_err**2/eps term is
+    ~1e11-1e12, large enough to single-handedly swamp the whole average
+    (nc ~ N/stride). (Under raw-KITTI-GPS ground truth this never triggered,
+    since the filter was initialised FROM that same raw GPS fix, making
+    pos_err[0] exactly zero — a coincidence of the old ground-truth source,
+    not a real distinction worth preserving.)
+
+    NOTE: ANEES is now reported as a diagnostic only, not a rejection gate —
+    see single_window_cost() for why the hard [0.1, 10] band was dropped.
     """
     ns, nc = 0.0, 0
     for k in range(stride, N, stride):
