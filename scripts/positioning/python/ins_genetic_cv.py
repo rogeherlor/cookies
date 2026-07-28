@@ -289,31 +289,24 @@ def generate_outage_configs(nav_data: NavigationData, n_outages: int,
 
 def _single_cost(filter_name: str, nd: NavigationData, params: dict,
                  t1: float, d: float, use_3d: bool,
-                 gate_anees: bool = True, gt: dict = None) -> float:
+                 gate_anees: bool = False, gt: dict = None) -> float:
     """
     Run one filter on one (dataset, outage) pair and return the cost.
 
-    Delegates to `ins_cost.single_window_cost`, which implements the
-    journal-grade three-component normalised cost
+    Delegates to `ins_cost.single_window_cost`, the journal-grade
+    three-component normalised cost
         J = ATE_outage / 1 m  +  t_rel / 1 %  +  r_rel / 1 deg/km
-    plus the ANEES consistency band [0.1, 10] as a hard rejection
-    constraint. See `ins_cost.py` for the rationale.
 
-    `gate_anees=True` (default) gates the cost on ANEES — used during GA
-    training so the optimiser can't game the cost by under-reporting
-    covariance. `gate_anees=False` is used during validation where we
-    want a finite number to report regardless of consistency.
-
-    Smoothers are exempt from the ANEES gate: their GTSAM marginal covariance
-    is a batch/window MAP covariance (not a per-step propagated filter
-    covariance) and is strongly over-confident relative to the true error, so
-    ANEES lands far outside [0.1, 10] by construction and the gate would reject
-    every candidate.  For them the cost reduces to the accuracy terms
-    ATE_outage + t_rel + r_rel, which is exactly what should be minimised.
+    The ANEES consistency band [0.1, 10] is NO LONGER a rejection gate (it is
+    still computed and available as a diagnostic via return_components). It was
+    dropped because it binds unevenly: the GTSAM smoothers are over-confident
+    by construction and the vanilla EKFs are poorly calibrated on several KITTI
+    sequences, so the band rejected otherwise-accurate candidates for those
+    filters while only the enhanced EKFs could satisfy it. Every filter is now
+    tuned on the identical accuracy objective — uniform and defensible. See
+    `ins_cost.single_window_cost` for the full rationale.
     """
     module = _FILTER_MODULES[filter_name]
-    if filter_name in SMOOTHER_FILTERS:
-        gate_anees = False
     if gt is None:
         gt = ins_cost.get_fgo_batch_gt(nd)
     return ins_cost.single_window_cost(module, nd, params, t1, d, use_3d,
