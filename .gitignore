@@ -62,6 +62,7 @@ datasets/*
 *.cproject
 *.project
 simplicity/**/*.mk
+simplicity/Inartrans_porting/tests/test_*
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
