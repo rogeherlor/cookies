@@ -8,18 +8,14 @@ is for. This image is the deployment target for step 4 (`4_inference.py`-style
 scripts) — on this PC for local testing, and on the Raspberry Pi 5 for the real
 target hardware.
 
-**Version pin: 4.20.0.** That's the firmware flashed on the Hailo-8/8L
-devices this repo has actually been run against (see `hailort.log` in each
-`../<approach>/` dir — it logs `firmware_version is: 4.20.0` from a prior
-successful run). HailoRT talking to mismatched firmware fails at runtime even
-when everything installs cleanly, so keep the installed HailoRT version and
-the on-device firmware in lockstep. Check the device's firmware version with
-`hailortcli fw-control identify` before changing `HAILORT_VERSION` in the
-Dockerfile.
+HailoRT is pinned to 4.20.0, the firmware on the devices used here. A HailoRT
+that does not match the on-device firmware installs cleanly and then fails at
+runtime, so check `hailortcli fw-control identify` before changing
+`HAILORT_VERSION` in the Dockerfile.
 
 ## 1. Get HailoRT (per architecture)
 
-**Raspberry Pi 5 (arm64): nothing to do.** The Dockerfile installs
+On the Raspberry Pi 5 (arm64) there is nothing to do: the Dockerfile installs
 `hailort` + `python3-hailort` straight from Raspberry Pi's public apt repo
 (`archive.raspberrypi.com`) — no Developer Zone account, no manual wheel.
 This mirrors Hailo's official release and is what this repo's Pi is

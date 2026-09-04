@@ -42,8 +42,7 @@ datasets/raw_kitti/     scripts/   config/
 seq ∈ {01, 04, 06, 07, 08, 09, 10}. Expect **28 `.hef`** and **21 postproc**
 files in total.
 
-The `_postproc` files are **not optional and not interchangeable between
-folds**: for `tlio` and `tartan_imu` the accelerator holds only the backbone and
+The `_postproc` files are neither optional nor interchangeable between folds: for `tlio` and `tartan_imu` the accelerator holds only the backbone and
 the head runs on the host from those weights, exported from the same fold
 checkpoint. `_fold_hef()` refuses a `.hef` whose matching postproc is missing.
 

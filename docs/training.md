@@ -9,7 +9,7 @@ DL filter. All commands are run from `scripts/positioning/python/`.
 
 | Filter | Paper | Script | Output artifact |
 |--------|-------|--------|-----------------|
-| IEKF AI-IMU | Brossard et al., IEEE TIV 2020 | `dl_filters/deep_iekf/train_ai_imu.py` | `artifacts/deep_iekf/fold_<SEQ>.p` |
+| Deep IEKF (AI-IMU) | Brossard et al., IEEE TIV 2020 | `dl_filters/deep_iekf/train_ai_imu.py --causal` | `artifacts/deep_iekf_online/fold_<SEQ>.p` |
 | TLIO | Liu et al., IEEE RA-L 2020 | `dl_filters/tlio/train_tlio.py` | `artifacts/tlio/fold_<SEQ>.pt` |
 | Deep KF | Hosseinyalamdary, MDPI Sensors 2018 | `dl_filters/deep_kf/train_deep_kf.py` | `artifacts/deep_kf/fold_<SEQ>.pt` |
 | Tartan IMU | Zhao et al., CVPR 2025 | `dl_filters/tartan_imu/train_tartan.py` | `artifacts/tartan_imu/lora_fold_<SEQ>.pt` |
@@ -29,21 +29,38 @@ pip install huggingface_hub>=0.20     # Tartan IMU weight download
 
 ---
 
-## 1. IEKF AI-IMU (Brossard et al. 2020)
+## 1. Deep IEKF / AI-IMU (Brossard et al. 2020)
 
-Pre-trained weights ship with the `external/ai-imu-dr/` clone and are searched
-automatically. No mandatory training step — the filter works out-of-the-box.
+The acausal checkpoint is tracked in this repo at `artifacts/deep_iekf/iekfnets.p`
+(the `external/ai-imu-dr/` clone is source only), and is found automatically, so the
+diagnostic batch filter runs out of the box. The filter that is actually evaluated does
+need training.
 
-**Optional LOO re-training** (improves per-sequence accuracy):
+`iekf_ai_imu.py` resolves it in this order: `AI_IMU_WEIGHTS`,
+`artifacts/deep_iekf/iekfnets.p`, then `external/ai-imu-dr/src/iekfnets.p` — the last
+being where an upstream training run would save one.
+
+The evaluated filter is the causal variant: a left-padded CausalMesNet in place of
+MesNet, so no sample sees its own future. Causal is the default, and `--held-out`
+takes a full drive name rather than a sequence number. The simplest route is
+`ins_train.py ai_imu`, which does the sequence-to-drive translation; directly:
 
 ```bash
 # From scripts/positioning/python/
-for SEQ in 01 04 06 07 08 09 10; do
-    python dl_filters/deep_iekf/train_ai_imu.py --val-seq $SEQ
-done
+python dl_filters/deep_iekf/train_ai_imu.py \
+    --mode loo --held-out 2011_09_30_drive_0028_extract \
+    --epochs 400 --output ../../../artifacts/deep_iekf_online
 ```
 
-Weights are saved to `artifacts/deep_iekf/fold_<SEQ>.p`.
+Weights go to `artifacts/deep_iekf_online/fold_<SEQ>.p`, alongside a `_norm.p` holding
+that fold's input normalisation. Passing `--no-causal` trains the acausal batch model
+into `artifacts/deep_iekf/` instead; that one is a diagnostic reference and is off by
+default in `ins_compare.py`.
+
+Warm-starting the causal conv layers from acausal weights is available
+(`--warm-start`) but off by default, so a causal-vs-acausal comparison is not
+confounded.
+
 The runner picks the correct fold automatically via `nav_data.dataset_name`.
 
 ---
@@ -134,10 +151,17 @@ snapshot_download(
 )
 ```
 
-The runner searches for weights in this order:
+The runner searches for weights in this order
+(`tartan_runner.py::_find_tartan_weights`):
 1. `TARTAN_IMU_WEIGHTS` environment variable
-2. `external/tartan_imu/tartan_imu_base.pt`
-3. `artifacts/tartan_imu/tartan_imu_base.pt`
+2. `external/tartan_imu/tartan_imu_base.pt` (legacy name)
+3. `artifacts/tartan_imu/tartan_imu_base.pt` (legacy name)
+4. `external/tartan_imu/checkpoints/foundation_model/checkpoint_<N>.pt` — the layout
+   `snapshot_download` above produces; the highest `N` wins
+
+Note that the submodule stores these in Git LFS, so `git submodule update` alone
+leaves pointer stubs behind. Use `snapshot_download` as above, or
+`git -C external/tartan_imu lfs pull`.
 
 Alternatively, set the env var directly:
 
@@ -178,9 +202,10 @@ Run from `scripts/positioning/python/`:
 ```bash
 SEQS="01 04 06 07 08 09 10"
 
-# TLIO
+# TLIO — 50 epochs is what ins_train.py uses and what the published results ran;
+# the trainer's own default of 200 applies only to direct invocation.
 for SEQ in $SEQS; do
-    python dl_filters/tlio/train_tlio.py --mode loo --val-seq $SEQ --epochs 200
+    python dl_filters/tlio/train_tlio.py --mode loo --val-seq $SEQ --epochs 50
 done
 
 # Deep KF
@@ -232,8 +257,11 @@ python ins_compare.py --test-seq 08
 
 ```
 artifacts/
+├── deep_iekf_online/
+│   ├── fold_01.p  …  fold_10.p     # causal AI-IMU — the evaluated filter
+│   └── fold_01_norm.p …            # per-fold input normalisation
 ├── deep_iekf/
-│   ├── fold_01.p  …  fold_10.p     # AI-IMU (optional re-train)
+│   ├── fold_01.p  …  fold_10.p     # acausal batch AI-IMU (diagnostic only)
 ├── tlio/
 │   ├── fold_01.pt …  fold_10.pt
 │   └── tlio_resnet.pt              # all-seqs checkpoint (--mode all)

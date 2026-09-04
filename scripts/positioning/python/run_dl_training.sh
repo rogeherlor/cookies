@@ -18,10 +18,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Known DL filter names. Anything in PASSTHROUGH_ARGS that matches one of these
-# is routed as a positional argument *before* --seqs, so argparse's nargs='+'
-# does not swallow it into the sequence list (which is what happened with
-# `./run_dl_training.sh deep_kf` interpreting deep_kf as an 8th sequence).
+# Known DL filter names. Anything in PASSTHROUGH_ARGS matching one of these is routed
+# as a positional argument before --seqs, so argparse's nargs='+' does not swallow it
+# into the sequence list.
 KNOWN_FILTERS=("tlio" "deep_kf" "tartan_imu" "ai_imu")
 
 # ── Parse --dataset and split remaining args into (filters, other) ────────────

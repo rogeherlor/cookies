@@ -15,7 +15,8 @@ import contextily as ctx
 import pymap3d as pm
 
 _HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parent.parent.parent
+_HAILO_DIR = _HERE.parent
+_REPO_ROOT = _HERE.parent.parent.parent.parent
 _PY_DIR = _REPO_ROOT / "scripts/positioning/python"
 sys.path.insert(0, str(_PY_DIR))
 
@@ -33,9 +34,9 @@ OUTAGE_START, OUTAGE_DURATION = 40.0, 60.0
 nav = data_loader.get_kitti_dataset(SEQ)
 lla0 = nav.lla0
 
-gt = np.load(_HERE / "full_benchmark_results" / "gt_cache" / f"{SEQ}.npz")
+gt = np.load(_HAILO_DIR / "full_benchmark_results" / "gt_cache" / f"{SEQ}.npz")
 p_gt = gt["p"]
-p_est = np.load(_HERE / "full_benchmark_results" / "seq08_traj_cache" / f"{args.approach}.npz")["p"]
+p_est = np.load(_HAILO_DIR / "full_benchmark_results" / "seq08_traj_cache" / f"{args.approach}.npz")["p"]
 n = min(len(p_est), len(p_gt))
 
 diff = p_gt[:n] - p_est[:n]

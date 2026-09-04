@@ -17,10 +17,11 @@ from pathlib import Path
 import numpy as np
 
 _HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parent.parent.parent
+_HAILO_DIR = _HERE.parent
+_REPO_ROOT = _HERE.parent.parent.parent.parent
 _PY_DIR = _REPO_ROOT / "scripts/positioning/python"
 sys.path.insert(0, str(_PY_DIR))
-sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HAILO_DIR))
 
 import data_loader
 import filter_params as fp
@@ -43,9 +44,9 @@ params = tuned.get(tuned_key)
 print(f"DEBUG dataset_name={nav.dataset_name!r} tuned_key={tuned_key!r} params={params!r}", flush=True)
 
 if args.kind == "classical":
-    _, _, result = w._run_classical(args.approach, nav, params, OUTAGE_CFG, use_3d=True)
+    _, _, result, _ = w._run_classical(args.approach, nav, params, OUTAGE_CFG, use_3d=True)
 elif args.kind == "dl":
-    _, _, result = w._run_dl(args.approach, nav, params, OUTAGE_CFG, backend="cpu", seq=SEQ, use_3d=True)
+    _, _, result, _ = w._run_dl(args.approach, nav, params, OUTAGE_CFG, backend="cpu", seq=SEQ, use_3d=True)
 else:
     _, _, result = w._run_smoother(args.approach, nav, params, OUTAGE_CFG, use_3d=True)
 

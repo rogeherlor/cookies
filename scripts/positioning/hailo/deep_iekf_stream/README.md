@@ -34,18 +34,18 @@ deep_iekf_stream_fold_{01,04,06,07,08,09,10}_postproc.npz
 sequence when present (else falls back to the 4544 HEF).
 `DEEP_IEKF_STREAM_MODE=per_tick|block` (default `block`) picks the drive mode.
 
-## On-device output = bounded z (NOT the scaled covariance)
+## On-device output is a bounded z, not the scaled covariance
 
 The HEF emits `z = tanh(cov_lin(cov_net(u))) ∈ [-1,1]`; the host reconstructs
 `cov = cov0 · 10**(beta · z)`. `deep_iekf_stream_fold_XX_postproc.npz` carries
 `u_loc, u_std` (per-fold input normalisation) **and** `beta, cov0` (the host
 scaling constants). `HailoDeepIEKFStream` does this reconstruction.
 
-**Why:** baking the `cov0·10**(beta·z)` exponential on-device (as the 4544 HEF
-does) makes the HEF emit a heavy-tailed 0…~10000 range that INT8 quantises
-coarsely. For folds whose covariances spike this is catastrophic — **fold_06**
-(cov_up up to ~8800) drifted **153 m**. A bounded `z` quantises uniformly for
-every fold; fold_06 then reproduces the float trajectory to **2.9 cm**.
+Baking the `cov0·10**(beta·z)` exponential on-device, as the 4544 HEF does, makes the
+HEF emit a heavy-tailed 0…~10000 range that INT8 quantises coarsely. Folds whose
+covariances spike suffer badly: fold_06 (cov_up up to ~8800) drifts 153 m. A bounded
+`z` quantises uniformly for every fold, and fold_06 then reproduces the float
+trajectory to 2.9 cm.
 
 ## Validation (SDK_QUANTIZED emulator vs float64 CausalMesNet, end-to-end IEKF ATE)
 

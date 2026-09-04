@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # run_dl_training_parallel.sh — LOO training for the DL filters, N folds at once.
 #
-# Identical to run_dl_training.sh / ins_train.py in WHAT it trains: same
-# scripts, same epochs, same nested LOO split (dl_filters/_validation.py
-# ::inner_split). The only difference is scheduling — folds are independent
-# processes writing to distinct fold_<seq>.pt files, so running them
-# concurrently changes no result, only the wall time.
+# Trains exactly what run_dl_training.sh / ins_train.py train: same scripts, same
+# epochs, same nested LOO split (dl_filters/_validation.py::inner_split). Only the
+# scheduling differs — folds are independent processes writing to distinct
+# fold_<seq>.pt files, so concurrency changes the wall time and nothing else.
 #
-# Why: Deep KF is ~0.85 min/epoch x 150 epochs ~= 2 h per fold, and one job
-# leaves the GPU at ~32 % (the LSTM loop is host-bound). Sequentially that is
-# ~15 h for Deep KF alone; at concurrency 7 it is ~2 h.
+# It is worth it: Deep KF is ~0.85 min/epoch x 150 epochs ~= 2 h per fold, and a single
+# job leaves the GPU at ~32 % because the LSTM loop is host-bound. Sequentially that is
+# ~15 h for Deep KF alone; at concurrency 7, ~2 h.
 #
 # Usage:
 #   ./run_dl_training_parallel.sh                      # all 3 models, 7 folds

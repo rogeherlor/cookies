@@ -28,8 +28,11 @@ and ARM64, so the normal workflow is: compile on this PC, copy the resulting
 
 ## Running the pipeline yourself
 
-Everything here runs inside the `hailo_ai_sw_suite_2025-01` Docker image (has the
-DFC, HailoRT, and PCIe device access). Start it with:
+Everything here runs inside the `hailo_ai_sw_suite_2025-01` Docker image, which has
+the DFC, HailoRT and PCIe device access. The image is a gated download from the Hailo
+Developer Zone (hailo.ai's developer portal, "Software Downloads" → AI Software Suite);
+it is not on Docker Hub and needs an account. Load the tarball with `docker load -i`,
+then start it:
 
 ```bash
 docker run -d --privileged --gpus all \
@@ -51,21 +54,16 @@ python3 3_compilation.py       # writes <approach>.hef + <approach>_compiled_mod
 python3 4_inference.py         # real hardware run, prints HEF vs PyTorch MAE
 ```
 
-`tartan_imu` takes `--artifact <repo>/artifacts/tartan_imu/lora_fold_01.pt` on
-both `0_onnx_converter.py` and `2_optimisation.py`, mirroring `tlio`'s flag.
-Without it, both the CNN export and the PyTorch reference silently fall back to
-the zero-shot base model, which will never match a `.hef` compiled from a
-specific fold. (The `TARTAN_IMU_LORA` env var still works as an escape hatch,
-but `--artifact` is what `build_per_fold_hefs.py` uses and what these scripts
-document — an env var whose name has to match a *different* module's spelling
-is too easy to get silently wrong.)
+`tartan_imu` needs `--artifact <repo>/artifacts/tartan_imu/lora_fold_01.pt` on both
+`0_onnx_converter.py` and `2_optimisation.py`, mirroring `tlio`'s flag. Without it the
+CNN export and the PyTorch reference both fall back to the zero-shot base model, which
+cannot match a `.hef` compiled from a specific fold. `build_per_fold_hefs.py` uses
+`--artifact`; the `TARTAN_IMU_LORA` env var also still works.
 
-`deep_iekf` defaults to `artifacts/deep_iekf_online/iekfnets.p` — **if a
-training run is writing to that folder, pass an explicit, already-completed
-fold instead** (`--weights <repo>/artifacts/deep_iekf_online/fold_01.p`, or
-`fold_04.p`/`fold_06.p`/`fold_07.p`, whichever are already finished) on
-`0_onnx_converter.py`, `2_optimisation.py`, and `4_inference.py` alike — the
-default path is exactly the file the training loop is actively overwriting.
+`deep_iekf` defaults to `artifacts/deep_iekf_online/iekfnets.p`, which is the file a
+training run writes to. While training is in flight, pass a finished fold explicitly
+(`--weights <repo>/artifacts/deep_iekf_online/fold_01.p`) on `0_onnx_converter.py`,
+`2_optimisation.py` and `4_inference.py` alike.
 
 ## Per-LOO-fold compilation (required)
 
@@ -202,134 +200,79 @@ KITTI sequence (8–40% of most drives; the runtime raises outright if
 replacement, validated end-to-end on real Hailo-8L hardware across all 7 LOO
 folds, that supersedes it.
 
-## Bugs found and fixed
+## Toolchain constraints
 
-### Shared across all four approaches (`1_parsing.py`, `4_inference.py`)
+Things the Hailo toolchain requires that are not obvious from its documentation, and
+that the scripts here already handle. Worth knowing before changing an export.
 
-- **Wrong `hw_arch`.** Every `1_parsing.py` hardcoded `CHOSEN_HW_ARCH = "hailo8"`.
-  This device is a **Hailo-8L**, a different (smaller) architecture — a HEF
-  compiled for `hailo8` cannot run on it. Fixed to `"hailo8l"`.
-- **`configured_model.run([bindings], timeout_ms=1000)`** — the installed
-  HailoRT 4.20.0 Python API takes `timeout` as a **positional** argument, not
-  a `timeout_ms` keyword. This raised immediately.
-- **Missing `set_format_type(FormatType.FLOAT32)`** on input/output streams.
-  Without it HailoRT defaults to `UINT8` — passing float32 numpy buffers then
-  fails with "Input buffer size N is different than expected N/4" (byte vs.
-  element count mismatch).
-- **Missing `configured_model.activate()` / `.deactivate()`.** With the
-  scheduler disabled (`HAILO_SCHEDULING_ALGORITHM_NONE`, the default),
-  `run()` without an explicit `activate()` **returns all-zero output with no
-  exception raised.** This is the most dangerous one — it looks exactly like
-  "the model produces garbage on Hailo" rather than a missing API call.
-- **`pymap3d` not installed** in the Hailo Docker image's Python env — KITTI
-  calibration data loading silently fell back to synthetic random noise,
-  which gives the quantizer meaningless activation ranges. `pip install
-  pymap3d` inside the container fixes it (real KITTI data confirmed via the
-  "Calibration: using N real KITTI ..." log line).
+### All four models
 
-### `tlio`-specific
+- `hw_arch` must be `"hailo8l"` in every `1_parsing.py`. A HEF compiled for `hailo8`
+  will not run on the 8L.
+- HailoRT 4.20.0's `configured_model.run()` takes the timeout positionally, not as a
+  `timeout_ms` keyword.
+- Input and output streams need `set_format_type(FormatType.FLOAT32)`. The default is
+  `UINT8`, and passing float32 buffers then fails on a byte-versus-element size
+  mismatch.
+- `configured_model.activate()` is required. With the scheduler disabled
+  (`HAILO_SCHEDULING_ALGORITHM_NONE`, the default), `run()` without it returns all
+  zeros and raises nothing — which reads as a garbage model rather than a missing call.
+- HailoRT needs `C_CONTIGUOUS` buffers, so NHWC transposes go through
+  `np.ascontiguousarray()`.
+- `pymap3d` must be installed in the container. Without it, KITTI calibration loading
+  falls back to synthetic noise and the quantiser sees meaningless activation ranges.
+  The `Calibration: using N real KITTI ...` log line confirms real data.
 
-- **Raw `Conv1d` in the ONNX export.** Hailo's parser can't handle a native
-  1D conv — it misreads the input's channel count as the window length. Fixed
-  by mirroring the existing `Conv1d->Conv2d` (dummy `H=1` dimension) trick
-  already used in `tartan_imu`'s converter: `ResNet1DHailo` in
-  `tlio/0_onnx_converter.py`, verified `0.0` numerical error against the
-  original model before export.
-- **`onnxsim` corrupting the graph.** The pre-export `onnxsim.simplify()` call
-  silently mangled Conv node metadata for this specific graph shape (ResNet +
-  FC heads + Concat) — plain `onnxruntime` still loaded and ran the corrupted
-  file fine, but Hailo's parser choked, misreading the first conv's channel
-  count as the window size. Disabled `onnxsim` for `tlio`'s export; the raw
-  export parses correctly.
-- **Hailo can't run the `Flatten -> FC` head.** `UnsupportedShuffleLayerError`.
-  The DFC's own error message recommended ending the graph at the two `prep1`
-  1x1-convs — so the model is now split the same way as `tartan_imu`: Hailo
-  runs the CNN backbone through `prep1`, and the small
-  `bn1 -> flatten -> fc1 -> fc2 -> fc3` head runs on the host from weights
-  saved to `tlio_postproc.pt`.
-- **`do_constant_folding=True` fusing `prep1`'s Conv with the following
-  BatchNorm** into one node. Since the Hailo/host split boundary sits exactly
-  between those two ops, the fused node meant Hailo's output already included
-  BatchNorm — and the host-side head applied BatchNorm a **second time**.
-  Disabled constant folding for the export; `prep1` now stays an unfused,
-  pure conv on both sides of the boundary.
-- Dynamic `x.reshape(x.size(0), -1)` in the FC head traced to a
-  Shape/Gather/Reshape chain that Hailo's parser also couldn't handle
-  (`IndexError` deep in `is_windows_to_input_chain_end`). Replaced with
-  `torch.flatten(x, 1)`, which exports as a plain ONNX `Flatten` op.
-- Missing `sys.path` entry for `tlio_dataset.py` (lives one directory up from
-  where the scripts looked) — calibration/test data loading fell back to
-  synthetic data with `KITTI data unavailable (No module named 'tlio_dataset')`.
-- Non-contiguous NHWC transpose passed straight to `set_buffer()` — HailoRT
-  requires `C_CONTIGUOUS` buffers. Fixed with `np.ascontiguousarray(...)`.
+### TLIO
 
-### `tartan_imu`-specific
+- The ONNX export uses a `Conv1d`→`Conv2d` rewrite with a dummy `H=1` dimension
+  (`ResNet1DHailo` in `tlio/0_onnx_converter.py`), because Hailo's parser misreads a
+  native 1D conv's channel count as the window length. The rewrite is numerically
+  exact against the original model.
+- `onnxsim` is disabled for this export. It mangles Conv node metadata for this graph
+  shape (ResNet + FC heads + Concat); onnxruntime still runs the result, but Hailo's
+  parser does not.
+- `do_constant_folding` is disabled. Folding fuses `prep1`'s Conv with the following
+  BatchNorm, and the Hailo/host split boundary sits exactly between them — so the
+  fused node would put BatchNorm on the accelerator *and* in the host head.
+- The FC head uses `torch.flatten(x, 1)` rather than `x.reshape(x.size(0), -1)`, which
+  traces to a Shape/Gather/Reshape chain the parser cannot follow.
+- Hailo cannot run the `Flatten -> FC` head at all
+  (`UnsupportedShuffleLayerError`), so the graph ends at the two `prep1` 1x1 convs and
+  the `bn1 -> flatten -> fc1 -> fc2 -> fc3` head runs on the host from
+  `tlio_postproc.pt` — the same split `tartan_imu` uses.
 
-- **Pre-existing bug in `tartan_runner.py`**, unrelated to Hailo:
-  `_TartanIMUBackbone.forward()` did `x.reshape(B * T, C, S)` on a tensor
-  actually shaped `(B, T, S, C)`. A bare `reshape` does not transpose axes —
-  it needs `x.permute(0, 1, 3, 2).reshape(B * T, C, S)`. Confirmed empirically
-  (the reshaped tensor's per-step data did not match the equivalent
-  `.permute().reshape()`). **This method is called from three places**:
-  `train_tartan.py`'s training loop (`return_sequence=True`), the online EKF
-  velocity update in `tartan_runner.py` (`~line 675`), and the Hailo test
-  harness here — so every real (non-Hailo) use of the full 10-step window in
-  one call was silently scrambling per-step channel/sample data before this
-  fix. `artifacts/tartan_imu/lora_fold_01.pt` is a LoRA checkpoint trained
-  through this exact path — the adapter learned to work with scrambled
-  features. **Consider retraining/re-validating the LoRA folds** now that the
-  underlying reshape is correct; the numbers in the results table above are
-  measured *after* this fix, using the *existing* (pre-fix-trained) fold_01
-  checkpoint, so they may not represent the adapter's full potential accuracy.
-- **`2_optimisation.py`/`4_inference.py` never updated for the CNN/host
-  split.** `0_onnx_converter.py` already only exports the per-step CNN
-  backbone (`imu_step`, one LSTM step at a time) and saves
-  `tartan_imu_postproc.pt` (LSTM + IMU_Trunk + robot-head weights) for the
-  host side — but the comparison/inference scripts still fed the whole
-  10-step window into a single Hailo/ONNX call
-  (`ValueError: Required inputs (['imu_step']) are missing from input feed
-  (['imu_lstm'])`). Rewrote both scripts to loop over the 10 steps, run each
-  through the CNN (Hailo/ONNX), and run the saved `TartanPostproc`
-  (LSTM -> IMU_Trunk -> robot head) on the stacked per-step features — the
-  same "own new code" approach applied consistently everywhere.
-- **NHWC/NCHW flatten-order mismatch.** Hailo's per-step CNN output comes
-  back as `(1, 13, 128)` NHWC (width-then-channel); the host-side LSTM
-  expects the `(128, 13)` channel-then-width flatten order that
-  `forward_cnn()`'s `.flatten(1)` produces. Feeding Hailo's raw output
-  straight into `.reshape(1, -1)` silently reordered the 1664-dim feature
-  vector, producing a huge (MAE ~2.5) but *silent* mismatch — the fix is a
-  `.transpose()` back to channel-first before flattening.
-- `do_constant_folding=True` also disabled for `tartan_imu`'s export as a
-  precaution (see `tlio` above) — though it wasn't the actual root cause
-  here (the flatten-order bug was). With folding off, the pre-export
-  `onnxsim` call also started crashing on an unrelated ONNX-optimizer
-  assertion; disabled for the same reason as `tlio`.
+### Tartan IMU
 
-### `deep_iekf`-specific
+- Only the per-step CNN backbone goes on the accelerator; the LSTM, IMU_Trunk and
+  robot head run on the host from `tartan_imu_postproc.pt`. `2_optimisation.py` and
+  `4_inference.py` therefore loop over the 10 steps rather than feeding the whole
+  window in one call.
+- Hailo returns the per-step CNN output as `(1, 13, 128)` NHWC, width-then-channel.
+  The host-side LSTM expects the `(128, 13)` channel-first order that
+  `forward_cnn().flatten(1)` produces, so the output is transposed before flattening.
+  Reshaping directly reorders the 1664-dim feature vector silently.
+- `_TartanIMUBackbone.forward()` needs `x.permute(0, 1, 3, 2).reshape(B * T, C, S)`;
+  the input is `(B, T, S, C)` and a bare reshape does not transpose. This affects
+  every full-window call, not just the Hailo path.
+- `do_constant_folding` and `onnxsim` are both disabled here too, mirroring TLIO.
 
-- **`infer_pytorch()` fed raw, unnormalized IMU to `mes_net`.** `mes_net`
-  (`CausalMesNet.forward`) has no internal normalization — production code
-  (`TORCHIEKF.forward_nets()` in `external/ai-imu-dr/src/utils_torch_filter.py:421-426`)
-  normalizes (`u_n = (u - u_loc) / u_std`) *before* calling `mes_net`, while
-  `2_optimisation.py`/`4_inference.py` called `torch_iekf.mes_net(u, ...)`
-  directly with the raw sequence. Both ONNX and Hailo correctly receive
-  normalized input via `preprocess()`, so the "ground truth" was silently
-  comparing against the wrong reference the entire time. Fixed by normalizing
-  with the same `u_loc`/`u_std` saved to `deep_iekf_postproc.npz` before
-  calling `mes_net`, in both scripts.
-- **Misleading comparison window** — see "`deep_iekf` result detail" above;
-  not a computation bug, but the reported numbers were unusable until the
-  transient/steady-state split was added.
-- This script's own ONNX export self-check (`_finalize_onnx()` in
-  `0_onnx_converter.py`) only verifies the *ONNX file* against the in-memory
-  `MesNetFullHailo` wrapper on random inputs — it never cross-checks that
-  `MesNetFullHailo` (the Hailo reimplementation) itself matches the original
-  `CausalMesNet.forward()`. It does, to float64 precision, confirmed
-  independently — beyond the documented first-16-sample transient — but this
-  is exactly the kind of gap where a real bug in the reimplementation could
-  hide undetected; worth keeping in mind if `MesNetFullHailo` is ever changed.
+### Deep IEKF
 
-## Execution time — is Hailo actually accelerating this, and is it real-time?
+- `CausalMesNet.forward` does no internal normalisation. Production code normalises
+  `u_n = (u - u_loc) / u_std` first (`TORCHIEKF.forward_nets()` in
+  `external/ai-imu-dr/src/utils_torch_filter.py`), so `2_optimisation.py` and
+  `4_inference.py` apply the same `u_loc`/`u_std` from `deep_iekf_postproc.npz` before
+  calling `mes_net`. ONNX and Hailo already receive normalised input via
+  `preprocess()`.
+- `_finalize_onnx()` in `0_onnx_converter.py` checks the ONNX file against the
+  in-memory `MesNetFullHailo` wrapper, not against the original `CausalMesNet.forward`.
+  The two do agree to float64 precision beyond the documented first-16-sample
+  transient, but that check is not automated — worth redoing by hand if
+  `MesNetFullHailo` changes.
+
+
+## Execution time and real-time headroom
 
 Measured end-to-end (Hailo device call **+** any host-side post-processing —
 not just the DFC's static estimate), averaged over hundreds of synchronous

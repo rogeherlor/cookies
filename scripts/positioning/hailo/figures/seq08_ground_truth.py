@@ -16,13 +16,14 @@ import contextily as ctx
 import pymap3d as pm
 
 _HERE = Path(__file__).resolve().parent
-_PY_DIR = _HERE.parent / 'python'
+_HAILO_DIR = _HERE.parent
+_PY_DIR = _HAILO_DIR.parent / 'python'
 sys.path.insert(0, str(_PY_DIR))
 
 from visualize import _latlon_to_mercator, _apply_mercator_tick_labels  # noqa: E402
 from data_loader import get_kitti_dataset  # noqa: E402
 
-_REPO_ROOT = _HERE.parent.parent.parent
+_REPO_ROOT = _HERE.parent.parent.parent.parent
 OUT_DIR = _REPO_ROOT / 'images' / 'c3' / 'seq08'
 OUT_DIR.mkdir(exist_ok=True)
 
@@ -32,7 +33,7 @@ nav = get_kitti_dataset('08')
 lat_kitti = nav.lla[:, 0]
 lon_kitti = nav.lla[:, 1]
 
-gt = np.load(_HERE / 'full_benchmark_results' / 'gt_cache' / '08.npz')
+gt = np.load(_HAILO_DIR / 'full_benchmark_results' / 'gt_cache' / '08.npz')
 p_batch = gt['p']
 lat_b, lon_b, _ = pm.enu2geodetic(p_batch[:, 0], p_batch[:, 1], p_batch[:, 2],
                                    nav.lla0[0], nav.lla0[1], nav.lla0[2])

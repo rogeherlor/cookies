@@ -4,7 +4,7 @@ filter_params.py — Central parameter store for all filter × mode × dataset
 combinations.
 
 Parameters are persisted in filter_params.json (auto-created and updated by
-ins_genetic.py and ins_genetic_fast.py).  This module provides a clean Python
+ins_genetic_cv.py).  This module provides a clean Python
 API to read and write them.
 
 Structure of filter_params.json:
@@ -120,7 +120,7 @@ def print_summary() -> None:
     """Print a human-readable table of all stored parameters and their costs."""
     data = _load()
     if not data:
-        print("filter_params.json is empty — run ins_genetic_fast.py first.")
+        print("filter_params.json is empty — run ins_genetic_cv.py (or run_genetic_loo.sh) first.")
         return
 
     print()

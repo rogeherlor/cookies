@@ -3,7 +3,7 @@
 """
 For each of the 13 filters (CPU only for the 4 DL filters), run it on seq08
 with the standard 40s-start/60s-duration outage window IN ITS OWN
-SUBPROCESS (via _seq08_run_one_worker.py — see that file's docstring for
+SUBPROCESS (via _seq08_worker.py — see that file's docstring for
 why: running all 13 in one shared process silently corrupted at least one
 result), then plot the saved trajectory against the cached FGO-Batch ground
 truth for the 3.tex big-subfigure figure.
@@ -28,17 +28,18 @@ import pymap3d as pm
 import gc
 
 _HERE = Path(__file__).resolve().parent
-_REPO_ROOT = _HERE.parent.parent.parent
+_HAILO_DIR = _HERE.parent
+_REPO_ROOT = _HERE.parent.parent.parent.parent
 _PY_DIR = _REPO_ROOT / "scripts/positioning/python"
 sys.path.insert(0, str(_PY_DIR))
-sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HAILO_DIR))
 
 import data_loader
 from visualize import _latlon_to_mercator, _apply_mercator_tick_labels
 
 OUT_DIR = _REPO_ROOT / "images" / "c3" / "seq08"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-TRAJ_DIR = _HERE / "full_benchmark_results" / "seq08_traj_cache"
+TRAJ_DIR = _HAILO_DIR / "full_benchmark_results" / "seq08_traj_cache"
 TRAJ_DIR.mkdir(parents=True, exist_ok=True)
 
 SEQ = "08"
@@ -63,7 +64,7 @@ ALGOS = [
 nav = data_loader.get_kitti_dataset(SEQ)
 lla0 = nav.lla0
 
-gt = np.load(_HERE / "full_benchmark_results" / "gt_cache" / f"{SEQ}.npz")
+gt = np.load(_HAILO_DIR / "full_benchmark_results" / "gt_cache" / f"{SEQ}.npz")
 p_gt = gt["p"]
 
 A = int(OUTAGE_START * nav.sample_rate)
@@ -116,7 +117,7 @@ def plot_mercator(x_gt_, y_gt_, x_est, y_est, x_go_, y_go_, has_outage, label, s
 for key, kind, label in ALGOS:
     print(f"=== {key} ({label}) ===")
     traj_npz = TRAJ_DIR / f"{key}.npz"
-    cmd = [sys.executable, str(_HERE / "_seq08_run_one_worker.py"),
+    cmd = [sys.executable, str(_HERE / "_seq08_worker.py"),
            "--approach", key, "--kind", kind, "--seq", SEQ, "--out", str(traj_npz)]
     proc = subprocess.run(cmd, cwd=str(_REPO_ROOT), capture_output=True, text=True)
     if proc.returncode != 0:
