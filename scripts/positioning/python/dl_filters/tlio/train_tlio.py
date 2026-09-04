@@ -19,18 +19,38 @@ ResNet1D from external/tlio/src/network/model_resnet.py.
   Input : (B, 6, W)  — [gyro_ga(3) | accel_ga_motion(3)] in gravity-aligned frame
   Output: (mean(B,3), logstd(B,3)) — displacement prediction + log-std
 
-Loss
+Loss (identical to external/tlio network/losses.get_loss)
 ----
-Two-phase training following the original TLIO paper:
-  Phase 1 (MSE pre-training, first half of epochs):
-      L_mse = || dp_gt - dp_pred ||²
-
-  Phase 2 (NLL fine-tuning, second half):
-      L_nll = 0.5 * (dp_gt - dp_pred)^T @ inv(Σ) @ (dp_gt - dp_pred)
-            + 0.5 * log|Σ|
-      where Σ = diag(exp(2 * logstd[i]))
+Single diagonal-Gaussian NLL throughout, with a phase switch:
+      L = (dp_gt - dp_pred)² / (2·exp(2·logstd)) + logstd          (per-axis)
+  * epoch <  phase_switch : log-std is DETACHED → only the mean is supervised
+                            (equivalent to MSE up to the fixed-σ weighting).
+  * epoch >= phase_switch : mean and log-std train jointly.
+  logstd is floored at MIN_LOG_STD = log(1e-3).  Original hard-codes
+  phase_switch = 10 (--mse-epochs).
 
 Both dp_gt and dp_pred are in the gravity-aligned frame.
+
+Augmentation (per batch, original transform order)
+-------------------------------------------------
+  1. bias shift   — ±0.05 rad/s gyro, ±0.2 m/s² accel   (TransformAddNoiseBias)
+  2. gravity tilt — random ≤5° about a random horizontal axis (TransformPerturbGravity)
+
+Deliberate deviations from external/tlio (kept — justified by the vehicle domain)
+--------------------------------------------------------------------------------
+  * Batch size 256 (vs original 1024): KITTI's clean vehicle set is far smaller
+    than TLIO's pedestrian corpus, so a smaller batch gives more updates/epoch.
+  * Gravity removed from the accel channel (build_windows subtracts 9.81; the
+    original keeps full specific force): car motion accel is small relative to
+    gravity, so removing it emphasises the motion signal.  _perturb_gravity
+    re-adds g before tilting so the augmentation stays faithful.
+  * Yaw-normalised (heading-relative) input frame instead of the original's
+    world frame + random-yaw augmentation (TransformInYawPlane): R_ga removes
+    only roll/pitch, leaving a heading-relative frame, which already gives the
+    planar-rotation invariance the yaw augmentation provides — so that transform
+    is intentionally omitted as redundant.
+Everything else (Adam lr, no weight decay, ReduceLROnPlateau, grad-clip 0.1,
+loss schedule, ResNet1D, 1 s @ 200 Hz window) matches the original repo.
 
 LOO Clean Sequences
 -------------------
@@ -40,6 +60,7 @@ References
 ----------
 Liu et al., "TLIO: Tight Learned Inertial Odometry", IEEE RA-L 2020
 https://doi.org/10.1109/LRA.2020.3007421
+Original code: https://github.com/CathIAS/TLIO (cloned to external/tlio/)
 """
 
 import argparse
@@ -50,7 +71,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 
 # ── Path setup ───────────────────────────────────────────────────────────────
@@ -75,11 +96,15 @@ STRIDE_SECONDS = 0.05  # 50 ms stride — matches original 20 Hz training sample
 
 # ── Loss functions ────────────────────────────────────────────────────────────
 
+_GRAVITY = 9.81   # m/s² — must match the gravity removed in tlio_dataset.build_windows
+
+
 def _augment_imu(imu_w, accel_range=0.2, gyro_range=0.05):
     """
     Add per-batch random bias offsets to simulate IMU sensor error.
-    Matches the original TLIO paper's data augmentation (accel_bias_range=0.2,
-    gyro_bias_range=0.05).
+    Port of external/tlio TransformAddNoiseBias (accel_bias_range=0.2,
+    gyro_bias_range=0.05); channel order [gyro(0:3) | accel(3:6)] matches the
+    original.  Offsets are uniform in ±range and constant over the window.
     """
     B = imu_w.shape[0]
     imu_w = imu_w.clone()
@@ -88,20 +113,77 @@ def _augment_imu(imu_w, accel_range=0.2, gyro_range=0.05):
     return imu_w
 
 
-def mse_loss(dp_pred, dp_gt):
-    return ((dp_pred - dp_gt) ** 2).mean()
+def _so3_exp(rvec):
+    """Batched SO(3) exponential map (Rodrigues).  rvec (B,3) → R (B,3,3)."""
+    theta      = torch.linalg.norm(rvec, dim=1, keepdim=True)        # (B,1)
+    theta_safe = theta.clamp_min(1e-8)
+    k          = rvec / theta_safe                                   # (B,3) unit axis
+    kx, ky, kz = k[:, 0], k[:, 1], k[:, 2]
+    O          = torch.zeros_like(kx)
+    K = torch.stack([O, -kz, ky, kz, O, -kx, -ky, kx, O], dim=1).reshape(-1, 3, 3)
+    I = torch.eye(3, device=rvec.device, dtype=rvec.dtype).expand(rvec.shape[0], 3, 3)
+    s = torch.sin(theta).unsqueeze(-1)                               # (B,1,1)
+    c = (1.0 - torch.cos(theta)).unsqueeze(-1)
+    return I + s * K + c * (K @ K)
 
 
-def nll_loss(dp_pred, logstd, dp_gt):
+def _perturb_gravity(imu_w, theta_range_deg=5.0):
     """
-    Diagonal Gaussian NLL.
-    Σ = diag(exp(2·logstd))  ← TLIO paper Eq.3
-    L = 0.5 * Σ_i [(dp_gt_i - dp_pred_i)² / exp(2*logstd_i) + 2*logstd_i]
+    Port of external/tlio TransformPerturbGravity (perturb_gravity_theta_range
+    default 5.0): rotate the whole IMU window by a random tilt of magnitude
+    U[0, theta_range_deg] about a random horizontal axis, simulating error in
+    the estimated gravity direction.  This hardens the network against the
+    roll/pitch (attitude) error it will see online, where gravity alignment uses
+    the *estimated* attitude rather than ground truth.
+
+    NOTE on gravity: the original rotates the gravity-*containing* specific force,
+    so a 5° tilt injects ~g·sin(5°) ≈ 0.85 m/s² of horizontal accel — the
+    meaningful signal.  Our windows have gravity removed (build_windows subtracts
+    9.81 from accel_z), so we re-add g, rotate, then subtract g again to reproduce
+    the original's effect on the motion accel.
     """
-    err   = dp_gt - dp_pred                         # (B, 3)
-    inv_var = torch.exp(-2. * logstd)               # (B, 3)
-    loss  = 0.5 * (err ** 2 * inv_var + 2. * logstd)
-    return loss.mean()
+    B   = imu_w.shape[0]
+    dev = imu_w.device
+    dt  = imu_w.dtype
+    azim  = torch.rand(B, device=dev, dtype=dt) * 2.0 * np.pi
+    theta = torch.rand(B, device=dev, dtype=dt) * (np.pi * theta_range_deg / 180.0)
+    axis  = torch.stack([torch.cos(azim), torch.sin(azim),
+                         torch.zeros_like(azim)], dim=1)             # (B,3) horizontal
+    R = _so3_exp(theta.unsqueeze(1) * axis)                          # (B,3,3)
+
+    out   = imu_w.clone()
+    accel = out[:, 3:6, :].clone()
+    accel[:, 2, :] += _GRAVITY                                       # re-add gravity reaction
+    out[:, 0:3, :] = torch.einsum('bij,bjt->bit', R, out[:, 0:3, :])  # rotate gyro
+    accel = torch.einsum('bij,bjt->bit', R, accel)                  # rotate full accel
+    accel[:, 2, :] -= _GRAVITY                                       # back to motion-only accel
+    out[:, 3:6, :] = accel
+    return out
+
+
+MIN_LOG_STD = float(np.log(1e-3))   # logstd floor — external/tlio network/losses.py
+
+
+def loss_distribution_diag(dp_pred, logstd, dp_gt):
+    """
+    Diagonal-Gaussian NLL, identical to external/tlio loss_distribution_diag:
+        L = (dp_gt - dp_pred)² / (2·exp(2·logstd)) + logstd        (per-axis, B×3)
+    logstd floored at MIN_LOG_STD = log(1e-3) as in the original.
+    """
+    logstd = torch.clamp(logstd, min=MIN_LOG_STD)
+    return (dp_pred - dp_gt) ** 2 / (2. * torch.exp(2. * logstd)) + logstd
+
+
+def get_loss(dp_pred, logstd, dp_gt, epoch, phase_switch):
+    """
+    Original TLIO schedule (external/tlio network/losses.get_loss): before
+    `phase_switch` the log-std is detached so only the mean is supervised
+    (≈ MSE up to the fixed-σ weighting); afterwards mean and log-std train
+    jointly.  The original hard-codes phase_switch = 10.
+    """
+    if epoch < phase_switch:
+        logstd = logstd.detach()
+    return loss_distribution_diag(dp_pred, logstd, dp_gt).mean()
 
 
 # ── Dataset helpers ───────────────────────────────────────────────────────────
@@ -166,7 +248,19 @@ def build_dataset(train_seqs: list, val_seq: str = None, sample_rate: float = 10
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
+def _set_seed(seed):
+    """Seed Python/NumPy/Torch RNGs for reproducible training. No-op if seed is None."""
+    if seed is None:
+        return
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    print(f"  RNG seed = {seed} (reproducible training)")
+
+
 def train(args):
+    _set_seed(getattr(args, 'seed', 42))
     import importlib.util
     _mf_path = _HERE / 'network/model_factory.py'
     _spec = importlib.util.spec_from_file_location('_tlio_model_factory', _mf_path)
@@ -184,19 +278,27 @@ def train(args):
     else:
         CLEAN_SEQS_ACTIVE = CLEAN_SEQS   # kitti clean seqs
 
-    # Determine sequences
+    # Determine sequences.
+    # NESTED split: --val-seq names the LOO HELD-OUT (test) sequence, which is
+    # never loaded here. The inner validation sequence that drives best-checkpoint
+    # selection and ReduceLROnPlateau is carved out of the remaining training
+    # sequences by dl_filters._validation.inner_split — see that function for why
+    # validating on the held-out sequence biased these rows.
     if args.mode == 'loo':
         if args.val_seq not in CLEAN_SEQS_ACTIVE:
             raise ValueError(f"--val-seq must be one of {CLEAN_SEQS_ACTIVE}")
-        train_seqs = [s for s in CLEAN_SEQS_ACTIVE if s != args.val_seq]
-        val_seq    = args.val_seq
+        from dl_filters._validation import inner_split
+        held_out_seq = args.val_seq
+        train_seqs, val_seq = inner_split(CLEAN_SEQS_ACTIVE, held_out_seq)
         out_name   = f'fold_{args.val_seq}.pt'
     else:  # all
+        held_out_seq = None
         train_seqs = CLEAN_SEQS_ACTIVE
         val_seq    = None
         out_name   = 'tlio_resnet.pt'
 
-    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seq}")
+    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  "
+          f"inner_val={val_seq}  held_out(test, unused)={held_out_seq}")
 
     # Window size in TARGET_HZ (200 Hz) samples — same as build_windows
     sample_rate = 100.0
@@ -224,23 +326,80 @@ def train(args):
         start_epoch = ckpt.get('epoch', 0) + 1
         print(f"Resumed from {args.resume} at epoch {start_epoch}")
 
-    optimizer  = Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
-    # LR warmup: 1% → 100% of lr over 5 epochs, then cosine decay to 1e-6
-    _warmup_epochs = 5
-    _warmup = LinearLR(optimizer, start_factor=0.01, end_factor=1.0,
-                       total_iters=_warmup_epochs)
-    _cosine = CosineAnnealingLR(optimizer, T_max=max(args.epochs - _warmup_epochs, 1),
-                                eta_min=1e-6)
-    scheduler = SequentialLR(optimizer, schedulers=[_warmup, _cosine],
-                             milestones=[_warmup_epochs])
+    # Optimizer + scheduler match external/tlio network/train.py exactly:
+    # plain Adam (no weight decay) + ReduceLROnPlateau(factor=0.1, patience=10).
+    optimizer = Adam(model.parameters(), lr=args.lr)
+    scheduler = ReduceLROnPlateau(optimizer, factor=0.1, patience=10, eps=1e-12)
 
-    phase_switch = args.mse_epochs    # MSE pre-training for fixed N epochs, then NLL
+    phase_switch = args.mse_epochs    # log-std detached (mean-only) before this epoch
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = output_dir / out_name.replace('.pt', '_ckpt.pt')
+    val_metric_path = output_dir / out_name.replace('.pt', '_val_metric.pt')
 
     best_val_loss = float('inf')
+    # SELECTION criterion. best_J is the three-component journal cost
+    #     J = ATE_outage/1m + t_rel/1% + r_rel/1(deg/km)
+    # measured by closing the loop on the INNER-VALIDATION sequence with the
+    # standard 40s/60s outage — i.e. the same objective ins_genetic_cv.py
+    # minimises for the seven classical filters.
+    #
+    # It replaces one-step NLL validation loss for choosing which epoch to
+    # deploy. NLL cannot see this at all: these models are trained OUTAGE-FREE
+    # (run_dl_training.sh: "outages are simulated only at evaluation time"), so
+    # a one-step density score on clean data carries no information about the
+    # dead-reckoning behaviour the tables actually report. Selecting on it was
+    # effectively arbitrary with respect to the reported metric, and measurably
+    # so — Deep KF's LOO outage mean moved between 86 m and 557 m depending only
+    # on which epoch that blind criterion happened to pick.
+    best_J = float('inf')
+    best_J_epoch = None
+
+    # Journal-metric hook. NOT used in backprop — it selects the checkpoint.
+    # It scores the INNER validation sequence, never the LOO held-out one.
+    _val_hook = None
+    if args.mode == 'loo' and val_seq is not None and args.val_metric_every > 0:
+        try:
+            import os as _os
+            import importlib
+            from dl_filters._validation import (validate_with_journal_metric,
+                                                format_val_line)
+            _tlio_runner = importlib.import_module(
+                'dl_filters.tlio.tlio_runner')
+
+            def _val_hook(_epoch, _model):
+                """Score this epoch on the inner-val sequence; returns J (inf on
+                failure). The weights have to reach the runner through a file
+                because the runner resolves its own checkpoint — writing them to
+                val_metric_path and pointing TLIO_WEIGHTS at it is the same
+                mechanism the evaluation uses, so the number measured here is
+                produced by the identical code path that produces the table."""
+                _model.eval()
+                torch.save({'epoch': _epoch,
+                            'model_state_dict': _model.state_dict(),
+                            'args': vars(args)},
+                           val_metric_path)
+                _prev = _os.environ.get('TLIO_WEIGHTS')
+                _os.environ['TLIO_WEIGHTS'] = str(val_metric_path)
+                _J = float('inf')
+                try:
+                    _m = validate_with_journal_metric(
+                        filter_module=_tlio_runner, val_seq=val_seq)
+                    print(format_val_line(_epoch, _m))
+                    _J = float(_m.get('J', float('inf')))
+                except Exception as _e:
+                    print(f"  [val] journal-metric hook failed: {_e}")
+                finally:
+                    if _prev is None:
+                        _os.environ.pop('TLIO_WEIGHTS', None)
+                    else:
+                        _os.environ['TLIO_WEIGHTS'] = _prev
+                _model.train()
+                return _J
+        except Exception as _e:
+            print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
+            _val_hook = None
 
     for epoch in range(start_epoch, args.epochs):
         # ── Training ───────────────────────────────────────────────────
@@ -248,24 +407,24 @@ def train(args):
         total_loss = 0.
         for imu_w, dp_target in train_loader:
             imu_w     = _augment_imu(imu_w.to(device))
+            if args.perturb_gravity:
+                imu_w = _perturb_gravity(imu_w, args.gravity_theta_deg)
             dp_target = dp_target.to(device)
 
             optimizer.zero_grad()
             mean_pred, logstd_pred = model(imu_w)
 
-            if epoch < phase_switch:
-                loss = mse_loss(mean_pred, dp_target)
-            else:
-                loss = nll_loss(mean_pred, logstd_pred, dp_target)
+            loss = get_loss(mean_pred, logstd_pred, dp_target, epoch, phase_switch)
 
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.)
+            # Grad clip 0.1 matches external/tlio network/train.py.
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1,
+                                     error_if_nonfinite=True)
             optimizer.step()
             total_loss += loss.item() * imu_w.size(0)
 
-        scheduler.step()
         avg_train = total_loss / len(train_ds)
-        phase = 'MSE' if epoch < phase_switch else 'NLL'
+        phase = 'NLL(μ)' if epoch < phase_switch else 'NLL(μ,σ)'
         # Print every epoch for first 50, then every 10th, always print last
         _should_print = (epoch < 50) or ((epoch + 1) % 10 == 0) or (epoch == args.epochs - 1)
 
@@ -278,32 +437,25 @@ def train(args):
                     imu_w     = imu_w.to(device)
                     dp_target = dp_target.to(device)
                     mean_pred, logstd_pred = model(imu_w)
-                    if epoch < phase_switch:
-                        loss = mse_loss(mean_pred, dp_target)
-                    else:
-                        loss = nll_loss(mean_pred, logstd_pred, dp_target)
+                    loss = get_loss(mean_pred, logstd_pred, dp_target,
+                                    epoch, phase_switch)
                     val_loss += loss.item() * imu_w.size(0)
             avg_val = val_loss / len(val_ds)
+            # LR schedule still follows the inner-val NLL: it is a smooth,
+            # every-epoch signal, which is what a plateau detector needs. Only
+            # CHECKPOINT SELECTION moves to the journal metric, below.
+            scheduler.step(avg_val)
+            best_val_loss = min(best_val_loss, avg_val)
             if _should_print:
                 print(f"Epoch {epoch+1:4d}/{args.epochs} [{phase}]  "
                       f"train={avg_train:.4f}  val={avg_val:.4f}  "
-                      f"lr={scheduler.get_last_lr()[0]:.2e}")
-
-            # Save best
-            if avg_val < best_val_loss:
-                best_val_loss = avg_val
-                torch.save({
-                    'epoch':            epoch,
-                    'model_state_dict': model.state_dict(),
-                    'val_loss':         avg_val,
-                    'args':             vars(args),
-                }, output_dir / out_name)
-                print(f"  → saved best weights ({out_name})")
+                      f"lr={optimizer.param_groups[0]['lr']:.2e}")
         else:
+            scheduler.step(avg_train)   # no val set (--mode all): plateau on train loss
             if _should_print:
                 print(f"Epoch {epoch+1:4d}/{args.epochs} [{phase}]  "
                       f"train={avg_train:.4f}  "
-                      f"lr={scheduler.get_last_lr()[0]:.2e}")
+                      f"lr={optimizer.param_groups[0]['lr']:.2e}")
 
         # Periodic checkpoint (every 20 epochs)
         if (epoch + 1) % 20 == 0:
@@ -312,6 +464,39 @@ def train(args):
                 'model_state_dict': model.state_dict(),
                 'args':             vars(args),
             }, ckpt_path)
+
+        # Journal-metric validation — THIS is what selects the deployed epoch.
+        # Never enters backprop; it only decides which weights are kept.
+        if _val_hook is not None and (
+                (epoch + 1) % args.val_metric_every == 0
+                or epoch == args.epochs - 1):
+            _J = _val_hook(epoch, model)
+            if _J < best_J:
+                best_J, best_J_epoch = _J, epoch
+                torch.save({
+                    'epoch':            epoch,
+                    'model_state_dict': model.state_dict(),
+                    'val_loss':         avg_val if val_loader is not None else None,
+                    'journal_J':        _J,
+                    'selection':        'journal_metric_inner_val',
+                    'inner_val_seq':    val_seq,
+                    'args':             vars(args),
+                }, output_dir / out_name)
+                print(f"  → saved best weights ({out_name})  J={_J:.4f} @ epoch {epoch}")
+
+    # Every scored epoch was rejected (J=inf everywhere, e.g. the filter
+    # diverged on the inner-val sequence at every checkpoint). Saving the last
+    # epoch anyway would look identical on disk to a legitimate selection, so
+    # fail instead — a fold with no valid checkpoint must not silently become a
+    # table row.
+    if _val_hook is not None and best_J_epoch is None:
+        raise RuntimeError(
+            f"No checkpoint was selected for fold {held_out_seq}: the journal "
+            f"metric was inf at every evaluated epoch on inner-val sequence "
+            f"{val_seq}. Refusing to deploy an unselected checkpoint.")
+    if _val_hook is not None:
+        print(f"Selected epoch {best_J_epoch} (J={best_J:.4f} on inner-val "
+              f"seq {val_seq}) -> {out_name}")
 
     # If no validation, save at the end
     if val_loader is None:
@@ -357,14 +542,37 @@ def _parse_args():
     parser.add_argument('--epochs',     type=int, default=200)
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--lr',         type=float, default=1e-4)
-    parser.add_argument('--mse-epochs', type=int, default=20,
-                        help='Number of MSE pre-training epochs before switching to NLL '
-                             '(default: 20 — matches original TLIO paper epoch 10, '
-                             'remaining epochs train calibrated uncertainty)')
+    parser.add_argument('--mse-epochs', type=int, default=10,
+                        help='Phase switch: before this epoch the log-std is detached '
+                             '(mean-only supervision), after it mean+log-std train '
+                             'jointly (default: 10 — matches external/tlio '
+                             'network/losses.get_loss).')
     parser.add_argument('--output',     default=str(_REPO_ROOT / 'artifacts/tlio'),
                         help="Directory to save model weights")
     parser.add_argument('--resume',     default=None,
                         help="Path to checkpoint .pt to resume training from")
+    parser.add_argument('--val-metric-every', type=int, default=10,
+                        help="Every K epochs (and at final epoch), run a "
+                             "display-only validation on the held-out sequence "
+                             "using the journal three-component metric "
+                             "J = ATE_outage + t_rel + r_rel (default 10; "
+                             "0 disables). Original MSE/NLL training loss is "
+                             "unchanged.")
+    parser.add_argument('--seed', type=int, default=42,
+                        help="RNG seed for reproducible training (default: 42, "
+                             "matching the genetic optimiser).")
+    parser.add_argument('--perturb-gravity', dest='perturb_gravity',
+                        action='store_true', default=True,
+                        help="Apply random gravity-direction (tilt) augmentation "
+                             "during training (default: on — matches original TLIO "
+                             "perturb_gravity=True).")
+    parser.add_argument('--no-perturb-gravity', dest='perturb_gravity',
+                        action='store_false',
+                        help="Disable the gravity-direction augmentation.")
+    parser.add_argument('--gravity-theta-deg', type=float, default=5.0,
+                        help="Max tilt magnitude in degrees for gravity-direction "
+                             "augmentation (default: 5.0 — matches original TLIO "
+                             "perturb_gravity_theta_range).")
     return parser.parse_args()
 
 

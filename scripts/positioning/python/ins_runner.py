@@ -14,7 +14,7 @@ Configuration:
 
 IMPORTANT — parameter tuning
 ------------------------------
-Default parameters give a rough first look.  Run ins_genetic.py for the
+Default parameters give a rough first look.  Run ins_genetic_cv.py for the
 selected filter to optimise parameters before drawing any conclusions.
 """
 import os
@@ -35,12 +35,12 @@ import metrics
 import visualize
 import visualize_state
 from filters import (
-    ekf_vanilla, ekf_enhanced,
-    eskf_vanilla, eskf_enhanced,
+    esekfg_vanilla, esekfg_enhanced,
+    esekfs_vanilla, esekfs_enhanced,
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
-from smoothers import rts_smoother, isam2_runner
+from smoothers import rts_smoother, isam2_runner, isam2_fixedlag_runner
 from dl_filters.deep_iekf  import iekf_ai_imu
 from dl_filters.tlio       import tlio_runner
 from dl_filters.deep_kf    import deep_kf_runner
@@ -48,16 +48,17 @@ from dl_filters.tartan_imu import tartan_runner
 
 # ── Filter / smoother dispatch table ──────────────────────────────────────────
 FILTERS = {
-    "ekf_vanilla":   ekf_vanilla,
-    "ekf_enhanced":  ekf_enhanced,
-    "eskf_vanilla":  eskf_vanilla,
-    "eskf_enhanced": eskf_enhanced,
+    "esekfg_vanilla":   esekfg_vanilla,
+    "esekfg_enhanced":  esekfg_enhanced,
+    "esekfs_vanilla":  esekfs_vanilla,
+    "esekfs_enhanced": esekfs_enhanced,
     "iekf_vanilla":  iekf_vanilla,
     "iekf_enhanced": iekf_enhanced,
     "imu_only":      imu_only,
     # Smoothers
     "rts_smoother":  rts_smoother,
     "isam2":         isam2_runner,
+    "isam2_fixedlag": isam2_fixedlag_runner,
     # Deep learning filters
     "iekf_ai_imu":   iekf_ai_imu,
     "tlio":          tlio_runner,
@@ -119,7 +120,7 @@ def main():
     logger.info(f"Sample rate: {nav_data.sample_rate} Hz")
     logger.info(f"GNSS outage: {t1}s – {t1+d}s  ({d}s)")
     logger.info(f"Rotation   : {'3D (roll/pitch/yaw)' if use_3d else '2D (yaw only)'}")
-    logger.info(f"Parameters : {'custom' if filter_params else 'default (run ins_genetic.py to optimise)'}")
+    logger.info(f"Parameters : {'custom' if filter_params else 'default (run ins_genetic_cv.py to optimise)'}")
     logger.info("=" * 60)
 
     # ── Run selected filter ────────────────────────────────────────────────────

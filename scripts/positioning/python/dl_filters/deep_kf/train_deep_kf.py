@@ -15,12 +15,12 @@ Training objective (Hosseinyalamdary 2018, Eqs. 27-28)
 Two-phase training faithful to the original DKF paper:
 
 Phase 1: Generate ESKF posterior trajectories x_t^+ for each training sequence
-          by running eskf_enhanced with GPS updates.
+          by running esekfs_enhanced with GPS updates.
 
 Phase 2: Teacher-forced sequence training:
     - Input:  x_{t-1}^+ (15D posterior state from ESKF)
     - Target: x_t^+     (15D posterior state at next timestep)
-    - Loss:   weighted MSE on all 15 state components
+    - Loss:   equal-weight MSE on all 15 state components (plain MSE, Eq. 27)
     - The LSTM learns to predict state transitions, including the effect of
       GPS measurement updates on the state.
 
@@ -66,77 +66,121 @@ CLEAN_SEQS = ['01', '04', '06', '07', '08', '09', '10']
 
 # ── Phase 1: Generate ESKF posterior trajectories ─────────────────────────────
 
-def generate_eskf_posteriors(nav):
+def generate_error_targets(nav):
     """
-    Run ESKF enhanced on a sequence to produce the posterior state trajectory.
+    Feedforward error target (the paper's FeedforwardFilter): the error between
+    the GPS-aided ESKF posterior and the free-running (open-loop) IMU trajectory,
+
+        e = [p_a - p_dr, v_a - v_dr, wrap(θ_a - θ_dr), b_a, b_g]
+
+    This is the accumulating IMU error the LSTM learns to model (Appendix A1),
+    NOT the absolute navigation state.
 
     Returns
     -------
-    x_post : (N, 15) float32 — [p(3), v(3), rpy(3), b_acc(3), b_gyr(3)]
+    err : (N, 15) float32 — [δp(3), δv(3), δθ(3), b_acc(3), b_gyr(3)]
     """
-    import eskf_enhanced
+    import esekfs_enhanced
+    import ins_cost
+    from deep_kf_runner import _free_dead_reckoning, _qfrom_euler, _wrap
 
-    result = eskf_enhanced.run(nav)
-    x_post = np.concatenate([
-        result['p'],         # (N, 3) position ENU
-        result['v'],         # (N, 3) velocity ENU
-        result['r'],         # (N, 3) roll, pitch, yaw
-        result['bias_acc'],  # (N, 3) accel bias FLU
-        result['bias_gyr'],  # (N, 3) gyro bias FLU
+    result = esekfs_enhanced.run(nav)
+    p_a  = result['p'];  v_a = result['v'];  th_a = result['r']
+    b_a  = result['bias_acc'];  b_g = result['bias_gyr']
+
+    N  = p_a.shape[0]
+    Ts = 1.0 / nav.sample_rate
+    # Dead-reckoning init state — FGO-Batch ground truth (matches the final
+    # benchmark's GT_SOURCE), not raw KITTI OXTS. Only the initial sample is
+    # used (single-sample seed for the free-running integrator below); the
+    # loss target itself is esekfs_enhanced's posterior minus this dead
+    # reckoning, neither of which is raw ground truth directly.
+    gt = ins_cost.get_fgo_batch_gt(nav)
+    p_gps0 = gt['p'][0]
+    q0 = _qfrom_euler(gt['r'][0, 0], gt['r'][0, 1], gt['r'][0, 2])
+    p_dr, v_dr, th_dr = _free_dead_reckoning(
+        nav.accel_flu, nav.gyro_flu, p_gps0, gt['v'][0], q0, Ts, N)
+
+    err = np.concatenate([
+        p_a  - p_dr,
+        v_a  - v_dr,
+        _wrap(th_a - th_dr),
+        b_a,
+        b_g,
     ], axis=1)  # (N, 15)
-
-    # Unwrap yaw to avoid 2π discontinuities in training targets
-    x_post[:, 8] = np.unwrap(x_post[:, 8])  # yaw is index 8 (rpy[2])
-
-    return x_post.astype(np.float32)
+    return err.astype(np.float32)
 
 
 # ── Phase 2: Teacher-forced sequence training ─────────────────────────────────
 
 def compute_component_weights(x_post_list):
     """
-    Compute per-component inverse-variance weights for balanced MSE loss.
+    Per-component weights for the 15D weighted-MSE loss.
 
-    The 15D state has very different scales (position ~100m, biases ~0.01).
-    Weighting inversely by variance balances gradient contributions.
+    Each component contributes equally to the total loss so the network is
+    forced to learn position and orientation as well as biases.
+
+    Background. A previous version used `1 / Var(Δx_i)` (inverse-variance of
+    one-step state increments). For KITTI the per-step increments span
+    Var(Δp) ≈ 10⁻² (~ velocity / 100 Hz, in metres²) versus
+    Var(Δb_gyr) ≈ 10⁻¹² (steady gyro bias). The resulting weight ratio is
+    ~10¹⁰; after mean-normalisation the position and velocity weights collapse
+    to numerical zero (we observed `[0, 0, 0, 0, 0, 0, 1e-3, 1e-3, 0, 0, 0,
+    1e-3, 6.6, 8.3, 0.08]`), so the LSTM was trained to predict gyro/accel
+    biases while ignoring position errors entirely. This produced the
+    catastrophic `t_rel ≈ 150 %` we observed on the held-out KITTI drive.
+
+    Hosseinyalamdary 2018 prescribes a *plain* MSE energy (Eq. 27,
+    E = ½‖x⁺⁻ − x⁺‖²); Eqs. 31-32 are the gradient-descent weight updates,
+    not a weighted loss. Equal weights therefore reproduce the paper's
+    objective exactly, and make position errors dominate the loss in
+    proportion to their physical scale, which is what the journal metric
+    (ATE, t_rel, r_rel) cares about. Bias errors still contribute, just at the
+    natural scale set by their magnitude.
 
     Parameters
     ----------
-    x_post_list : list of (N_i, 15) arrays
+    x_post_list : list of (N_i, 15) arrays — accepted for API compatibility;
+        unused for equal weights but kept so a future variant can switch back
+        to data-driven weighting without changing the call sites.
 
     Returns
     -------
-    weights : (15,) tensor — normalised so mean(weights) = 1
+    weights : (15,) tensor of ones.
     """
-    all_data = np.concatenate(x_post_list, axis=0)  # (N_total, 15)
-    # Compute variance of state increments (what the residual network predicts)
-    deltas = np.diff(all_data, axis=0)  # (N_total-1, 15)
-    var = np.var(deltas, axis=0) + 1e-12  # avoid division by zero
-    inv_var = 1.0 / var
-    inv_var = inv_var / inv_var.mean()  # normalise so mean weight = 1
-    return torch.from_numpy(inv_var.astype(np.float32))
+    del x_post_list   # explicitly ignored for the equal-weights variant
+    return torch.ones(15, dtype=torch.float32)
 
 
 def run_sequence_teacher_forced(x_post, model, optimizer, device,
-                                tbptt_len, weights, training=True):
+                                tbptt_len, weights, training=True,
+                                sampling_prob: float = 0.0):
     """
-    Run one epoch pass on a single sequence with teacher-forced LSTM training.
+    Run one epoch pass on a single sequence with teacher-forced LSTM training,
+    optionally with scheduled sampling (Bengio et al., NeurIPS 2015).
 
     At each step t:
-        input  = x_post[t-1]  (15D posterior state)
+        input  = x_post[t-1]              with probability 1 - sampling_prob,
+                 last detached model out  with probability     sampling_prob
+                                          (only when training=True)
         target = x_post[t]    (15D next posterior state)
         pred   = model(input) (15D predicted state, with residual)
         loss   = weighted_MSE(pred, target)
 
     Parameters
     ----------
-    x_post   : (N, 15) float32 — ESKF posterior trajectory
-    model    : DeepKFNet
-    optimizer: torch optimizer
-    device   : 'cpu' or 'cuda'
-    tbptt_len: int — TBPTT segment length (number of steps)
-    weights  : (15,) tensor — per-component MSE weights
-    training : bool — if True, backward() + step()
+    x_post        : (N, 15) float32 — ESKF posterior trajectory
+    model         : DeepKFNet
+    optimizer     : torch optimizer
+    device        : 'cpu' or 'cuda'
+    tbptt_len     : int — TBPTT segment length (number of steps)
+    weights       : (15,) tensor — per-component MSE weights
+    training      : bool — if True, backward() + step()
+    sampling_prob : float in [0, 1] — probability of substituting the teacher
+                    input x_post[t-1] with the model's last detached prediction.
+                    0.0 reproduces the original pure-teacher-forced behaviour;
+                    ignored when training=False so the validation pass remains
+                    a clean MSE-on-posteriors comparison across runs.
 
     Returns
     -------
@@ -152,13 +196,23 @@ def run_sequence_teacher_forced(x_post, model, optimizer, device,
     total_loss  = 0.
     step_count  = 0
     loss_seg    = None
+    pred_prev   = None   # last detached prediction for scheduled sampling
 
     for t in range(1, N):
-        # Teacher forcing: always feed the ground-truth posterior
-        input_t  = x_t[t - 1].unsqueeze(0)   # (1, 15)
-        target_t = x_t[t].unsqueeze(0)        # (1, 15)
+        # Scheduled sampling: with probability sampling_prob feed the model's
+        # last (detached) prediction instead of the ground-truth posterior.
+        # Detaching breaks the gradient path so the sampled input is treated
+        # as a constant — only the new forward step contributes to the loss.
+        if (training and pred_prev is not None
+                and sampling_prob > 0.0
+                and torch.rand((), device=device).item() < sampling_prob):
+            input_t = pred_prev
+        else:
+            input_t = x_t[t - 1].unsqueeze(0)   # (1, 15)
+        target_t = x_t[t].unsqueeze(0)            # (1, 15)
 
-        pred_t, hidden = model(input_t, hidden)  # (1, 15)
+        pred_t, hidden = model(input_t, hidden)   # (1, 15)
+        pred_prev = pred_t.detach()
 
         # Weighted MSE loss
         step_loss = ((pred_t - target_t) ** 2 * w).mean()
@@ -192,7 +246,19 @@ def run_sequence_teacher_forced(x_post, model, optimizer, device,
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
+def _set_seed(seed):
+    """Seed Python/NumPy/Torch RNGs for reproducible training. No-op if seed is None."""
+    if seed is None:
+        return
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    print(f"  RNG seed = {seed} (reproducible training)")
+
+
 def train(args):
+    _set_seed(getattr(args, 'seed', 42))
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on device: {device}")
 
@@ -203,18 +269,27 @@ def train(args):
     else:
         CLEAN_SEQS_ACTIVE = CLEAN_SEQS
 
+    # NESTED split: --val-seq names the LOO HELD-OUT (test) sequence, which is
+    # never loaded here. The inner validation sequence driving best-checkpoint
+    # selection is carved out of the training sequences — see
+    # dl_filters._validation.inner_split for why validating on the held-out
+    # sequence biased these rows.
     if args.mode == 'loo':
         if args.val_seq not in CLEAN_SEQS_ACTIVE:
             raise ValueError(f"--val-seq must be one of {CLEAN_SEQS_ACTIVE}")
-        train_seqs = [s for s in CLEAN_SEQS_ACTIVE if s != args.val_seq]
-        val_seqs   = [args.val_seq]
+        from dl_filters._validation import inner_split
+        held_out_seq = args.val_seq
+        train_seqs, _inner_val = inner_split(CLEAN_SEQS_ACTIVE, held_out_seq)
+        val_seqs   = [_inner_val]
         out_name   = f'fold_{args.val_seq}.pt'
     else:
+        held_out_seq = None
         train_seqs = CLEAN_SEQS_ACTIVE
         val_seqs   = []
         out_name   = 'deep_kf.pt'
 
-    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seqs}")
+    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  "
+          f"inner_val={val_seqs}  held_out(test, unused)={held_out_seq}")
 
     def _load_seq(seq):
         if args.dataset == 'cookies':
@@ -238,21 +313,33 @@ def train(args):
         except Exception as e:
             print(f"  WARNING: failed to load val seq {seq}: {e}")
 
-    # ── Phase 1: Generate ESKF posteriors ─────────────────────────────────
-    print("Phase 1: Generating ESKF posterior trajectories ...")
-    train_posteriors = []
+    # ── Phase 1: Generate feedforward error targets (aided − free IMU) ─────
+    print("Phase 1: Generating feedforward error targets (aided − free IMU) ...")
+    train_errors = []
     for i, nav in enumerate(train_navs):
-        x_post = generate_eskf_posteriors(nav)
-        train_posteriors.append(x_post)
-        print(f"  Seq {train_seqs[i]}: {x_post.shape[0]} samples, "
-              f"pos range [{x_post[:,:3].min():.1f}, {x_post[:,:3].max():.1f}] m")
+        err = generate_error_targets(nav)
+        train_errors.append(err)
+        print(f"  Seq {train_seqs[i]}: {err.shape[0]} samples, "
+              f"δpos range [{err[:,:3].min():.1f}, {err[:,:3].max():.1f}] m")
 
-    val_posteriors = []
-    for i, nav in enumerate(val_navs):
-        x_post = generate_eskf_posteriors(nav)
-        val_posteriors.append(x_post)
+    # Per-component normalisation (paper cell 71): standardise the error using
+    # statistics from the TRAINING folds only, saved with the checkpoint so the
+    # runner can denormalise the network output.  We average the per-sequence
+    # statistics rather than concatenating, so a single long drive cannot
+    # dominate the scale by sheer sample count (its raw dead-reckoning drift
+    # over minutes is orders of magnitude larger than the short drives).
+    per_seq_mean = np.stack([e.mean(axis=0) for e in train_errors])   # (n_seq, 15)
+    per_seq_std  = np.stack([e.std(axis=0)  for e in train_errors])   # (n_seq, 15)
+    norm_mean = per_seq_mean.mean(axis=0).astype(np.float32)
+    norm_std  = (per_seq_std.mean(axis=0) + 1e-6).astype(np.float32)
+    print(f"  Norm mean (per-seq avg): {norm_mean.round(3)}")
+    print(f"  Norm std  (per-seq avg): {norm_std.round(3)}")
 
-    # Compute per-component weights from training data
+    # Downstream code operates on the NORMALISED error trajectories.
+    train_posteriors = [(e - norm_mean) / norm_std for e in train_errors]
+    val_posteriors   = [(generate_error_targets(nav) - norm_mean) / norm_std
+                        for nav in val_navs]
+
     weights = compute_component_weights(train_posteriors)
     print(f"  Component weights: {weights.numpy().round(3)}")
 
@@ -273,18 +360,91 @@ def train(args):
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    val_metric_path = output_dir / out_name.replace('.pt', '_val_metric.pt')
 
     best_val = float('inf')
+    # SELECTION criterion — see train_tlio.py for the full rationale. In short:
+    # these models train OUTAGE-FREE, so a one-step loss on clean data carries
+    # no information about dead-reckoning behaviour, which is what the tables
+    # report. This model is the clearest case: its LOO outage mean moved between
+    # 86 m and 557 m purely on which epoch the blind criterion happened to pick.
+    # J is the same cost ins_genetic_cv.py minimises for the classical filters.
+    best_J = float('inf')
+    best_J_epoch = None
 
-    print(f"\nPhase 2: Training LSTM (teacher-forced, {args.epochs} epochs) ...")
+    # Journal-metric hook. NOT used in backprop — it selects the checkpoint.
+    # Scores the INNER validation sequence, not the LOO held-out one: printing
+    # the test metric every K epochs invites stopping or re-running on it, which
+    # is the same selection-on-test problem inner_split() removes, just routed
+    # through the operator instead of through code.
+    _val_hook = None
+    _val_seq_for_hook = val_seqs[0] if (args.mode == 'loo' and val_seqs) else None
+    if _val_seq_for_hook is not None and args.val_metric_every > 0:
+        try:
+            import os as _os
+            import importlib
+            from dl_filters._validation import (validate_with_journal_metric,
+                                                format_val_line)
+            _dkf_runner = importlib.import_module(
+                'dl_filters.deep_kf.deep_kf_runner')
+
+            def _val_hook(_epoch, _model):
+                _model.eval()
+                torch.save({
+                    'epoch': _epoch,
+                    'model_state_dict': _model.state_dict(),
+                    'config': {
+                        'latent_dim': args.latent_dim,
+                        'num_layers': 2,
+                        'nav_state_dim': 15,
+                    },
+                    'norm_mean': torch.from_numpy(norm_mean),
+                    'norm_std': torch.from_numpy(norm_std),
+                }, val_metric_path)
+                _prev = _os.environ.get('DEEP_KF_WEIGHTS')
+                _os.environ['DEEP_KF_WEIGHTS'] = str(val_metric_path)
+                _J = float('inf')
+                try:
+                    _m = validate_with_journal_metric(
+                        filter_module=_dkf_runner, val_seq=_val_seq_for_hook)
+                    print(format_val_line(_epoch, _m))
+                    _J = float(_m.get('J', float('inf')))
+                except Exception as _e:
+                    print(f"  [val] journal-metric hook failed: {_e}")
+                finally:
+                    if _prev is None:
+                        _os.environ.pop('DEEP_KF_WEIGHTS', None)
+                    else:
+                        _os.environ['DEEP_KF_WEIGHTS'] = _prev
+                _model.train()
+                return _J
+        except Exception as _e:
+            print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
+            _val_hook = None
+
+    if args.sampling_prob_max > 0.0:
+        print(f"\nPhase 2: Training LSTM (teacher-forced with scheduled "
+              f"sampling 0 → {args.sampling_prob_max:.2f} over the second "
+              f"half, {args.epochs} epochs) ...")
+    else:
+        print(f"\nPhase 2: Training LSTM (teacher-forced, {args.epochs} "
+              f"epochs) ...")
+    _ss_warmup = args.epochs // 2
     for epoch in range(start_epoch, args.epochs):
+        # Linear scheduled-sampling curriculum: 0 for the first half, then
+        # ramping to args.sampling_prob_max over the second half. Bengio et
+        # al. NeurIPS 2015 — closes the exposure-bias gap between teacher-
+        # forced training and autoregressive inference.
+        _ss_prob = (max(epoch - _ss_warmup, 0)
+                    / max(args.epochs - _ss_warmup, 1)
+                    * args.sampling_prob_max)
         model.train()
         train_loss = 0.
         for x_post in train_posteriors:
             train_loss += run_sequence_teacher_forced(
                 x_post, model, optimizer, device,
                 tbptt_len=args.tbptt_len, weights=weights,
-                training=True,
+                training=True, sampling_prob=_ss_prob,
             )
         scheduler.step()
 
@@ -300,24 +460,48 @@ def train(args):
                     )
             print(f"Epoch {epoch+1:4d}/{args.epochs}  "
                   f"train={train_loss:.4f}  val={val_loss:.4f}  "
+                  f"lr={scheduler.get_last_lr()[0]:.2e}  "
+                  f"ss={_ss_prob:.3f}")
+            best_val = min(best_val, val_loss)
+        else:
+            print(f"Epoch {epoch+1:4d}/{args.epochs}  "
+                  f"train={train_loss:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
-            if val_loss < best_val:
-                best_val = val_loss
+
+        # Journal-metric validation — THIS selects the deployed epoch.
+        if _val_hook is not None and (
+                (epoch + 1) % args.val_metric_every == 0
+                or epoch == args.epochs - 1):
+            _J = _val_hook(epoch, model)
+            if _J < best_J:
+                best_J, best_J_epoch = _J, epoch
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
-                    'val_loss': val_loss,
+                    'val_loss': val_loss if val_posteriors else None,
+                    'journal_J': _J,
+                    'selection': 'journal_metric_inner_val',
+                    'inner_val_seq': _val_seq_for_hook,
                     'config': {
                         'latent_dim': args.latent_dim,
                         'num_layers': 2,
                         'nav_state_dim': 15,
                     },
+                    'norm_mean': torch.from_numpy(norm_mean),
+                    'norm_std': torch.from_numpy(norm_std),
                 }, output_dir / out_name)
-                print(f"  -> saved best ({out_name})")
-        else:
-            print(f"Epoch {epoch+1:4d}/{args.epochs}  "
-                  f"train={train_loss:.4f}  "
-                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+                print(f"  -> saved best ({out_name})  J={_J:.4f} @ epoch {epoch}")
+
+    # See train_tlio.py: a fold with no valid checkpoint must fail loudly rather
+    # than silently deploy an unselected one.
+    if _val_hook is not None and best_J_epoch is None:
+        raise RuntimeError(
+            f"No checkpoint was selected: the journal metric was inf at every "
+            f"evaluated epoch on inner-val sequence {_val_seq_for_hook}. "
+            f"Refusing to deploy an unselected checkpoint.")
+    if _val_hook is not None:
+        print(f"Selected epoch {best_J_epoch} (J={best_J:.4f} on inner-val "
+              f"seq {_val_seq_for_hook}) -> {out_name}")
 
     if not val_posteriors:
         torch.save({
@@ -328,6 +512,8 @@ def train(args):
                 'num_layers': 2,
                 'nav_state_dim': 15,
             },
+            'norm_mean': torch.from_numpy(norm_mean),
+            'norm_std': torch.from_numpy(norm_std),
         }, output_dir / out_name)
 
     print("Training complete.")
@@ -343,10 +529,40 @@ def _parse_args():
     parser.add_argument('--epochs',     type=int,   default=150)
     parser.add_argument('--lr',         type=float, default=1e-3)
     parser.add_argument('--latent-dim', type=int,   default=128)
-    parser.add_argument('--tbptt-len',  type=int,   default=200,
-                        help="TBPTT segment length (number of IMU steps)")
+    parser.add_argument('--tbptt-len',  type=int,   default=50,
+                        help="TBPTT segment length (number of IMU steps). "
+                             "Shorter segments stabilise the LSTM hidden "
+                             "state; 30-100 is standard for 1 Hz GPS "
+                             "supervision over 100 Hz IMU. Hosseinyalamdary "
+                             "2018 does not pin the value.")
+    parser.add_argument('--sampling-prob-max', type=float, default=0.0,
+                        help="Maximum probability of feeding the model's own "
+                             "previous output instead of the teacher posterior "
+                             "during the second half of training (scheduled "
+                             "sampling curriculum, Bengio et al. NeurIPS 2015). "
+                             "DEFAULT 0 = pure teacher forcing, which is what "
+                             "Hosseinyalamdary 2018 specifies: its energy "
+                             "function (Eq. 27) is measured against the estimated "
+                             "posterior x_t^+ at every step, and neither the paper "
+                             "nor the author's reference implementation "
+                             "(github.com/siavashha/DeepKF) uses a sampling "
+                             "curriculum. It was enabled here at 0.25 and is now "
+                             "off by default: it is the one component of this "
+                             "training loop present in neither source, so leaving "
+                             "it on would credit the method with an advantage its "
+                             "author never claimed.")
     parser.add_argument('--output',     default=str(_REPO_ROOT / 'artifacts/deep_kf'))
     parser.add_argument('--resume',     default=None)
+    parser.add_argument('--val-metric-every', type=int, default=10,
+                        help="Every K epochs (and at final epoch), run a "
+                             "display-only validation on the held-out sequence "
+                             "using the journal three-component metric "
+                             "J = ATE_outage + t_rel + r_rel (default 10; "
+                             "0 disables). Original weighted-MSE training loss "
+                             "is unchanged.")
+    parser.add_argument('--seed', type=int, default=42,
+                        help="RNG seed for reproducible training (default: 42, "
+                             "matching the genetic optimiser).")
     return parser.parse_args()
 
 

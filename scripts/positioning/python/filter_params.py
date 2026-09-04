@@ -4,7 +4,7 @@ filter_params.py — Central parameter store for all filter × mode × dataset
 combinations.
 
 Parameters are persisted in filter_params.json (auto-created and updated by
-ins_genetic.py and ins_genetic_fast.py).  This module provides a clean Python
+ins_genetic_cv.py).  This module provides a clean Python
 API to read and write them.
 
 Structure of filter_params.json:
@@ -18,11 +18,11 @@ Structure of filter_params.json:
 
 Usage (read):
     import filter_params
-    p = filter_params.get('eskf_enhanced', mode_3d=True, dataset='10_03_0027')
+    p = filter_params.get('esekfs_enhanced', mode_3d=True, dataset='10_03_0027')
     # Returns the params dict, or None if not yet tuned.
 
 Usage (write — called automatically by optimisers):
-    filter_params.set('eskf_enhanced', mode_3d=True, dataset='10_03_0027',
+    filter_params.set('esekfs_enhanced', mode_3d=True, dataset='10_03_0027',
                       params={...}, cost=12.3)
 
 Usage (summary):
@@ -35,11 +35,25 @@ _STORE = Path(__file__).parent / 'filter_params.json'
 
 
 def _load() -> dict:
-    """Load the JSON store.  Returns empty dict if file does not exist."""
+    """Load the JSON store.
+
+    A MISSING file is the legitimate "nothing tuned yet" case → empty dict.
+    A file that EXISTS but fails to parse (truncated/half-written by an
+    interrupted optimiser, merge conflict, corruption) must NOT be silently
+    treated as "no tuning": that would make every filter fall back to default
+    parameters with no warning — the exact silent-degradation this project
+    forbids. Fail loudly instead so the corrupt store is fixed, not ignored.
+    """
+    if not _STORE.exists():
+        return {}
     try:
         return json.loads(_STORE.read_text(encoding='utf-8'))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"filter_params store {_STORE} exists but is not valid JSON "
+            f"({e}). Refusing to silently fall back to default parameters for "
+            f"every filter. Restore or regenerate the file (ins_genetic.py)."
+        ) from e
 
 
 def _save(data: dict) -> None:
@@ -75,7 +89,7 @@ def set(filter_name: str, mode_3d: bool, dataset: str,
     Save (or overwrite) the parameter dict for (filter, mode, dataset).
 
     Args:
-        filter_name : e.g. 'eskf_enhanced'
+        filter_name : e.g. 'esekfs_enhanced'
         mode_3d     : True = 3D, False = 2D
         dataset     : e.g. '10_03_0027'
         params      : the parameter dict to store
@@ -106,7 +120,7 @@ def print_summary() -> None:
     """Print a human-readable table of all stored parameters and their costs."""
     data = _load()
     if not data:
-        print("filter_params.json is empty — run ins_genetic_fast.py first.")
+        print("filter_params.json is empty — run ins_genetic_cv.py (or run_genetic_loo.sh) first.")
         return
 
     print()

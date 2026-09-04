@@ -40,9 +40,10 @@ from hailo_sdk_client import ClientRunner, InferenceContext
 _HERE      = Path(__file__).resolve().parent
 _REPO_ROOT = _HERE.parent.parent.parent.parent
 _MODEL_DIR = _REPO_ROOT / "scripts/positioning/python/dl_filters/tlio/network"
+_TLIO_DIR  = _REPO_ROOT / "scripts/positioning/python/dl_filters/tlio"
 _SCRIPTS   = _REPO_ROOT / "scripts/positioning/python"
 
-for _p in [str(_MODEL_DIR), str(_SCRIPTS)]:
+for _p in [str(_MODEL_DIR), str(_TLIO_DIR), str(_SCRIPTS)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -52,6 +53,7 @@ from model_resnet import ResNet1D, BasicBlock1D  # noqa: E402
 ONNX_PATH          = _HERE / "tlio.onnx"
 HAR_PATH           = _HERE / "tlio_hailo_model.har"
 QUANTIZED_HAR_PATH = _HERE / "tlio_quantized_model.har"
+POSTPROC_PATH      = _HERE / "tlio_postproc.pt"
 
 WINDOW_SIZE  = 200
 IMU_CHANNELS = 6
@@ -102,17 +104,42 @@ def _hailo_input_names(runner):
     return [l.name for l in layers]
 
 
-def infer_hailo(runner, ctx, windows_np):
-    """Run Hailo emulator inference on (N, 6, W) array, return (N, 6)."""
+def _to_nhwc(windows_np):
+    """(N, 6, W) NCW -> (N, 6, 1, W) NCHW -> (N, 1, W, 6) NHWC (Hailo layout)."""
+    x_nchw = windows_np[:, :, np.newaxis, :]
+    return x_nchw.transpose(0, 2, 3, 1)
+
+
+def _apply_head(feat_nhwc: np.ndarray, hs: dict) -> np.ndarray:
+    """Host-side head (bn1 + flatten + fc1/2/3): (N, 1, inter_dim, 128) NHWC -> (N, 3)."""
+    x = torch.from_numpy(feat_nhwc).float().permute(0, 3, 1, 2)  # -> (N, 128, 1, inter_dim) NCHW
+    x = torch.nn.functional.batch_norm(
+        x, hs["bn1.running_mean"], hs["bn1.running_var"],
+        hs["bn1.weight"], hs["bn1.bias"], training=False, eps=hs["bn1.eps"],
+    )
+    x = torch.flatten(x, 1)
+    x = torch.relu(torch.nn.functional.linear(x, hs["fc1.weight"], hs["fc1.bias"]))
+    x = torch.relu(torch.nn.functional.linear(x, hs["fc2.weight"], hs["fc2.bias"]))
+    x = torch.nn.functional.linear(x, hs["fc3.weight"], hs["fc3.bias"])
+    return x.detach().numpy()
+
+
+def infer_hailo(runner, ctx, windows_np, head1_state, head2_state):
+    """Run Hailo emulator inference on (N, 6, W) array, return (N, 6).
+
+    Hailo only runs the CNN backbone up to the prep1 1x1-convs (two outputs,
+    one per head); the bn1+flatten+fc1/2/3 head runs on the host from the
+    weights saved to tlio_postproc.pt (see 0_onnx_converter.py).
+    """
     names = _hailo_input_names(runner)
     if len(names) != 1:
         raise RuntimeError(
             f"Expected 1 Hailo input layer, got {len(names)}: {names}"
         )
-    # Hailo stores inputs in NHWC.  (1, 6, W) → add channel dim → (1, 6, W, 1)
-    x = windows_np[:, :, :, np.newaxis]  # (N, 6, W, 1) NHWC
-    results = runner.infer(ctx, {names[0]: x})
-    return np.concatenate(results, axis=0)
+    feat1, feat2 = runner.infer(ctx, {names[0]: _to_nhwc(windows_np)})
+    mean   = _apply_head(feat1, head1_state)
+    logstd = _apply_head(feat2, head2_state)
+    return np.concatenate([mean, logstd], axis=-1)
 
 
 # ── Comparison printout ───────────────────────────────────────────────────────
@@ -215,7 +242,8 @@ def main():
         session = ort.InferenceSession(str(ONNX_PATH))
         results = []
         for i in range(len(infer_windows)):
-            out = session.run(None, {"imu_window": infer_windows[i : i + 1]})
+            x_nchw = infer_windows[i : i + 1][:, :, np.newaxis, :]  # (1, 6, 1, W)
+            out = session.run(None, {"imu_window": x_nchw})
             results.append(out[0])
         backends["ONNX"] = np.concatenate(results, axis=0)
     else:
@@ -224,18 +252,21 @@ def main():
     # ── 3-5. Hailo HAR ────────────────────────────────────────────────────────
     if not HAR_PATH.exists():
         log.warning("HAR not found (%s) — skipping Hailo stages.", HAR_PATH)
+    elif not POSTPROC_PATH.exists():
+        log.warning("Postproc weights not found (%s) — skipping Hailo stages.", POSTPROC_PATH)
     else:
+        postproc = torch.load(POSTPROC_PATH, map_location="cpu")
+        head1_state, head2_state = postproc["head1"], postproc["head2"]
+
         runner = ClientRunner(har=str(HAR_PATH))
         hailo_names = _hailo_input_names(runner)
         log.info("Hailo input layer name(s): %s", hailo_names)
-        # NHWC format: (N, 6, W, 1)
-        calib_x = calib_windows[:, :, :, np.newaxis]
-        calib_dataset = {hailo_names[0]: calib_x}
+        calib_dataset = {hailo_names[0]: _to_nhwc(calib_windows)}
 
         # 3. SDK_NATIVE
         log.info("Hailo SDK_NATIVE inference ...")
         with runner.infer_context(InferenceContext.SDK_NATIVE) as ctx:
-            backends["SDK_NATIVE"] = infer_hailo(runner, ctx, infer_windows)
+            backends["SDK_NATIVE"] = infer_hailo(runner, ctx, infer_windows, head1_state, head2_state)
 
         # 4. Full-precision optimization
         log.info("Running optimize_full_precision() ...")
@@ -243,7 +274,7 @@ def main():
 
         log.info("Hailo SDK_FP_OPTIMIZED inference ...")
         with runner.infer_context(InferenceContext.SDK_FP_OPTIMIZED) as ctx:
-            backends["SDK_FP_OPT"] = infer_hailo(runner, ctx, infer_windows)
+            backends["SDK_FP_OPT"] = infer_hailo(runner, ctx, infer_windows, head1_state, head2_state)
 
         # 5. Quantization
         runner.load_model_script(
@@ -257,13 +288,21 @@ def main():
 
             log.info("Hailo SDK_QUANTIZED inference ...")
             with runner.infer_context(InferenceContext.SDK_QUANTIZED) as ctx:
-                backends["SDK_QUANTIZED"] = infer_hailo(runner, ctx, infer_windows)
+                backends["SDK_QUANTIZED"] = infer_hailo(runner, ctx, infer_windows, head1_state, head2_state)
         except Exception as e:
-            log.warning(
-                "Quantization failed (%s: %s). "
-                "SDK_NATIVE and SDK_FP_OPTIMIZED results are still valid.",
-                type(e).__name__, e,
+            # Do NOT downgrade this to a warning. 3_compilation.py loads whatever
+            # tlio_quantized_model.har happens to be on disk; if this script exits 0
+            # after failing, that file is the PREVIOUS fold's, and build_per_fold_hefs.py
+            # would move a stale, wrong-fold HEF into tlio_fold_<seq>.hef and report
+            # success. A failed quantisation must stop the pipeline.
+            log.error(
+                "Quantization FAILED (%s: %s). Not writing %s — the stale one on "
+                "disk belongs to a different export. SDK_NATIVE/SDK_FP_OPTIMIZED "
+                "results above are still valid, but no HEF may be built from this run.",
+                type(e).__name__, e, QUANTIZED_HAR_PATH.name,
             )
+            print_comparison(backends)
+            raise
 
     # ── Print results ─────────────────────────────────────────────────────────
     print_comparison(backends)

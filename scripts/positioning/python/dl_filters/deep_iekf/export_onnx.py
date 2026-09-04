@@ -83,20 +83,35 @@ def export(weights_path, output_path, seq_len=4544):
                                    (dynamic axes allow any length at runtime)
     """
     _add_aimu_path()
+    if str(_HERE) not in sys.path:
+        sys.path.insert(0, str(_HERE))
     from utils_torch_filter import TORCHIEKF
-    try:
-        from main_kitti import KITTIParameters
-        torch_iekf = TORCHIEKF(KITTIParameters)
-    except Exception:
-        torch_iekf = TORCHIEKF()
+    # cov0_measurement is embedded as a buffer in the exported ONNX (see
+    # MesNetWrapper), so it MUST be the trained [1.0, 10.0]; get_kitti_parameters()
+    # guarantees that on every host, unlike the old silent-fallback (kitti_params.py).
+    from kitti_params import get_kitti_parameters
+    torch_iekf = TORCHIEKF(get_kitti_parameters())
 
     # Load weights
     mondict = torch.load(weights_path, map_location='cpu')
+
+    # A --causal checkpoint stores CausalMesNet (convs at cov_net.1/.5, pad-then-
+    # conv) rather than the acausal MesNet (convs at cov_net.0/.4). Detect that and
+    # swap in a CausalMesNet so the state_dict keys line up. MesNetWrapper reuses
+    # cov_net/cov_lin as-is, so the causal left-padding is preserved in the export.
+    if 'mes_net.cov_net.1.weight' in mondict:
+        from causal_mesnet import attach_causal_mesnet
+        attach_causal_mesnet(torch_iekf)
+
     torch_iekf.load_state_dict(mondict)
     torch_iekf.eval()
 
-    # Load normalization factors
-    norm_path = Path(weights_path).parent / 'iekfnets_norm.p'
+    # Load normalization factors (saved as '<weights-stem>_norm.p' by fold training,
+    # or 'iekfnets_norm.p' for whole-dataset training).
+    weights_path = Path(weights_path)
+    norm_path = weights_path.parent / f'{weights_path.stem}_norm.p'
+    if not norm_path.exists():
+        norm_path = weights_path.parent / 'iekfnets_norm.p'
     if norm_path.exists():
         norm = torch.load(norm_path, map_location='cpu')
         torch_iekf.u_loc = norm['u_loc'].double()

@@ -1,0 +1,48 @@
+# HailoRT runtime — build/run on either target via profiles:
+#
+#   Raspberry Pi 5 (native arm64):
+#     docker compose --profile arm64 build
+#     docker compose --profile arm64 run --rm hailo-arm64 \
+#         scripts/positioning/hailo/deep_kf/4_inference.py
+#
+#   This PC (native amd64 — needs a wheel in hailort-packages/ first, see README.md):
+#     docker compose --profile amd64 build
+#     docker compose --profile amd64 run --rm hailo-amd64 \
+#         scripts/positioning/hailo/deep_kf/4_inference.py
+#
+# Both services build from the same Dockerfile; only `platform` differs, so
+# each should be built natively on a host of that architecture (see
+# docker/README.md for why cross-building arm64 from amd64 is discouraged).
+#
+# Requires /dev/hailo0 on the host (hailo_pci kernel driver loaded and
+# firmware present — `hailortcli fw-control identify` should succeed on the
+# host before any of this will work in a container).
+
+x-hailo-common: &hailo-common
+  devices:
+    - /dev/hailo0
+  volumes:
+    - /lib/firmware:/lib/firmware:ro
+    - ../../../..:/workspace/cookies
+  working_dir: /workspace/cookies
+
+services:
+  hailo-arm64:
+    <<: *hailo-common
+    profiles: ["arm64"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/arm64
+    image: cookies-hailo-runtime:arm64
+
+  hailo-amd64:
+    <<: *hailo-common
+    profiles: ["amd64"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+    image: cookies-hailo-runtime:amd64

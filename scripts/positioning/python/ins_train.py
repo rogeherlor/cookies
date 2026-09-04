@@ -76,7 +76,8 @@ def _weight_exists(filter_name, seq, mode='loo'):
             'tlio':       _ARTIFACTS / 'tlio' / 'tlio_resnet.pt',
             'deep_kf':    _ARTIFACTS / 'deep_kf' / 'deep_kf.pt',
             'tartan_imu': _ARTIFACTS / 'tartan_imu' / 'lora_adapters.pt',
-            'ai_imu':     _ARTIFACTS / 'deep_iekf' / 'iekfnets.p',
+            # AI-IMU trains the causal (online) model by default → deep_iekf_online/.
+            'ai_imu':     _ARTIFACTS / 'deep_iekf_online' / 'iekfnets.p',
         }
     else:
         drive = KITTI_SEQ_TO_DRIVE.get(seq, seq)
@@ -84,47 +85,57 @@ def _weight_exists(filter_name, seq, mode='loo'):
             'tlio':       _ARTIFACTS / 'tlio' / f'fold_{seq}.pt',
             'deep_kf':    _ARTIFACTS / 'deep_kf' / f'fold_{seq}.pt',
             'tartan_imu': _ARTIFACTS / 'tartan_imu' / f'lora_fold_{seq}.pt',
-            'ai_imu':     _ARTIFACTS / 'deep_iekf' / f'fold_{seq}.p',
+            'ai_imu':     _ARTIFACTS / 'deep_iekf_online' / f'fold_{seq}.p',
         }
     return paths[filter_name].exists()
 
 
 # ── Training command builders ─────────────────────────────────────────────────
 
-def _build_cmd_tlio(seq, epochs, mode='loo', dataset='kitti'):
+def _build_cmd_tlio(seq, epochs, mode='loo', dataset='kitti', val_metric_every=None):
     cmd = [sys.executable, str(_HERE / 'dl_filters/tlio/train_tlio.py'),
            '--mode', mode, '--epochs', str(epochs),
            '--dataset', dataset,
            '--output', str(_ARTIFACTS / 'tlio')]
     if mode == 'loo':
         cmd += ['--val-seq', seq]
+    if val_metric_every is not None:
+        cmd += ['--val-metric-every', str(val_metric_every)]
     return cmd
 
 
-def _build_cmd_deep_kf(seq, epochs, mode='loo', dataset='kitti'):
+def _build_cmd_deep_kf(seq, epochs, mode='loo', dataset='kitti', val_metric_every=None):
     cmd = [sys.executable, str(_HERE / 'dl_filters/deep_kf/train_deep_kf.py'),
            '--mode', mode, '--epochs', str(epochs),
            '--dataset', dataset,
            '--output', str(_ARTIFACTS / 'deep_kf')]
     if mode == 'loo':
         cmd += ['--val-seq', seq]
+    if val_metric_every is not None:
+        cmd += ['--val-metric-every', str(val_metric_every)]
     return cmd
 
 
-def _build_cmd_tartan(seq, epochs, mode='loo', dataset='kitti'):
+def _build_cmd_tartan(seq, epochs, mode='loo', dataset='kitti', val_metric_every=None):
     cmd = [sys.executable, str(_HERE / 'dl_filters/tartan_imu/train_tartan.py'),
            '--mode', mode, '--epochs', str(epochs),
            '--dataset', dataset,
            '--output', str(_ARTIFACTS / 'tartan_imu')]
     if mode == 'loo':
         cmd += ['--val-seq', seq]
+    if val_metric_every is not None:
+        cmd += ['--val-metric-every', str(val_metric_every)]
     return cmd
 
 
-def _build_cmd_ai_imu(seq, epochs, kitti_raw_dir, mode='loo'):
+def _build_cmd_ai_imu(seq, epochs, kitti_raw_dir, mode='loo', val_metric_every=None):
+    # Causal is the default AI-IMU (train_ai_imu.py --causal default) → weights go
+    # to artifacts/deep_iekf_online/, matching _weight_exists() and ins_compare's
+    # AI_IMU_ONLINE_WEIGHTS resolution. (The acausal batch model is opt-in: train
+    # it directly with `train_ai_imu.py --no-causal --output artifacts/deep_iekf`.)
     cmd = [sys.executable, str(_HERE / 'dl_filters/deep_iekf/train_ai_imu.py'),
            '--epochs', str(epochs),
-           '--output', str(_ARTIFACTS / 'deep_iekf')]
+           '--output', str(_ARTIFACTS / 'deep_iekf_online')]
     if kitti_raw_dir:
         cmd += ['--mode', 'kitti', '--kitti-raw-dir', str(kitti_raw_dir)]
     else:
@@ -132,6 +143,8 @@ def _build_cmd_ai_imu(seq, epochs, kitti_raw_dir, mode='loo'):
     if mode == 'loo' and seq is not None:
         drive = KITTI_SEQ_TO_DRIVE[seq]
         cmd += ['--held-out', drive]
+    if val_metric_every is not None:
+        cmd += ['--val-metric-every', str(val_metric_every)]
     return cmd
 
 
@@ -163,7 +176,12 @@ def main():
     parser.add_argument('--seqs', nargs='+', default=None,
                         help='LOO validation sequence IDs (default: all clean seqs for the dataset). '
                              f'kitti default: {" ".join(CLEAN_SEQS)}. cookies default: c01..c06.')
-    parser.add_argument('--epochs-tlio',    type=int, default=2000)
+    parser.add_argument('--epochs-tlio',    type=int, default=50,
+                        help='Total TLIO training epochs. Default 50 follows '
+                             'Liu et al. RA-L 2020 §IV-A (~10 MSE + ~10 NLL, '
+                             'plus a small cosine-tail safety margin). Higher '
+                             'values collapse log-sigma² and force the SCEKF '
+                             'Mahalanobis gate to disable itself at runtime.')
     parser.add_argument('--epochs-deep-kf', type=int, default=150)
     parser.add_argument('--epochs-tartan',  type=int, default=50)
     parser.add_argument('--epochs-ai-imu',  type=int, default=400)
@@ -175,6 +193,13 @@ def main():
                         help='Skip folds whose weight files already exist')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print commands without executing')
+    parser.add_argument('--val-metric-every', type=int, default=None,
+                        help='Override --val-metric-every for every DL trainer. '
+                             'When set, runs the journal three-component metric '
+                             '(J = ATE_outage + t_rel + r_rel) on the held-out '
+                             'sequence every K epochs (and final epoch) — '
+                             'display-only, never enters backprop. 0 disables. '
+                             'Defaults: 10 (tlio/deep_kf/tartan_imu), 50 (ai_imu).')
     args = parser.parse_args()
     if args.filters is None or len(args.filters) == 0:
         args.filters = list(ALL_FILTERS)
@@ -279,9 +304,11 @@ def main():
         # Build command
         builder = CMD_BUILDERS[filt]
         if filt == 'ai_imu':
-            cmd = builder(seq, epochs, args.kitti_raw_dir, mode)
+            cmd = builder(seq, epochs, args.kitti_raw_dir, mode,
+                          val_metric_every=args.val_metric_every)
         else:
-            cmd = builder(seq, epochs, mode, args.dataset)
+            cmd = builder(seq, epochs, mode, args.dataset,
+                          val_metric_every=args.val_metric_every)
 
         cmd_str = ' '.join(cmd)
 

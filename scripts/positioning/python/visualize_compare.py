@@ -35,10 +35,10 @@ except ImportError:
 
 # ── Per-filter colors and markers ─────────────────────────────────────────────
 _FILTER_STYLE = {
-    'ekf_vanilla':   {'color': '#1f77b4', 'ls': '--',  'marker': 'o', 'label': 'EKF'},
-    'ekf_enhanced':  {'color': '#0a3d7a', 'ls': '-',   'marker': 's', 'label': 'EKF+'},
-    'eskf_vanilla':  {'color': '#ff7f0e', 'ls': '--',  'marker': '^', 'label': 'ESKF'},
-    'eskf_enhanced': {'color': '#a63c00', 'ls': '-',   'marker': 'D', 'label': 'ESKF+'},
+    'esekfg_vanilla':   {'color': '#1f77b4', 'ls': '--',  'marker': 'o', 'label': 'ES-EKF Groves'},
+    'esekfg_enhanced':  {'color': '#0a3d7a', 'ls': '-',   'marker': 's', 'label': 'ES-EKF Groves+'},
+    'esekfs_vanilla':  {'color': '#ff7f0e', 'ls': '--',  'marker': '^', 'label': 'ES-EKF Solà'},
+    'esekfs_enhanced': {'color': '#a63c00', 'ls': '-',   'marker': 'D', 'label': 'ES-EKF Solà+'},
     'iekf_vanilla':  {'color': '#2ca02c', 'ls': '--',  'marker': 'v', 'label': 'IEKF'},
     'iekf_enhanced': {'color': '#145214', 'ls': '-',   'marker': 'P', 'label': 'IEKF+'},
     'imu_only':      {'color': '#d62728', 'ls': ':',   'marker': 'x', 'label': 'IMU Only'},
@@ -54,9 +54,9 @@ _FILTER_STYLE = {
 
 # Each entry: (filename_suffix, set_of_keys, plot_title)
 _TRAJECTORY_GROUPS = [
-    ('ekf',         {'ekf_vanilla', 'ekf_enhanced'},  '2D Trajectory \u2014 EKF'),
-    ('eskf',        {'eskf_vanilla', 'eskf_enhanced'}, '2D Trajectory \u2014 ESKF'),
-    ('iekf',        {'iekf_vanilla', 'iekf_enhanced'}, '2D Trajectory \u2014 IEKF'),
+    ('esekfg',      {'esekfg_vanilla', 'esekfg_enhanced'}, '2D Trajectory \u2014 ES-EKF Groves'),
+    ('esekfs',      {'esekfs_vanilla', 'esekfs_enhanced'}, '2D Trajectory \u2014 ES-EKF Sol\u00e0'),
+    ('iekf',        {'iekf_vanilla', 'iekf_enhanced'},     '2D Trajectory \u2014 IEKF'),
     ('imu_only',    {'imu_only'},                      '2D Trajectory \u2014 IMU Only'),
     ('iekf_ai_imu', {'iekf_ai_imu'},                   '2D Trajectory \u2014 IEKF AI-IMU'),
     ('tlio',        {'tlio'},                          '2D Trajectory \u2014 TLIO'),
@@ -513,11 +513,11 @@ def _plot_uncertainty(filter_results, p_gt, gnss_outage_info,
     time = np.arange(N) / sample_rate
 
     # Arrange 3 rows (EKF / ESKF / IEKF) × 2 cols (vanilla / enhanced)
-    row_order = ['ekf_vanilla', 'eskf_vanilla', 'iekf_vanilla',
-                 'ekf_enhanced', 'eskf_enhanced', 'iekf_enhanced']
+    row_order = ['esekfg_vanilla', 'esekfs_vanilla', 'iekf_vanilla',
+                 'esekfg_enhanced', 'esekfs_enhanced', 'iekf_enhanced']
     key_to_pos = {
-        'ekf_vanilla':   (0, 0), 'ekf_enhanced':  (0, 1),
-        'eskf_vanilla':  (1, 0), 'eskf_enhanced': (1, 1),
+        'esekfg_vanilla':   (0, 0), 'esekfg_enhanced':  (0, 1),
+        'esekfs_vanilla':  (1, 0), 'esekfs_enhanced': (1, 1),
         'iekf_vanilla':  (2, 0), 'iekf_enhanced': (2, 1),
     }
 

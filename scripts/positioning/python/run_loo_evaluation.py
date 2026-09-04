@@ -73,13 +73,15 @@ KITTI_CLEAN_SEQS = {
 
 # Classical filters tuned by genetic CV
 CLASSICAL_FILTERS = [
-    'ekf_vanilla', 'ekf_enhanced',
-    'eskf_vanilla', 'eskf_enhanced',
+    'esekfg_vanilla', 'esekfg_enhanced',
+    'esekfs_vanilla', 'esekfs_enhanced',
     'iekf_vanilla', 'iekf_enhanced',
 ]
 
-# All filter keys reported in the comparison table
-ALL_FILTER_KEYS = CLASSICAL_FILTERS + ['imu_only', 'iekf_ai_imu']
+# All filter keys reported in the comparison table. The AI-IMU entry is the
+# CAUSAL online model (iekf_ai_imu_online) — the default AI-IMU; the acausal batch
+# variant (iekf_ai_imu) is an opt-in diagnostic and not collected here.
+ALL_FILTER_KEYS = CLASSICAL_FILTERS + ['imu_only', 'iekf_ai_imu_online']
 
 
 def _run(cmd, desc, dry_run=False):
@@ -238,7 +240,6 @@ def main():
     print(f"Dry run         : {args.dry_run}")
     print(f"{'='*65}\n")
 
-    genetic_fast_script = _HERE / 'ins_genetic_fast.py'
     genetic_cv_script   = _HERE / 'ins_genetic_cv.py'
     train_script        = _HERE / 'dl_filters/deep_iekf/train_ai_imu.py'
     compare_script      = _HERE / 'ins_compare.py'
@@ -255,33 +256,28 @@ def main():
             print(f"# FOLD [kitti]: held-out = {seq_id}  ({drive})")
         print(f"{'#'*65}")
 
-        # ── 1. Genetic tuning ──────────────────────────────────────────────────
+        # ── 1. Genetic tuning (single canonical driver: ins_genetic_cv.py) ─────
         if not args.skip_genetic:
-            if args.dataset == 'cookies':
-                # Use ins_genetic_fast.py for cookies LOO
-                filters_to_tune = ([args.genetic_filter] if args.genetic_filter
-                                   else CLASSICAL_FILTERS)
-                for filt in filters_to_tune:
-                    cmd = [sys.executable, str(genetic_fast_script),
-                           '--dataset', 'cookies', '--seq', seq_id, filt]
-                    if args.genetic_epochs:
-                        cmd += ['--maxiter', str(args.genetic_epochs)]
-                    if args.genetic_pop:
-                        cmd += ['--popsize', str(args.genetic_pop)]
-                    _run(cmd, f"Genetic fast — {filt} (held-out: {seq_id})", args.dry_run)
-            else:
-                # Use ins_genetic_cv.py for kitti LOO (original flow)
-                filters_to_tune = ([args.genetic_filter] if args.genetic_filter
-                                   else CLASSICAL_FILTERS)
-                for filt in filters_to_tune:
-                    cmd = [sys.executable, str(genetic_cv_script),
-                           '--filter', filt,
-                           '--held-out', KITTI_CLEAN_SEQS[seq_id]]
-                    if args.genetic_epochs:
-                        cmd += ['--generations', str(args.genetic_epochs)]
-                    if args.genetic_pop:
-                        cmd += ['--population', str(args.genetic_pop)]
-                    _run(cmd, f"Genetic CV — {filt} (held-out: {seq_id})", args.dry_run)
+            filters_to_tune = ([args.genetic_filter] if args.genetic_filter
+                               else CLASSICAL_FILTERS)
+            # ins_genetic_cv.py expects:
+            #   --type {kitti|cookies}
+            #   --held-out <full-drive-name | cookies-short-id>
+            #   filters as positional args
+            #   --maxiter / --popsize for DE budget
+            held_out_value = (KITTI_CLEAN_SEQS[seq_id]
+                              if args.dataset == 'kitti' else seq_id)
+            for filt in filters_to_tune:
+                cmd = [sys.executable, str(genetic_cv_script),
+                       '--type', args.dataset,
+                       '--held-out', held_out_value,
+                       '--3d',
+                       filt]
+                if args.genetic_epochs:
+                    cmd += ['--maxiter', str(args.genetic_epochs)]
+                if args.genetic_pop:
+                    cmd += ['--popsize', str(args.genetic_pop)]
+                _run(cmd, f"Genetic CV — {filt} (held-out: {seq_id})", args.dry_run)
 
         # ── 2. CNN training (kitti only) ───────────────────────────────────────
         if not args.skip_train:

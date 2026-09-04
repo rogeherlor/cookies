@@ -1,11 +1,36 @@
 """
-DeepKFNet -> ONNX converter
-==========================
-Exports a trained DeepKFNet checkpoint to ONNX for Hailo DFC parsing.
+DeepKFNet -> ONNX converter (STATEFUL cell export)
+==================================================
+Exports a trained DeepKFNet checkpoint to ONNX for Hailo DFC parsing, as an
+explicit single-step LSTM CELL whose hidden and cell states are ordinary
+graph inputs and outputs.
 
-The model is unrolled into two explicit single-layer LSTMs (no Slice ops).
-Initial hidden/cell states are omitted from the ONNX graph — the Hailo
-runtime manages LSTM state recurrence internally between inference calls.
+Why not the ONNX LSTM operator
+------------------------------
+The previous export used two nn.LSTM modules with h0/c0 baked in as constant
+buffers, because the DFC rejects dynamic h/c inputs on the ONNX LSTM operator.
+That produced a graph with a single input and a single output and therefore NO
+WAY to carry state: h0 was re-applied on every inference call, so the deployed
+model was memoryless while the trained model is a stateful two-layer LSTM.
+Measured directly (feed the same input repeatedly, outputs were bit-identical,
+and prior history had no effect), and the cost was large: on the outage
+scenario, dropping recurrence alone moved sequence 01 from 82 m to 272 m of
+ATE, before any quantisation.
+
+The fix is to stop using the ONNX LSTM operator. The cell is written out as
+primitive ops — Gemm, Add, Sigmoid, Tanh, Mul — with x, h and c as ordinary
+tensor inputs, which the DFC compiles without complaint. The host then carries
+(h, c) between ticks exactly as the CPU runner does, so the accelerated model
+computes the same function as the trained one and the CPU-vs-Hailo difference
+becomes a measurement of quantisation alone.
+
+Two workarounds the old export needed are consequently GONE:
+  * BIAS_HH_EPS (+1e-2 on bias_hh) — was needed because with h==0 the recurrent
+    branch was identically zero during calibration, collapsing its quantisation
+    range. With h a real input calibrated on real captured states, the branch
+    carries a genuine distribution.
+  * H_INIT=1.0 constant h0 — same root cause, same resolution.
+Both perturbed the trained weights; neither is applied any more.
 
 Usage
 -----
@@ -16,42 +41,18 @@ Outputs (next to the script by default, or set --out-dir):
 
 ONNX interface
 --------------
-Input:
-    x      (1, 1, 15)    nav_state [p(3)|v(3)|rpy(3)|b_a(3)|b_g(3)]
-                          seq_len=1 in dim-1 for LSTM-style 3-D input
+Inputs:
+    x       (1, 1, 15)     nav_state [p(3)|v(3)|rpy(3)|b_a(3)|b_g(3)], normalised
+    h_l0    (1, 1, 128)    layer-0 hidden state from the previous tick
+    c_l0    (1, 1, 128)    layer-0 cell state
+    h_l1    (1, 1, 128)    layer-1 hidden state
+    c_l1    (1, 1, 128)    layer-1 cell state
 
-Output:
-    state  (1, 15)       delta for the last timestep; caller adds residual
+Outputs:
+    state   (1, 15)        delta for this timestep; caller adds the residual
+    h_l0_o, c_l0_o, h_l1_o, c_l1_o   (1, 1, 128)  states to feed back next tick
 
-Why a single 3-D input?
------------------------
-Hailo's emulator (acceleras) maps LSTM gates to Conv2D ops and requires the
-input tensor to have at least 3 dimensions (N, H, W or N, H, W, C).
-Keeping the input as [N, 1, 15] gives Hailo a clean 3-D LSTM-style input.
-
-Note on bias_hh epsilon
------------------------
-The trained model may have near-zero bias_hh values.  With h0=0 this makes
-the LSTM recurrent branch always output all-zeros during calibration, causing
-scale=0 → desired_factor=inf → crash in Hailo's EW_Add quantisation.
-A small epsilon (1e-2) is added to bias_hh in the ONNX wrapper so the
-recurrent branch is always non-zero.  This does not affect the model's
-trained weights and has negligible impact on inference accuracy.
-
-Note on statefulness and constant h₀
---------------------------------------
-Dynamic h/c inputs to the ONNX LSTM cause a Hailo DFC parse error.
-Instead, h₀ is embedded as a constant buffer (H_INIT * ones) in the graph.
-
-Why non-zero? During Hailo calibration each sample runs independently with
-whatever h₀ is in the graph.  With h₀=0 the recurrent branch W_hh @ h₀ is
-identically zero → normalization2/7 (which wrap that branch) record a
-near-zero activation range → SDK reduces them from 8-bit to 2-bit → NaN
-kernels → AccelerasNegativeSlopesError.  H_INIT=1.0 makes W_hh @ h₀ ≈ O(1),
-giving the normalization layers a real range to quantise against.
-
-The Hailo runtime replaces the constant h₀ with actual h_n feedback between
-inference calls, so deployment behaviour is unaffected.
+At the start of a sequence the caller passes zeros, matching the CPU runner.
 """
 
 import argparse
@@ -75,82 +76,76 @@ from model import DeepKFNet  # noqa: E402
 # ── ONNX-friendly wrapper ─────────────────────────────────────────────────────
 
 class DeepKFNetONNX(nn.Module):
-    """
-    Hailo-compatible export wrapper.
+    """Single-step, STATEFUL LSTM cell wrapper for Hailo export.
 
-    Two key design decisions:
-    1. Unrolled layers: nn.LSTM(num_layers=2) -> two nn.LSTM(num_layers=1).
-       This removes Slice ops on h0/c0 that Hailo's parser cannot follow.
-    2. No initial-state inputs: h0/c0 are omitted from the graph entirely.
-       Hailo only supports zero or constant LSTM initial states.
+    forward(x, h_l0, c_l0, h_l1, c_l1) -> (delta, h_l0', c_l0', h_l1', c_l1')
 
-    The residual connection (nav_state + delta) is included in the ONNX graph
-    so the output is the full predicted state x_t^{+-}.
+    The two LSTM layers are written out as primitive ops rather than nn.LSTM,
+    so h/c are ordinary graph inputs the DFC accepts (the ONNX LSTM operator
+    rejects dynamic initial states, which is what forced the old memoryless
+    export). The arithmetic is the standard PyTorch cell, with PyTorch's gate
+    ordering [i, f, g, o] in the packed weight rows:
+
+        gates = [W_ih | W_hh] [x; h] + (b_ih + b_hh)
+        c' = sigmoid(f) * c + sigmoid(i) * tanh(g)
+        h' = sigmoid(o) * tanh(c')
+
+    The trained weights are copied verbatim — no bias epsilon, no constant h0.
     """
 
     def __init__(self, model: DeepKFNet):
         super().__init__()
+        orig = model.lstm.lstm
+        self.input_dim  = orig.input_size     # 15
+        self.hidden_dim = orig.hidden_size    # 128
 
-        orig_lstm = model.lstm.lstm
-        input_dim  = orig_lstm.input_size    # 15
-        hidden_dim = orig_lstm.hidden_size   # 128
+        # FUSED input+recurrent projection, one Gemm per layer:
+        #     W_ih x + b_ih + W_hh h + b_hh  ==  [W_ih | W_hh] [x; h] + (b_ih+b_hh)
+        # Algebraically identical, but it removes the elementwise add between two
+        # Gemm outputs. The Hailo allocator rejects that add outright — "Can't
+        # find mutual format for fc2 -> ew_add1" — because it cannot reconcile
+        # the internal layouts of two fully-connected results. Concatenating the
+        # operands and projecting once sidesteps the problem instead of working
+        # around it, and is cheaper on-device as well.
+        def _fused(w_ih, b_ih, w_hh, b_hh):
+            m = nn.Linear(w_ih.shape[1] + w_hh.shape[1], w_ih.shape[0], bias=True)
+            m.weight.data.copy_(torch.cat([w_ih, w_hh], dim=1))
+            m.bias.data.copy_(b_ih + b_hh)
+            return m
 
-        self.lstm_l0 = nn.LSTM(input_size=input_dim,  hidden_size=hidden_dim,
-                               num_layers=1, batch_first=True)
-        self.lstm_l1 = nn.LSTM(input_size=hidden_dim, hidden_size=hidden_dim,
-                               num_layers=1, batch_first=True)
-
-        # Copy weights layer-by-layer from the original 2-layer LSTM.
-        # A small epsilon is added to bias_hh so the EW_Add inside Hailo's
-        # LSTM representation never gets scale=0 → desired_factor=inf → crash.
-        BIAS_HH_EPS = 1e-2
-        self.lstm_l0.weight_ih_l0.data.copy_(orig_lstm.weight_ih_l0.data)
-        self.lstm_l0.weight_hh_l0.data.copy_(orig_lstm.weight_hh_l0.data)
-        self.lstm_l0.bias_ih_l0.data.copy_(orig_lstm.bias_ih_l0.data)
-        self.lstm_l0.bias_hh_l0.data.copy_(orig_lstm.bias_hh_l0.data + BIAS_HH_EPS)
-
-        self.lstm_l1.weight_ih_l0.data.copy_(orig_lstm.weight_ih_l1.data)
-        self.lstm_l1.weight_hh_l0.data.copy_(orig_lstm.weight_hh_l1.data)
-        self.lstm_l1.bias_ih_l0.data.copy_(orig_lstm.bias_ih_l1.data)
-        self.lstm_l1.bias_hh_l0.data.copy_(orig_lstm.bias_hh_l1.data + BIAS_HH_EPS)
+        self.gate_l0 = _fused(orig.weight_ih_l0.data, orig.bias_ih_l0.data,
+                              orig.weight_hh_l0.data, orig.bias_hh_l0.data)
+        self.gate_l1 = _fused(orig.weight_ih_l1.data, orig.bias_ih_l1.data,
+                              orig.weight_hh_l1.data, orig.bias_hh_l1.data)
 
         self.decoder = model.decoder
 
-        # Constant non-zero initial hidden states embedded as ONNX constants.
-        #
-        # Problem: Hailo's calibration runs each sample independently (h_0=0
-        # every call).  The recurrent branch W_hh @ h is therefore always zero,
-        # so normalization2/7 (which wrap that branch) record a near-zero
-        # activation range → SDK reduces them from 8-bit to 2-bit → NaN kernels
-        # → AccelerasNegativeSlopesError during quantization.
-        #
-        # Fix: embed h_0 = H_INIT * ones as a buffer (constant initializer in the
-        # ONNX graph).  Hailo's DFC accepts constant initial LSTM states and its
-        # runtime replaces them with actual h_n feedback between inference calls.
-        # H_INIT=1.0 gives W_hh @ h_0 with std ≈ sqrt(hidden_dim)*||W_hh||*H_INIT
-        # ≈ O(1), safely above the 2-bit threshold.
-        H_INIT = 1.0
-        self.register_buffer('h0_l0', H_INIT * torch.ones(1, 1, hidden_dim))
-        self.register_buffer('c0_l0', torch.zeros(1, 1, hidden_dim))
-        self.register_buffer('h0_l1', H_INIT * torch.ones(1, 1, hidden_dim))
-        self.register_buffer('c0_l1', torch.zeros(1, 1, hidden_dim))
+    @staticmethod
+    def _cell(gates, c_prev, hidden_dim):
+        i = torch.sigmoid(gates[:, 0 * hidden_dim:1 * hidden_dim])
+        f = torch.sigmoid(gates[:, 1 * hidden_dim:2 * hidden_dim])
+        g = torch.tanh(   gates[:, 2 * hidden_dim:3 * hidden_dim])
+        o = torch.sigmoid(gates[:, 3 * hidden_dim:4 * hidden_dim])
+        c_new = f * c_prev + i * g
+        h_new = o * torch.tanh(c_new)
+        return h_new, c_new
 
-    def forward(self, x: torch.Tensor):
-        """
-        Parameters
-        ----------
-        x : (batch, 1, 15)
-            Navigation state with sequence dim=1.
+    def forward(self, x, h_l0, c_l0, h_l1, c_l1):
+        # (1,1,D) -> (1,D); the 3-D shape is kept at the interface because
+        # Hailo's parser wants >=3 dims on inputs (see module docstring).
+        x2, h0, c0 = x[:, 0, :], h_l0[:, 0, :], c_l0[:, 0, :]
+        h1, c1     = h_l1[:, 0, :], c_l1[:, 0, :]
 
-        Returns
-        -------
-        delta : (batch, 15) — state increment; caller adds residual:
-                state = delta + x[:, 0, :]
-        """
-        out_l0, _ = self.lstm_l0(x, (self.h0_l0, self.c0_l0))   # (batch, 1, 128)
-        out_l1, _ = self.lstm_l1(out_l0, (self.h0_l1, self.c0_l1))  # (batch, 1, 128)
-        h_out = out_l1[:, 0, :]           # (batch, 128)
-        return self.decoder(h_out)        # (batch, 15) — delta only; caller adds residual
+        g0 = self.gate_l0(torch.cat([x2, h0], dim=1))
+        h0n, c0n = self._cell(g0, c0, self.hidden_dim)
+
+        g1 = self.gate_l1(torch.cat([h0n, h1], dim=1))
+        h1n, c1n = self._cell(g1, c1, self.hidden_dim)
+
+        delta = self.decoder(h1n)               # (1, 15) — caller adds residual
+        return (delta,
+                h0n.unsqueeze(1), c0n.unsqueeze(1),
+                h1n.unsqueeze(1), c1n.unsqueeze(1))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -235,9 +230,13 @@ def main():
 
     input_dim = args.nav_dim                       # 15
     x_dummy   = torch.zeros(1, 1, input_dim)       # (batch=1, seq=1, features=15)
+    # Zero initial states, exactly what the CPU runner starts a sequence with.
+    h_dummy   = torch.zeros(1, 1, hidden_dim)
+    dummies   = (x_dummy, h_dummy.clone(), h_dummy.clone(),
+                 h_dummy.clone(), h_dummy.clone())
 
-    input_names  = ["x"]
-    output_names = ["state"]
+    input_names  = ["x", "h_l0", "c_l0", "h_l1", "c_l1"]
+    output_names = ["state", "h_l0_o", "c_l0_o", "h_l1_o", "c_l1_o"]
 
     out_path = args.out_dir / "deep_kf.onnx"
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -246,7 +245,7 @@ def main():
     with torch.no_grad():
         torch.onnx.export(
             wrapped,
-            (x_dummy,),
+            dummies,
             str(out_path),
             input_names=input_names,
             output_names=output_names,
@@ -259,9 +258,11 @@ def main():
 
     print("Done.")
     print()
-    print("ONNX interface:")
-    print(f"  Input : x=[1, 1, {input_dim}]  (batch, seq=1, nav_state)")
-    print(f"  Output: state=[1, {input_dim}]  (delta; caller adds residual)")
+    print("ONNX interface (STATEFUL cell — host carries h/c between ticks):")
+    print(f"  Inputs : x=[1, 1, {input_dim}], "
+          f"h_l0/c_l0/h_l1/c_l1=[1, 1, {hidden_dim}]")
+    print(f"  Outputs: state=[1, {input_dim}] (delta; caller adds residual), "
+          f"h_l0_o/c_l0_o/h_l1_o/c_l1_o=[1, 1, {hidden_dim}]")
 
 
 if __name__ == "__main__":

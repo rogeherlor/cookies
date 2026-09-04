@@ -144,8 +144,11 @@ def infer_hef(hef_path: Path, nav_np: np.ndarray) -> np.ndarray:
     with hp.VDevice(params) as vdevice:
         infer_model = vdevice.create_infer_model(str(hef_path))
         infer_model.set_batch_size(1)
+        infer_model.input().set_format_type(hp.FormatType.FLOAT32)
+        infer_model.output().set_format_type(hp.FormatType.FLOAT32)
 
         with infer_model.configure() as configured_model:
+            configured_model.activate()
             bindings = configured_model.create_bindings()
 
             input_name  = infer_model.input().name
@@ -158,8 +161,9 @@ def infer_hef(hef_path: Path, nav_np: np.ndarray) -> np.ndarray:
                 out_buf = np.empty((1, STATE_DIM), dtype=np.float32)
                 bindings.output(output_name).set_buffer(out_buf)
 
-                configured_model.run([bindings], timeout_ms=1000)
+                configured_model.run([bindings], 1000)
                 results.append(out_buf.copy())
+            configured_model.deactivate()
 
     delta = np.concatenate(results, axis=0)   # [N, 15]
     return delta + nav_np                     # x_t^{+-} = delta + x_{t-1}^+

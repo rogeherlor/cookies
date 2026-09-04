@@ -65,73 +65,57 @@ def init_logging():
 log = init_logging()   # module-level so helpers can use it
 
 
-# ── PyTorch wrapper (mirrors 0_onxx_converter.py, no hidden state I/O) ───────
+# ── PyTorch wrapper — imported, not duplicated ────────────────────────────────
+# 0_onxx_converter.py owns the definition of the exported graph. This file used
+# to keep its own copy, which is how the two drifted: the copy here still
+# carried BIAS_HH_EPS and constant h0 after the exporter moved to a stateful
+# cell, so the "MAE vs PyTorch" line would have compared the quantised stateful
+# graph against a memoryless reference and reported nonsense.
 
-class DeepKFNetONNX(torch.nn.Module):
-    """Matches the exported ONNX: two unrolled single-layer LSTMs, no h0/c0.
+def _load_converter():
+    import importlib.util
+    _p = _HERE / "0_onxx_converter.py"
+    _spec = importlib.util.spec_from_file_location("_dkf_conv", str(_p))
+    _m = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_m)
+    return _m
 
-    Accepts x [batch, 1, 15] = nav_state.  Returns delta [batch, 15].
-    Caller adds the residual: state = delta + nav_np.
-    bias_hh is offset by BIAS_HH_EPS so the LSTM recurrent branch is never
-    all-zeros during Hailo calibration (which always starts with h0=0).
-    """
-    BIAS_HH_EPS = 1e-2
-
-    def __init__(self, model: DeepKFNet):
-        super().__init__()
-        orig = model.lstm.lstm
-        d_in  = orig.input_size   # 15
-        d_hid = orig.hidden_size  # 128
-
-        self.lstm_l0 = torch.nn.LSTM(d_in,  d_hid, num_layers=1, batch_first=True)
-        self.lstm_l1 = torch.nn.LSTM(d_hid, d_hid, num_layers=1, batch_first=True)
-
-        self.lstm_l0.weight_ih_l0.data.copy_(orig.weight_ih_l0)
-        self.lstm_l0.weight_hh_l0.data.copy_(orig.weight_hh_l0)
-        self.lstm_l0.bias_ih_l0.data.copy_(orig.bias_ih_l0)
-        self.lstm_l0.bias_hh_l0.data.copy_(orig.bias_hh_l0 + self.BIAS_HH_EPS)
-
-        self.lstm_l1.weight_ih_l0.data.copy_(orig.weight_ih_l1)
-        self.lstm_l1.weight_hh_l0.data.copy_(orig.weight_hh_l1)
-        self.lstm_l1.bias_ih_l0.data.copy_(orig.bias_ih_l1)
-        self.lstm_l1.bias_hh_l0.data.copy_(orig.bias_hh_l1 + self.BIAS_HH_EPS)
-
-        self.decoder = model.decoder
-
-    def forward(self, x):   # x: [batch, 1, 15]
-        out, _ = self.lstm_l0(x)
-        out, _ = self.lstm_l1(out)
-        h_out = out[:, 0, :]               # (batch, 128)
-        return self.decoder(h_out)         # (batch, 15)  — delta only
+DeepKFNetONNX = _load_converter().DeepKFNetONNX
 
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
+# Every backend is fed the SAME captured (x, h, c) tuples, so each call is an
+# independent single step with a real recurrent context. That is both what the
+# quantiser needs to see and what makes the three backends comparable per step.
 
 def _make_x(nav_np):
-    """Add seq dim -> [N, 1, 15]."""
+    """Add seq dim -> [N, 1, D]."""
     return nav_np[:, np.newaxis, :]
 
 
-def infer_pytorch(model, nav_np):
-    """Run PyTorch model on numpy arrays, return numpy state [N, 15].
-
-    The ONNX wrapper outputs delta only; add nav_np as the residual here.
-    """
-    x = _make_x(nav_np)
+def infer_pytorch(model, nav_np, states):
+    """Run the PyTorch cell on captured states, return state [N, 15]."""
+    h0, c0, h1, c1 = states
     with torch.no_grad():
-        delta = model(torch.from_numpy(x).float()).numpy()
-    return delta + nav_np  # x_t^{+-} = delta + x_{t-1}^+
+        delta, *_ = model(torch.from_numpy(_make_x(nav_np)).float(),
+                          torch.from_numpy(_make_x(h0)).float(),
+                          torch.from_numpy(_make_x(c0)).float(),
+                          torch.from_numpy(_make_x(h1)).float(),
+                          torch.from_numpy(_make_x(c1)).float())
+    return delta.numpy() + nav_np      # x_t^{+-} = delta + x_{t-1}^+
 
 
-def infer_onnx(session, nav_np):
-    """Run onnxruntime session, return numpy state [N, 15]."""
+def infer_onnx(session, nav_np, states):
+    """Run onnxruntime session on captured states, return state [N, 15]."""
+    h0, c0, h1, c1 = states
     x = _make_x(nav_np)
+    xh0, xc0, xh1, xc1 = _make_x(h0), _make_x(c0), _make_x(h1), _make_x(c1)
     results = []
     for i in range(len(x)):
-        out = session.run(None, {"x": x[i : i + 1]})
+        out = session.run(None, {"x": x[i:i+1], "h_l0": xh0[i:i+1], "c_l0": xc0[i:i+1],
+                                 "h_l1": xh1[i:i+1], "c_l1": xc1[i:i+1]})
         results.append(out[0])   # delta [1, 15]
-    delta = np.concatenate(results, axis=0)
-    return delta + nav_np  # residual
+    return np.concatenate(results, axis=0) + nav_np
 
 
 def _hailo_input_names(runner):
@@ -140,24 +124,44 @@ def _hailo_input_names(runner):
     return [l.name for l in layers]
 
 
-def infer_hailo(runner, ctx, nav_np):
-    """Run Hailo emulator inference, return numpy state [N, 15].
+def _to_nhwc(arr3):
+    """[N, 1, D] -> [N, 1, 1, D] NHWC, the 4-D layout Hailo stores inputs in."""
+    return arr3[:, :, np.newaxis, :]
 
-    Hailo stores inputs in NHWC 4-D format internally.  Parsing with shape
-    [1, 1, 15] causes Hailo to add a channel dim -> [1, 1, 1, 15].  We must
-    provide the same 4-D shape at inference time.
 
-    The ONNX/HAR output is delta only; add nav_np as the residual here.
+def infer_hailo(runner, ctx, nav_np, states):
+    """Run Hailo emulator inference on captured states, return state [N, 15].
+
+    Five inputs now (x plus both layers' h/c) and five outputs. The input names
+    are taken in parse order, which 1_parsing.py fixes as
+    x, h_l0, c_l0, h_l1, c_l1.
     """
+    h0, c0, h1, c1 = states
     names = _hailo_input_names(runner)
-    log.debug("Hailo input layer names: %s", names)
-    if len(names) != 1:
+    if len(names) != 5:
         raise RuntimeError(
-            f"Expected 1 Hailo input layer, got {len(names)}: {names}"
-        )
-    x = _make_x(nav_np)[:, :, np.newaxis, :]  # [N, 1, 1, 15] NHWC
-    results = runner.infer(ctx, {names[0]: x})
-    delta = np.concatenate(results, axis=0)
+            f"Expected 5 Hailo input layers (x, h_l0, c_l0, h_l1, c_l1), "
+            f"got {len(names)}: {names}. Re-run 1_parsing.py — the graph must "
+            f"be the stateful cell, not the old memoryless export.")
+    feed = dict(zip(names, (_to_nhwc(_make_x(nav_np)),
+                            _to_nhwc(_make_x(h0)), _to_nhwc(_make_x(c0)),
+                            _to_nhwc(_make_x(h1)), _to_nhwc(_make_x(c1)))))
+    results = runner.infer(ctx, feed)
+    if not isinstance(results, (list, tuple)):
+        results = [results]
+    # Pick the delta head by width rather than position: the compiler is free to
+    # reorder outputs, and silently taking results[0] would return a hidden
+    # state (128 wide) reshaped into a state vector.
+    delta = None
+    for r in results:
+        a = np.asarray(r)
+        if a.reshape(a.shape[0], -1).shape[1] == nav_np.shape[1]:
+            delta = a.reshape(a.shape[0], -1)
+            break
+    if delta is None:
+        raise RuntimeError(
+            f"No Hailo output of width {nav_np.shape[1]} (the delta head); "
+            f"got widths {[np.asarray(r).reshape(np.asarray(r).shape[0], -1).shape[1] for r in results]}")
     return delta + nav_np  # residual
 
 
@@ -199,38 +203,110 @@ def main():
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--nav-dim",    type=int, default=NAV_DIM)
+    parser.add_argument("--calib-seqs", nargs="+", default=["00"],
+                        help="KITTI sequences to capture calibration states "
+                             "from. MUST exclude this fold's held-out sequence. "
+                             "build_per_fold_hefs.py passes the fold's five "
+                             "training sequences; the default '00' is a "
+                             "leak-free but narrow fallback.")
     args = parser.parse_args()
 
-    # ── Calibration data — real KITTI navigation states ───────────────────────
-    # Synthetic random data gives unrepresentative activation ranges through
-    # the LSTM normalization layers, causing the Hailo SDK to over-compress them.
-    # Real nav states (position [m], velocity [m/s], angles [rad], biases) produce
-    # the correct dynamic range so the quantizer assigns sensible bit-widths.
+    # ── Calibration data — REAL e_norm_in from a live CPU run ─────────────────
+    # The HEF is fed the normalised error state e_norm_in = (e-norm_mean)/
+    # norm_std (see deep_kf_runner.py's run()/​_run_hailo(), and
+    # hailo_backend.HailoDeepKF's docstring) — small, ~O(1) values, NOT raw
+    # absolute nav states (position in metres, velocity in m/s, with 3 bias
+    # channels that are always exactly zero at t=0 and never move far from
+    # it). Calibrating on the wrong distribution made the quantiser assign
+    # a badly wrong dynamic range: measured mean abs error ~0.19 on the real
+    # signal (the actual signal itself has mean abs magnitude ~0.09 — the
+    # error was LARGER than the quantity being predicted), denormalising to
+    # several metres of spurious position error. Capturing the real signal
+    # from an actual run (aided + a genuine outage window, so the calibration
+    # set spans the network's whole real operating range) via a forward hook
+    # — no filter logic duplicated, so this is the true production
+    # distribution, not an approximation of it.
     _scripts = _REPO_ROOT / "scripts/positioning/python"
     try:
         if str(_scripts) not in sys.path:
             sys.path.insert(0, str(_scripts))
+        _dkf_dir = _REPO_ROOT / "scripts/positioning/python/dl_filters/deep_kf"
+        if str(_dkf_dir) not in sys.path:
+            sys.path.insert(0, str(_dkf_dir))
+        import os as _os
         import data_loader as _dl
-        _nav = _dl.get_kitti_dataset("00")
-        # Build nav state matrix: [p(3) | v(3) | rpy(3) | b_acc(3) | b_gyr(3)]
-        import pymap3d as _pm
-        _e, _n, _u = _pm.geodetic2enu(
-            _nav.lla[:, 0], _nav.lla[:, 1], _nav.lla[:, 2],
-            _nav.lla0[0], _nav.lla0[1], _nav.lla0[2])
-        _p = np.column_stack([_e, _n, _u]).astype(np.float32)
-        _v = _nav.vel_enu.astype(np.float32)
-        _r = _nav.orient.astype(np.float32)
-        _ba = np.zeros((_p.shape[0], 3), np.float32)
-        _bg = np.zeros((_p.shape[0], 3), np.float32)
-        all_states = np.concatenate([_p, _v, _r, _ba, _bg], axis=1)  # (N, 15)
-        idx = np.linspace(0, len(all_states) - 1, N_CALIB, dtype=int)
-        calib_nav = all_states[idx]
-        log.info("Calibration: using %d real KITTI nav states", len(calib_nav))
+        import deep_kf_runner as _dkr
+        from model import DeepKFNet as _DeepKFNet
+
+        # Capture over SEVERAL sequences, not one. Calibration sets the INT8
+        # ranges, and during an outage this model runs autoregressively: its own
+        # prediction becomes the next input, so the state wanders well outside
+        # the range any single drive visits. Calibrating on seq 00 alone left
+        # the quantiser mis-ranged out there, and the resulting error was not
+        # zero-mean noise but a systematic per-channel BIAS (~0.095 against a
+        # signal of magnitude ~1.08, measured along the real seq-10 trajectory).
+        # Integrated over ~6000 outage steps that bias is what turned a 69 m
+        # CPU result into 1041 m on device. Injecting zero-mean noise of the
+        # same size moved ATE by only ~13%, which is how the bias was isolated.
+        _captured = []
+        _orig_forward = _DeepKFNet.forward
+
+        def _hooked(self, nav_state, hidden=None):
+            # Capture the INPUT recurrent context alongside the input state.
+            # The graph now takes h/c as real inputs, so the quantiser has to
+            # see their true distribution; calibrating them at zero was what
+            # collapsed their range and forced the old constant-h0 workaround.
+            _hd = self.lstm.lstm.hidden_size
+            if hidden is None:
+                _b = nav_state.shape[0]
+                _h = np.zeros((2, _b, _hd), np.float32)
+                _c = np.zeros((2, _b, _hd), np.float32)
+            else:
+                _h = hidden[0].detach().cpu().numpy().copy()
+                _c = hidden[1].detach().cpu().numpy().copy()
+            _captured.append((nav_state.detach().cpu().numpy().copy(), _h, _c))
+            return _orig_forward(self, nav_state, hidden)
+
+        _prev_w = _os.environ.get('DEEP_KF_WEIGHTS')
+        _os.environ['DEEP_KF_WEIGHTS'] = str(args.artifact)  # calibrate on THESE weights
+        _DeepKFNet.forward = _hooked
+        try:
+            # 40s/60s matches the project's standard outage scenario, so the
+            # calibration set spans both aided (kept-warm) and genuine-outage
+            # (actually-used) e_norm_in values.
+            for _cs in args.calib_seqs:
+                _nav_c = _dl.get_kitti_dataset(_cs)
+                _dkr.run(_nav_c, backend='cpu',
+                         outage_config={'start': 40., 'duration': 60.})
+        finally:
+            _DeepKFNet.forward = _orig_forward
+            if _prev_w is None:
+                _os.environ.pop('DEEP_KF_WEIGHTS', None)
+            else:
+                _os.environ['DEEP_KF_WEIGHTS'] = _prev_w
+
+        _x = np.concatenate([a for a, _, _ in _captured], axis=0)
+        _x = (_x[:, 0, :] if _x.ndim == 3 else _x).astype(np.float32)
+        _hh = np.stack([h for _, h, _ in _captured], axis=0)   # (T, 2, B, H)
+        _cc = np.stack([c for _, _, c in _captured], axis=0)
+        _hh = _hh[:, :, 0, :].astype(np.float32)               # (T, 2, H)
+        _cc = _cc[:, :, 0, :].astype(np.float32)
+        idx = np.linspace(0, len(_x) - 1, N_CALIB, dtype=int)
+        calib_nav    = _x[idx]
+        calib_states = (_hh[idx, 0], _cc[idx, 0], _hh[idx, 1], _cc[idx, 1])
+        log.info("Calibration: using %d real (e_norm_in, h, c) tuples captured "
+                 "from live CPU runs on seqs %s (40s/60s outage each)",
+                 len(calib_nav), ",".join(args.calib_seqs))
     except Exception as _e_cal:
-        log.warning("KITTI calibration data unavailable (%s) — using synthetic data.", _e_cal)
+        log.warning("Real capture unavailable (%s) — using synthetic N(0,1) "
+                    "data (matches the ~O(1) normalised scale).", _e_cal)
         rng = np.random.default_rng(42)
         calib_nav = rng.standard_normal((N_CALIB, args.nav_dim)).astype(np.float32)
-    infer_nav = calib_nav[:N_INFER]
+        _hd = args.hidden_dim
+        calib_states = tuple(
+            rng.standard_normal((N_CALIB, _hd)).astype(np.float32) for _ in range(4))
+    infer_nav    = calib_nav[:N_INFER]
+    infer_states = tuple(a[:N_INFER] for a in calib_states)
 
     backends = {}
 
@@ -253,14 +329,14 @@ def main():
     wrapped.eval()
 
     log.info("PyTorch inference ...")
-    backends["PyTorch"] = infer_pytorch(wrapped, infer_nav)
+    backends["PyTorch"] = infer_pytorch(wrapped, infer_nav, infer_states)
 
     # ── 2. ONNX ───────────────────────────────────────────────────────────────
     if ONNX_PATH.exists():
         import onnxruntime as ort
         log.info("ONNX inference: %s", ONNX_PATH)
         session = ort.InferenceSession(str(ONNX_PATH))
-        backends["ONNX"] = infer_onnx(session, infer_nav)
+        backends["ONNX"] = infer_onnx(session, infer_nav, infer_states)
     else:
         log.warning("ONNX not found (%s) — skipping.", ONNX_PATH)
 
@@ -271,13 +347,17 @@ def main():
         runner = ClientRunner(har=str(HAR_PATH))
         hailo_names = _hailo_input_names(runner)
         log.info("Hailo input layer name(s): %s", hailo_names)
-        calib_x = _make_x(calib_nav)[:, :, np.newaxis, :]  # [N_CALIB, 1, 1, 15] NHWC
-        calib_dataset = {hailo_names[0]: calib_x}
+        # All five inputs are calibrated on their REAL captured distributions.
+        _ch0, _cc0, _ch1, _cc1 = calib_states
+        calib_dataset = dict(zip(hailo_names, (
+            _to_nhwc(_make_x(calib_nav)),
+            _to_nhwc(_make_x(_ch0)), _to_nhwc(_make_x(_cc0)),
+            _to_nhwc(_make_x(_ch1)), _to_nhwc(_make_x(_cc1)))))
 
         # 3. SDK_NATIVE — no modifications
         log.info("Hailo SDK_NATIVE inference ...")
         with runner.infer_context(InferenceContext.SDK_NATIVE) as ctx:
-            backends["SDK_NATIVE"] = infer_hailo(runner, ctx, infer_nav)
+            backends["SDK_NATIVE"] = infer_hailo(runner, ctx, infer_nav, infer_states)
 
         # 4. Full-precision optimization -> SDK_FP_OPTIMIZED
         log.info("Running optimize_full_precision() ...")
@@ -285,7 +365,7 @@ def main():
 
         log.info("Hailo SDK_FP_OPTIMIZED inference ...")
         with runner.infer_context(InferenceContext.SDK_FP_OPTIMIZED) as ctx:
-            backends["SDK_FP_OPT"] = infer_hailo(runner, ctx, infer_nav)
+            backends["SDK_FP_OPT"] = infer_hailo(runner, ctx, infer_nav, infer_states)
 
         # 5. Quantization -> SDK_QUANTIZED
         # Two Hailo SDK bugs encountered and worked around:
@@ -314,19 +394,25 @@ def main():
 
             log.info("Hailo SDK_QUANTIZED inference ...")
             with runner.infer_context(InferenceContext.SDK_QUANTIZED) as ctx:
-                backends["SDK_QUANTIZED"] = infer_hailo(runner, ctx, infer_nav)
+                backends["SDK_QUANTIZED"] = infer_hailo(runner, ctx, infer_nav, infer_states)
         except Exception as e:
-            log.warning(
-                "Quantization failed (%s: %s). "
+            # Fatal on purpose — see the same guard in tlio/2_optimisation.py.
+            # 3_compilation.py compiles whatever quantized HAR is on disk, so a
+            # swallowed failure here silently ships the previous fold's weights.
+            log.error(
+                "Quantization FAILED (%s: %s). "
                 "Root cause: normalization2/7 (wrapping W_hh @ h in the LSTM recurrent "
                 "branch) receive near-zero activations during calibration because Hailo "
                 "runs each calibration sample independently with constant h₀. "
                 "The SDK over-compresses them to ≤2-bit, producing NaN kernels. "
                 "Fix: re-export ONNX with H_INIT=1.0 constant h₀ (0_onxx_converter.py), "
                 "re-parse (1_parsing.py), then re-run this script. "
-                "SDK_NATIVE and SDK_FP_OPTIMIZED results are still valid.",
+                "Not writing the quantized HAR — the stale one on disk belongs to a "
+                "different export, and no HEF may be built from this run.",
                 type(e).__name__, e,
             )
+            print_comparison(backends)
+            raise
 
     # ── Print results ─────────────────────────────────────────────────────────
     print_comparison(backends)

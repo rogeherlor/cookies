@@ -1,0 +1,4196 @@
+{
+    "version": "2.0",
+    "creation_time": "Fri Jul 17 18:08:35 2026",
+    "clock_cycle_MHz": 200,
+    "hef": {
+        "path": "deep_iekf.hef",
+        "file_hash": "e746301f4f8c43a1b905a2cef227791a"
+    },
+    "runs": [
+        {
+            "batch_size": 1,
+            "mean_activation_time_ms": 0.229722,
+            "mean_deactivation_time_ms": 0.015417,
+            "network_group_id": 0,
+            "fps": 3655.61837989524,
+            "contexts": [
+                {
+                    "action_list_base_address": 544570,
+                    "action_list_size": 63,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "activation",
+                    "actions": [
+                        {
+                            "address": 544575,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 544580,
+                            "timestamp": 0,
+                            "type": "open_boundary_output_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 544605,
+                            "timestamp": 0,
+                            "type": "open_boundary_input_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 544761,
+                    "action_list_size": 479,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "preliminary",
+                    "actions": [
+                        {
+                            "address": 544766,
+                            "timestamp": 23832,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 544792,
+                            "timestamp": 24727,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 544818,
+                            "timestamp": 25048,
+                            "type": "disable_lcu",
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 544824,
+                            "timestamp": 26067,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 544827,
+                            "timestamp": 26067,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 544830,
+                            "timestamp": 26067,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 544838,
+                            "timestamp": 28852,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 10,
+                                "last_executed": 10,
+                                "sub_action_type": "disable_lcu"
+                            }
+                        },
+                        {
+                            "address": 544841,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 544842,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 544843,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 544844,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 544845,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 544846,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 544847,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 544848,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 544849,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 544850,
+                            "timestamp": 28852,
+                            "type": "disable_lcu",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 544856,
+                            "timestamp": 29881,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 544859,
+                            "timestamp": 29881,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 544862,
+                            "timestamp": 29881,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 81,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 544870,
+                            "timestamp": 38928,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 5
+                            }
+                        },
+                        {
+                            "address": 544876,
+                            "timestamp": 41524,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 0
+                            }
+                        },
+                        {
+                            "address": 544925,
+                            "timestamp": 41902,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 6
+                            }
+                        },
+                        {
+                            "address": 544931,
+                            "timestamp": 43616,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 1
+                            }
+                        },
+                        {
+                            "address": 544980,
+                            "timestamp": 83685,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 0
+                            }
+                        },
+                        {
+                            "address": 544986,
+                            "timestamp": 84300,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 1
+                            }
+                        },
+                        {
+                            "address": 544992,
+                            "timestamp": 84680,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 18
+                            }
+                        },
+                        {
+                            "address": 544998,
+                            "timestamp": 85058,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 19
+                            }
+                        },
+                        {
+                            "address": 545004,
+                            "timestamp": 85438,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 17
+                            }
+                        },
+                        {
+                            "address": 545010,
+                            "timestamp": 86137,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 545055,
+                            "timestamp": 86834,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545103,
+                            "timestamp": 87192,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545110,
+                            "timestamp": 87609,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545124,
+                            "timestamp": 88102,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 545129,
+                            "timestamp": 89275,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 545132,
+                            "timestamp": 89275,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 545134,
+                            "timestamp": 89275,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 545136,
+                            "timestamp": 89275,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 545143,
+                            "timestamp": 89768,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 20
+                            }
+                        },
+                        {
+                            "address": 545149,
+                            "timestamp": 90149,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 21
+                            }
+                        },
+                        {
+                            "address": 545155,
+                            "timestamp": 91325,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 545158,
+                            "timestamp": 91325,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 545160,
+                            "timestamp": 91325,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 545162,
+                            "timestamp": 91325,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 545169,
+                            "timestamp": 91717,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 22
+                            }
+                        },
+                        {
+                            "address": 545175,
+                            "timestamp": 92098,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 23
+                            }
+                        },
+                        {
+                            "address": 545181,
+                            "timestamp": 93274,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 545184,
+                            "timestamp": 93274,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 545186,
+                            "timestamp": 93274,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 545188,
+                            "timestamp": 93274,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 545195,
+                            "timestamp": 93666,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 24
+                            }
+                        },
+                        {
+                            "address": 545201,
+                            "timestamp": 94047,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 25
+                            }
+                        },
+                        {
+                            "address": 545207,
+                            "timestamp": 94853,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 545210,
+                            "timestamp": 94853,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 545212,
+                            "timestamp": 94853,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 545219,
+                            "timestamp": 95245,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 13
+                            }
+                        },
+                        {
+                            "address": 545225,
+                            "timestamp": 95626,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 14
+                            }
+                        },
+                        {
+                            "address": 545231,
+                            "timestamp": 96090,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 545238,
+                            "timestamp": 96554,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 545259,
+                    "action_list_size": 124,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "dynamic_0",
+                    "actions": [
+                        {
+                            "address": 545264,
+                            "timestamp": 0,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 545309,
+                            "timestamp": 0,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545357,
+                            "timestamp": 0,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545364,
+                            "timestamp": 0,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545378,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 545383,
+                            "timestamp": 0,
+                            "type": "application_change_interrupt",
+                            "data": {}
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 544652,
+                    "action_list_size": 90,
+                    "batch_counter": 0,
+                    "idle_time": 0,
+                    "context_name": "batch_switching",
+                    "actions": [
+                        {
+                            "address": 544657,
+                            "timestamp": 0,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 11,
+                                "last_executed": 0,
+                                "sub_action_type": "switch_lcu_batch"
+                            }
+                        },
+                        {
+                            "address": 544660,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544666,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544672,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544678,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 4,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544684,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 3,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544690,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544696,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 1,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544702,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 2,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544708,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 5,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544714,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 6,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544720,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 10,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 7,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 544731,
+                            "timestamp": 0,
+                            "type": "ddr_buffering_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 544736,
+                            "timestamp": 0,
+                            "type": "change boundary input batch",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 544742,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "batch_size": 2,
+            "mean_activation_time_ms": 0.22421,
+            "mean_deactivation_time_ms": 0.013047,
+            "network_group_id": 1,
+            "fps": 3655.8421312295864,
+            "contexts": [
+                {
+                    "action_list_base_address": 545402,
+                    "action_list_size": 63,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "activation",
+                    "actions": [
+                        {
+                            "address": 545407,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 545412,
+                            "timestamp": 0,
+                            "type": "open_boundary_output_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 545437,
+                            "timestamp": 0,
+                            "type": "open_boundary_input_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 545593,
+                    "action_list_size": 479,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "preliminary",
+                    "actions": [
+                        {
+                            "address": 545598,
+                            "timestamp": 23851,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 545624,
+                            "timestamp": 24746,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 545650,
+                            "timestamp": 25066,
+                            "type": "disable_lcu",
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 545656,
+                            "timestamp": 26083,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 545659,
+                            "timestamp": 26083,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 545662,
+                            "timestamp": 26083,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 545670,
+                            "timestamp": 28858,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 10,
+                                "last_executed": 10,
+                                "sub_action_type": "disable_lcu"
+                            }
+                        },
+                        {
+                            "address": 545673,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 545674,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 545675,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 545676,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 545677,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 545678,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 545679,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 545680,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 545681,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 545682,
+                            "timestamp": 28858,
+                            "type": "disable_lcu",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 545688,
+                            "timestamp": 29885,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 545691,
+                            "timestamp": 29885,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 545694,
+                            "timestamp": 29885,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 81,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 545702,
+                            "timestamp": 39321,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 5
+                            }
+                        },
+                        {
+                            "address": 545708,
+                            "timestamp": 41914,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 0
+                            }
+                        },
+                        {
+                            "address": 545757,
+                            "timestamp": 42291,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 6
+                            }
+                        },
+                        {
+                            "address": 545763,
+                            "timestamp": 44004,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 1
+                            }
+                        },
+                        {
+                            "address": 545812,
+                            "timestamp": 84076,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 0
+                            }
+                        },
+                        {
+                            "address": 545818,
+                            "timestamp": 84690,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 1
+                            }
+                        },
+                        {
+                            "address": 545824,
+                            "timestamp": 85069,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 18
+                            }
+                        },
+                        {
+                            "address": 545830,
+                            "timestamp": 85446,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 19
+                            }
+                        },
+                        {
+                            "address": 545836,
+                            "timestamp": 85825,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 17
+                            }
+                        },
+                        {
+                            "address": 545842,
+                            "timestamp": 86524,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 545887,
+                            "timestamp": 87220,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545935,
+                            "timestamp": 87577,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545942,
+                            "timestamp": 87994,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545956,
+                            "timestamp": 88486,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 545961,
+                            "timestamp": 89659,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 545964,
+                            "timestamp": 89659,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 545966,
+                            "timestamp": 89659,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 545968,
+                            "timestamp": 89659,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 545975,
+                            "timestamp": 90050,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 20
+                            }
+                        },
+                        {
+                            "address": 545981,
+                            "timestamp": 90430,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 21
+                            }
+                        },
+                        {
+                            "address": 545987,
+                            "timestamp": 91606,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 545990,
+                            "timestamp": 91606,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 545992,
+                            "timestamp": 91606,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 545994,
+                            "timestamp": 91606,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 546001,
+                            "timestamp": 91997,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 22
+                            }
+                        },
+                        {
+                            "address": 546007,
+                            "timestamp": 92377,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 23
+                            }
+                        },
+                        {
+                            "address": 546013,
+                            "timestamp": 93553,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 546016,
+                            "timestamp": 93553,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 546018,
+                            "timestamp": 93553,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 546020,
+                            "timestamp": 93553,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 546027,
+                            "timestamp": 93944,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 24
+                            }
+                        },
+                        {
+                            "address": 546033,
+                            "timestamp": 94324,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 25
+                            }
+                        },
+                        {
+                            "address": 546039,
+                            "timestamp": 95130,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 546042,
+                            "timestamp": 95130,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 546044,
+                            "timestamp": 95130,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 546051,
+                            "timestamp": 95521,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 13
+                            }
+                        },
+                        {
+                            "address": 546057,
+                            "timestamp": 95901,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 14
+                            }
+                        },
+                        {
+                            "address": 546063,
+                            "timestamp": 96364,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 546070,
+                            "timestamp": 96827,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 546091,
+                    "action_list_size": 124,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "dynamic_0",
+                    "actions": [
+                        {
+                            "address": 546096,
+                            "timestamp": 0,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 546141,
+                            "timestamp": 0,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 546189,
+                            "timestamp": 0,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 546196,
+                            "timestamp": 0,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 546210,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 546215,
+                            "timestamp": 0,
+                            "type": "application_change_interrupt",
+                            "data": {}
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 545484,
+                    "action_list_size": 90,
+                    "batch_counter": 0,
+                    "idle_time": 0,
+                    "context_name": "batch_switching",
+                    "actions": [
+                        {
+                            "address": 545489,
+                            "timestamp": 0,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 11,
+                                "last_executed": 0,
+                                "sub_action_type": "switch_lcu_batch"
+                            }
+                        },
+                        {
+                            "address": 545492,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545498,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545504,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545510,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 4,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545516,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 3,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545522,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545528,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 1,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545534,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 2,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545540,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 5,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545546,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 6,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545552,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 10,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 7,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 545563,
+                            "timestamp": 0,
+                            "type": "ddr_buffering_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 545568,
+                            "timestamp": 0,
+                            "type": "change boundary input batch",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 545574,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "batch_size": 4,
+            "mean_activation_time_ms": 0.277595,
+            "mean_deactivation_time_ms": 0.012489,
+            "network_group_id": 2,
+            "fps": 3655.6623286414247,
+            "contexts": [
+                {
+                    "action_list_base_address": 546234,
+                    "action_list_size": 63,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "activation",
+                    "actions": [
+                        {
+                            "address": 546239,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 546244,
+                            "timestamp": 0,
+                            "type": "open_boundary_output_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 546269,
+                            "timestamp": 0,
+                            "type": "open_boundary_input_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 546425,
+                    "action_list_size": 479,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "preliminary",
+                    "actions": [
+                        {
+                            "address": 546430,
+                            "timestamp": 23863,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 546456,
+                            "timestamp": 24759,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 546482,
+                            "timestamp": 25080,
+                            "type": "disable_lcu",
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 546488,
+                            "timestamp": 26099,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 546491,
+                            "timestamp": 26099,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 546494,
+                            "timestamp": 26099,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 546502,
+                            "timestamp": 28884,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 10,
+                                "last_executed": 10,
+                                "sub_action_type": "disable_lcu"
+                            }
+                        },
+                        {
+                            "address": 546505,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 546506,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 546507,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 546508,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 546509,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 546510,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 546511,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 546512,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 546513,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 546514,
+                            "timestamp": 28884,
+                            "type": "disable_lcu",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 546520,
+                            "timestamp": 29914,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 546523,
+                            "timestamp": 29914,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 546526,
+                            "timestamp": 29914,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 81,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 546534,
+                            "timestamp": 37058,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 5
+                            }
+                        },
+                        {
+                            "address": 546540,
+                            "timestamp": 39653,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 0
+                            }
+                        },
+                        {
+                            "address": 546589,
+                            "timestamp": 40031,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 6
+                            }
+                        },
+                        {
+                            "address": 546595,
+                            "timestamp": 41745,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 1
+                            }
+                        },
+                        {
+                            "address": 546644,
+                            "timestamp": 81814,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 0
+                            }
+                        },
+                        {
+                            "address": 546650,
+                            "timestamp": 82429,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 1
+                            }
+                        },
+                        {
+                            "address": 546656,
+                            "timestamp": 82809,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 18
+                            }
+                        },
+                        {
+                            "address": 546662,
+                            "timestamp": 83187,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 19
+                            }
+                        },
+                        {
+                            "address": 546668,
+                            "timestamp": 83567,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 17
+                            }
+                        },
+                        {
+                            "address": 546674,
+                            "timestamp": 84266,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 546719,
+                            "timestamp": 84963,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 546767,
+                            "timestamp": 85321,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 546774,
+                            "timestamp": 85738,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 546788,
+                            "timestamp": 86231,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 546793,
+                            "timestamp": 87404,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 546796,
+                            "timestamp": 87404,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 546798,
+                            "timestamp": 87404,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 546800,
+                            "timestamp": 87404,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 546807,
+                            "timestamp": 87796,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 20
+                            }
+                        },
+                        {
+                            "address": 546813,
+                            "timestamp": 88177,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 21
+                            }
+                        },
+                        {
+                            "address": 546819,
+                            "timestamp": 89453,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 546822,
+                            "timestamp": 89453,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 546824,
+                            "timestamp": 89453,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 546826,
+                            "timestamp": 89453,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 546833,
+                            "timestamp": 89845,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 22
+                            }
+                        },
+                        {
+                            "address": 546839,
+                            "timestamp": 90226,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 23
+                            }
+                        },
+                        {
+                            "address": 546845,
+                            "timestamp": 91402,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 546848,
+                            "timestamp": 91402,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 546850,
+                            "timestamp": 91402,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 546852,
+                            "timestamp": 91402,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 546859,
+                            "timestamp": 91794,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 24
+                            }
+                        },
+                        {
+                            "address": 546865,
+                            "timestamp": 92175,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 25
+                            }
+                        },
+                        {
+                            "address": 546871,
+                            "timestamp": 92981,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 546874,
+                            "timestamp": 92981,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 546876,
+                            "timestamp": 92981,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 546883,
+                            "timestamp": 93373,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 13
+                            }
+                        },
+                        {
+                            "address": 546889,
+                            "timestamp": 93754,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 14
+                            }
+                        },
+                        {
+                            "address": 546895,
+                            "timestamp": 94219,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 546902,
+                            "timestamp": 94683,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 546923,
+                    "action_list_size": 124,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "dynamic_0",
+                    "actions": [
+                        {
+                            "address": 546928,
+                            "timestamp": 0,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 546973,
+                            "timestamp": 0,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547021,
+                            "timestamp": 0,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547028,
+                            "timestamp": 0,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547042,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 547047,
+                            "timestamp": 0,
+                            "type": "application_change_interrupt",
+                            "data": {}
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 546316,
+                    "action_list_size": 90,
+                    "batch_counter": 0,
+                    "idle_time": 0,
+                    "context_name": "batch_switching",
+                    "actions": [
+                        {
+                            "address": 546321,
+                            "timestamp": 0,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 11,
+                                "last_executed": 0,
+                                "sub_action_type": "switch_lcu_batch"
+                            }
+                        },
+                        {
+                            "address": 546324,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546330,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546336,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546342,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 4,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546348,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 3,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546354,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546360,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 1,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546366,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 2,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546372,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 5,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546378,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 6,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546384,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 10,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 7,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 546395,
+                            "timestamp": 0,
+                            "type": "ddr_buffering_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 546400,
+                            "timestamp": 0,
+                            "type": "change boundary input batch",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 546406,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "batch_size": 8,
+            "mean_activation_time_ms": 0.45728799999999997,
+            "mean_deactivation_time_ms": 0.008813,
+            "network_group_id": 3,
+            "fps": 3655.728115402359,
+            "contexts": [
+                {
+                    "action_list_base_address": 547066,
+                    "action_list_size": 63,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "activation",
+                    "actions": [
+                        {
+                            "address": 547071,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 547076,
+                            "timestamp": 0,
+                            "type": "open_boundary_output_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 547101,
+                            "timestamp": 0,
+                            "type": "open_boundary_input_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 547257,
+                    "action_list_size": 479,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "preliminary",
+                    "actions": [
+                        {
+                            "address": 547262,
+                            "timestamp": 23878,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 547288,
+                            "timestamp": 24770,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 547314,
+                            "timestamp": 25090,
+                            "type": "disable_lcu",
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 547320,
+                            "timestamp": 26105,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 547323,
+                            "timestamp": 26105,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 547326,
+                            "timestamp": 26105,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 547334,
+                            "timestamp": 28880,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 10,
+                                "last_executed": 10,
+                                "sub_action_type": "disable_lcu"
+                            }
+                        },
+                        {
+                            "address": 547337,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 547338,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 547339,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 547340,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 547341,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 547342,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 547343,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 547344,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 547345,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 547346,
+                            "timestamp": 28880,
+                            "type": "disable_lcu",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 547352,
+                            "timestamp": 29906,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 547355,
+                            "timestamp": 29906,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 547358,
+                            "timestamp": 29906,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 81,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 547366,
+                            "timestamp": 37238,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 5
+                            }
+                        },
+                        {
+                            "address": 547372,
+                            "timestamp": 39810,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 0
+                            }
+                        },
+                        {
+                            "address": 547421,
+                            "timestamp": 40187,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 6
+                            }
+                        },
+                        {
+                            "address": 547427,
+                            "timestamp": 41941,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 1
+                            }
+                        },
+                        {
+                            "address": 547476,
+                            "timestamp": 81969,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 0
+                            }
+                        },
+                        {
+                            "address": 547482,
+                            "timestamp": 82583,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 1
+                            }
+                        },
+                        {
+                            "address": 547488,
+                            "timestamp": 82962,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 18
+                            }
+                        },
+                        {
+                            "address": 547494,
+                            "timestamp": 83339,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 19
+                            }
+                        },
+                        {
+                            "address": 547500,
+                            "timestamp": 83718,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 17
+                            }
+                        },
+                        {
+                            "address": 547506,
+                            "timestamp": 84417,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 547551,
+                            "timestamp": 85113,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547599,
+                            "timestamp": 85470,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547606,
+                            "timestamp": 85887,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547620,
+                            "timestamp": 86379,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 547625,
+                            "timestamp": 87552,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 547628,
+                            "timestamp": 87552,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 547630,
+                            "timestamp": 87552,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 547632,
+                            "timestamp": 87552,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 547639,
+                            "timestamp": 87943,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 20
+                            }
+                        },
+                        {
+                            "address": 547645,
+                            "timestamp": 88323,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 21
+                            }
+                        },
+                        {
+                            "address": 547651,
+                            "timestamp": 89499,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 547654,
+                            "timestamp": 89499,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 547656,
+                            "timestamp": 89499,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 547658,
+                            "timestamp": 89499,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 547665,
+                            "timestamp": 89890,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 22
+                            }
+                        },
+                        {
+                            "address": 547671,
+                            "timestamp": 90270,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 23
+                            }
+                        },
+                        {
+                            "address": 547677,
+                            "timestamp": 91446,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 547680,
+                            "timestamp": 91446,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 547682,
+                            "timestamp": 91446,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 547684,
+                            "timestamp": 91446,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 547691,
+                            "timestamp": 91837,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 24
+                            }
+                        },
+                        {
+                            "address": 547697,
+                            "timestamp": 92217,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 25
+                            }
+                        },
+                        {
+                            "address": 547703,
+                            "timestamp": 93023,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 547706,
+                            "timestamp": 93023,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 547708,
+                            "timestamp": 93023,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 547715,
+                            "timestamp": 93414,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 13
+                            }
+                        },
+                        {
+                            "address": 547721,
+                            "timestamp": 93794,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 14
+                            }
+                        },
+                        {
+                            "address": 547727,
+                            "timestamp": 94258,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 547734,
+                            "timestamp": 94721,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 547755,
+                    "action_list_size": 124,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "dynamic_0",
+                    "actions": [
+                        {
+                            "address": 547760,
+                            "timestamp": 0,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 547805,
+                            "timestamp": 0,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547853,
+                            "timestamp": 0,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547860,
+                            "timestamp": 0,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547874,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 547879,
+                            "timestamp": 0,
+                            "type": "application_change_interrupt",
+                            "data": {}
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 547148,
+                    "action_list_size": 90,
+                    "batch_counter": 0,
+                    "idle_time": 0,
+                    "context_name": "batch_switching",
+                    "actions": [
+                        {
+                            "address": 547153,
+                            "timestamp": 0,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 11,
+                                "last_executed": 0,
+                                "sub_action_type": "switch_lcu_batch"
+                            }
+                        },
+                        {
+                            "address": 547156,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547162,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547168,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547174,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 4,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547180,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 3,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547186,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547192,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 1,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547198,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 2,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547204,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 5,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547210,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 6,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547216,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 10,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 7,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547227,
+                            "timestamp": 0,
+                            "type": "ddr_buffering_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 547232,
+                            "timestamp": 0,
+                            "type": "change boundary input batch",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 547238,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "batch_size": 16,
+            "mean_activation_time_ms": 0.582808,
+            "mean_deactivation_time_ms": 0.010013,
+            "network_group_id": 4,
+            "fps": 3655.8052932825917,
+            "contexts": [
+                {
+                    "action_list_base_address": 547898,
+                    "action_list_size": 63,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "activation",
+                    "actions": [
+                        {
+                            "address": 547903,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 547908,
+                            "timestamp": 0,
+                            "type": "open_boundary_output_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 547933,
+                            "timestamp": 0,
+                            "type": "open_boundary_input_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 548089,
+                    "action_list_size": 479,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "preliminary",
+                    "actions": [
+                        {
+                            "address": 548094,
+                            "timestamp": 23887,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 548120,
+                            "timestamp": 24782,
+                            "type": "activate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 548146,
+                            "timestamp": 25103,
+                            "type": "disable_lcu",
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 548152,
+                            "timestamp": 26122,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 548155,
+                            "timestamp": 26122,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 548158,
+                            "timestamp": 26122,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 548166,
+                            "timestamp": 28907,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 10,
+                                "last_executed": 10,
+                                "sub_action_type": "disable_lcu"
+                            }
+                        },
+                        {
+                            "address": 548169,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 548170,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 548171,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 548172,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 548173,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 548174,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 548175,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 548176,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 548177,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 548178,
+                            "timestamp": 28907,
+                            "type": "disable_lcu",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 548184,
+                            "timestamp": 29936,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "fetch_cfg_channel_descriptors"
+                            }
+                        },
+                        {
+                            "address": 548187,
+                            "timestamp": 29936,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 0,
+                            "data": {
+                                "channel_index": 1,
+                                "descriptors_count": 1,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 548190,
+                            "timestamp": 29936,
+                            "type": "fetch_cfg_channel_descriptors",
+                            "sub_action_index": 1,
+                            "data": {
+                                "channel_index": 0,
+                                "descriptors_count": 81,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 548198,
+                            "timestamp": 37442,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 5
+                            }
+                        },
+                        {
+                            "address": 548204,
+                            "timestamp": 40038,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 0
+                            }
+                        },
+                        {
+                            "address": 548253,
+                            "timestamp": 40416,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 6
+                            }
+                        },
+                        {
+                            "address": 548259,
+                            "timestamp": 42130,
+                            "type": "trigger_sequencer",
+                            "data": {
+                                "cluster_index": 1
+                            }
+                        },
+                        {
+                            "address": 548308,
+                            "timestamp": 82199,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 0
+                            }
+                        },
+                        {
+                            "address": 548314,
+                            "timestamp": 82814,
+                            "type": "sequencer_done_interrupt",
+                            "data": {
+                                "sequencer_index": 1
+                            }
+                        },
+                        {
+                            "address": 548320,
+                            "timestamp": 83194,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 18
+                            }
+                        },
+                        {
+                            "address": 548326,
+                            "timestamp": 83572,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 19
+                            }
+                        },
+                        {
+                            "address": 548332,
+                            "timestamp": 83952,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 17
+                            }
+                        },
+                        {
+                            "address": 548338,
+                            "timestamp": 84651,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 548383,
+                            "timestamp": 85348,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 548431,
+                            "timestamp": 85706,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 548438,
+                            "timestamp": 86123,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 548452,
+                            "timestamp": 86616,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 548457,
+                            "timestamp": 87789,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 548460,
+                            "timestamp": 87789,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 548462,
+                            "timestamp": 87789,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 548464,
+                            "timestamp": 87789,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 0
+                            }
+                        },
+                        {
+                            "address": 548471,
+                            "timestamp": 88181,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 20
+                            }
+                        },
+                        {
+                            "address": 548477,
+                            "timestamp": 88562,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 21
+                            }
+                        },
+                        {
+                            "address": 548483,
+                            "timestamp": 89738,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 548486,
+                            "timestamp": 89738,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 4
+                            }
+                        },
+                        {
+                            "address": 548488,
+                            "timestamp": 89738,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 3
+                            }
+                        },
+                        {
+                            "address": 548490,
+                            "timestamp": 89738,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 13
+                            }
+                        },
+                        {
+                            "address": 548497,
+                            "timestamp": 90130,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 22
+                            }
+                        },
+                        {
+                            "address": 548503,
+                            "timestamp": 90511,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 23
+                            }
+                        },
+                        {
+                            "address": 548509,
+                            "timestamp": 91687,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 3,
+                                "last_executed": 3,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 548512,
+                            "timestamp": 91687,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 1
+                            }
+                        },
+                        {
+                            "address": 548514,
+                            "timestamp": 91687,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 2
+                            }
+                        },
+                        {
+                            "address": 548516,
+                            "timestamp": 91687,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 5
+                            }
+                        },
+                        {
+                            "address": 548523,
+                            "timestamp": 92079,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 24
+                            }
+                        },
+                        {
+                            "address": 548529,
+                            "timestamp": 92460,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 25
+                            }
+                        },
+                        {
+                            "address": 548535,
+                            "timestamp": 93266,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 2,
+                                "last_executed": 2,
+                                "sub_action_type": "enable_lcu_default"
+                            }
+                        },
+                        {
+                            "address": 548538,
+                            "timestamp": 93266,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 6
+                            }
+                        },
+                        {
+                            "address": 548540,
+                            "timestamp": 93266,
+                            "type": "enable_lcu_default",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 0,
+                                "lcu_index": 7
+                            }
+                        },
+                        {
+                            "address": 548547,
+                            "timestamp": 93658,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 13
+                            }
+                        },
+                        {
+                            "address": 548553,
+                            "timestamp": 94039,
+                            "type": "module_config_done_interrupt",
+                            "data": {
+                                "module_index": 14
+                            }
+                        },
+                        {
+                            "address": 548559,
+                            "timestamp": 94504,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 0,
+                                "config_stream_index": 0,
+                                "engine_index": 0
+                            }
+                        },
+                        {
+                            "address": 548566,
+                            "timestamp": 94968,
+                            "type": "deactivate_cfg_channel",
+                            "data": {
+                                "channel_index": 1,
+                                "config_stream_index": 1,
+                                "engine_index": 0
+                            }
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 548587,
+                    "action_list_size": 124,
+                    "batch_counter": 1,
+                    "idle_time": 0,
+                    "context_name": "dynamic_0",
+                    "actions": [
+                        {
+                            "address": 548592,
+                            "timestamp": 0,
+                            "type": "activate_boundary_output",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 0,
+                                "vdma_channel_index": 16
+                            }
+                        },
+                        {
+                            "address": 548637,
+                            "timestamp": 0,
+                            "type": "activate_boundary_input",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 548685,
+                            "timestamp": 0,
+                            "type": "resume vdma channel",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 548692,
+                            "timestamp": 0,
+                            "type": "fetch_data_from_vdma_channel",
+                            "data": {
+                                "engine_index": 0,
+                                "stream_index": 1,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 548706,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        },
+                        {
+                            "address": 548711,
+                            "timestamp": 0,
+                            "type": "application_change_interrupt",
+                            "data": {}
+                        }
+                    ]
+                },
+                {
+                    "action_list_base_address": 547980,
+                    "action_list_size": 90,
+                    "batch_counter": 0,
+                    "idle_time": 0,
+                    "context_name": "batch_switching",
+                    "actions": [
+                        {
+                            "address": 547985,
+                            "timestamp": 0,
+                            "type": "repeated_action",
+                            "data": {
+                                "count": 11,
+                                "last_executed": 0,
+                                "sub_action_type": "switch_lcu_batch"
+                            }
+                        },
+                        {
+                            "address": 547988,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 0,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 547994,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 1,
+                            "data": {
+                                "cluster_index": 1,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548000,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 2,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 0,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548006,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 3,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 4,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548012,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 4,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 3,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548018,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 5,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 13,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548024,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 6,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 1,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548030,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 7,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 2,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548036,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 8,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 5,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548042,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 9,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 6,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548048,
+                            "timestamp": 0,
+                            "type": "switch_lcu_batch",
+                            "sub_action_index": 10,
+                            "data": {
+                                "cluster_index": 0,
+                                "kernel_done_count": 2,
+                                "lcu_index": 7,
+                                "network_index": 0
+                            }
+                        },
+                        {
+                            "address": 548059,
+                            "timestamp": 0,
+                            "type": "ddr_buffering_reset",
+                            "data": {}
+                        },
+                        {
+                            "address": 548064,
+                            "timestamp": 0,
+                            "type": "change boundary input batch",
+                            "data": {
+                                "engine_index": 0,
+                                "vdma_channel_index": 2
+                            }
+                        },
+                        {
+                            "address": 548070,
+                            "timestamp": 0,
+                            "type": "burst_credits_task_start",
+                            "data": {}
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

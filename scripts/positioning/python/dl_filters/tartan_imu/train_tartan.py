@@ -84,15 +84,23 @@ def build_tartan_dataset(nav, target_hz=TARGET_HZ,
     Returns
     -------
     imu_windows  : (M, lstm_steps, step_samples, 6) float32
-    v_gt_body    : (M, 3) float32 — ground-truth velocity in body frame [m/s]
-    log_std_mask : (M,) bool — True if velocity is reliable (moving, GPS available)
+    v_gt_body    : (M, lstm_steps, 3) float32 — ground-truth body-frame velocity
+                   per LSTM window (paper Eq. 2): the window-integrated relative
+                   velocity v_{j→j+1} = Δp/dt rotated into the body frame, one
+                   target per 1-second window rather than a single last-window one.
     """
+    import ins_cost
+
     accel_flu = nav.accel_flu
     gyro_flu  = nav.gyro_flu
-    orient    = nav.orient
-    vel_enu   = nav.vel_enu
     N         = accel_flu.shape[0]
     src_rate  = nav.sample_rate
+
+    # Ground truth — FGO-Batch (matches the final benchmark's GT_SOURCE), not
+    # raw KITTI OXTS. Cached per-sequence by ins_cost.get_fgo_batch_gt.
+    gt        = ins_cost.get_fgo_batch_gt(nav)
+    orient    = gt['r']
+    vel_enu   = gt['v']
 
     t_src = np.arange(N) / src_rate
     t_up  = np.arange(0., t_src[-1], 1.0 / target_hz)
@@ -135,27 +143,36 @@ def build_tartan_dataset(nav, target_hz=TARGET_HZ,
             win[step, :, 0:3] = accel_gf[ss:ee].astype(np.float32)
             win[step, :, 3:6] = gyro_up[ss:ee].astype(np.float32)
 
-        # Ground-truth velocity in body frame at i_src
-        if i_src + 1 < N:
-            dt    = 1.0 / src_rate
-            # Finite-difference velocity from position (via vel_enu which is GT)
-            v_enu = vel_enu[i_src].copy()
-            R_nb  = _qto_Rbn(_qfrom_euler(orient[i_src, 0],
-                                           orient[i_src, 1],
-                                           orient[i_src, 2]))
-            R_bn  = R_nb.T
-            v_body = R_bn @ v_enu   # (3,)
-        else:
+        # Per-window ground-truth body-frame velocity (paper Eq. 2).
+        # Window w spans source indices [s_w, e_w) (1 s).  The target is the
+        # window-integrated velocity  v_{j→j+1} = Δp/dt ≈ mean(vel_enu) over the
+        # window, rotated into the body frame at the window end — not the
+        # instantaneous vel_enu[i_src].  This matches what the pretrained backbone
+        # regresses and supervises all 10 windows, not only the last.
+        step_src = int(src_rate)   # source samples per 1-s window
+        v_win    = np.zeros((lstm_steps, 3), dtype=np.float32)
+        ok       = True
+        for w in range(lstm_steps):
+            s_w = i_src - (lstm_steps - w) * step_src
+            e_w = i_src - (lstm_steps - 1 - w) * step_src
+            if s_w < 0 or e_w > N:
+                ok = False
+                break
+            v_enu_mean = vel_enu[s_w:e_w].mean(axis=0)              # Δp/dt over window
+            io   = min(e_w, N - 1)
+            R_nb = _qto_Rbn(_qfrom_euler(orient[io, 0], orient[io, 1], orient[io, 2]))
+            v_win[w] = (R_nb.T @ v_enu_mean).astype(np.float32)     # body-frame velocity
+        if not ok:
             continue
 
         windows.append(win)
-        v_bodies.append(v_body.astype(np.float32))
+        v_bodies.append(v_win)
 
     if not windows:
         return None, None
 
-    imu_tensor = torch.from_numpy(np.stack(windows, axis=0))   # (M, 10, 200, 6)
-    v_gt_tensor = torch.from_numpy(np.stack(v_bodies, axis=0)) # (M, 3)
+    imu_tensor  = torch.from_numpy(np.stack(windows, axis=0))   # (M, 10, 200, 6)
+    v_gt_tensor = torch.from_numpy(np.stack(v_bodies, axis=0))  # (M, 10, 3)
     return imu_tensor, v_gt_tensor
 
 
@@ -166,6 +183,10 @@ def nll_velocity_loss(v_pred, log_std, v_gt):
     Diagonal Gaussian NLL for velocity prediction.
     Σ = diag(exp(log_std_i))  (single log-std → log-variance = 2*log_std)
     L = 0.5 * Σ_i [(v_gt_i - v_pred_i)² * exp(-log_std_i) + log_std_i]
+
+    Shapes broadcast over any leading dims, so this handles both a single
+    prediction (B, 3) and the per-window sequence (B, lstm_steps, 3) used for
+    the paper's Eq. 2 multi-window supervision; .mean() averages over windows.
     """
     err     = v_gt - v_pred
     inv_std = torch.exp(-log_std)
@@ -175,38 +196,67 @@ def nll_velocity_loss(v_pred, log_std, v_gt):
 
 # ── LoRA injection ────────────────────────────────────────────────────────────
 
+# Backbone Linear layers to adapt with LoRA: the transformer trunk's attention
+# output projection and MLP. The Conv/LSTM backbone and the pretrained per-robot
+# heads stay frozen, matching the paper's "freeze the foundation model, update
+# only a small adapter" design (Sec. 3.3).
+LORA_TARGET_MODULES = ['fc1', 'fc2', 'out_proj']
+
+
 def _apply_lora_to_model(model, lora_rank: int):
     """
-    Apply LoRA adapters to linear layers in the model.
-    Falls back to making all parameters trainable if peft is not available.
+    Inject rank-`lora_rank` LoRA adapters into the frozen backbone's Linear layers.
 
-    Returns model with LoRA applied (or all params enabled).
+    Journal-grade fine-tuning MUST be LoRA on a frozen foundation model (paper
+    Sec. 3.3), never a full fine-tune. If peft is missing, the config matches no
+    modules, or too many parameters end up trainable, this RAISES rather than
+    silently full-fine-tuning (which would overwrite the pretrained weights and
+    contradict the method).
     """
     try:
-        from peft import LoraConfig, get_peft_model, TaskType
-        lora_config = LoraConfig(
-            r=lora_rank,
-            lora_alpha=lora_rank * 2,
-            target_modules=['weight'],   # inject into Linear layers
-            bias='none',
-        )
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-        print("Tartan fine-tune: LoRA adapters injected via peft.")
-    except ImportError:
-        print("Tartan fine-tune: peft not available. Fine-tuning all parameters.")
-        for p in model.parameters():
-            p.requires_grad_(True)
-    except Exception as e:
-        print(f"Tartan fine-tune: LoRA injection failed ({e}). Fine-tuning all parameters.")
-        for p in model.parameters():
-            p.requires_grad_(True)
+        from peft import LoraConfig, get_peft_model
+    except ImportError as e:
+        raise RuntimeError(
+            "Tartan fine-tune requires `peft` for LoRA (frozen foundation model). "
+            "Install it:  pip install 'peft>=0.6.0'. Refusing to full-fine-tune."
+        ) from e
+
+    model = get_peft_model(model, LoraConfig(
+        r=lora_rank, lora_alpha=lora_rank * 2,
+        target_modules=LORA_TARGET_MODULES, bias='none'))
+
+    n_lora  = sum(1 for n, _ in model.named_parameters() if 'lora_' in n)
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_total = sum(p.numel() for p in model.parameters())
+    if n_lora == 0 or n_train == 0:
+        raise RuntimeError(
+            f"Tartan fine-tune: LoRA matched no modules "
+            f"(target_modules={LORA_TARGET_MODULES}). Refusing to full-fine-tune.")
+    if n_train / n_total > 0.10:
+        raise RuntimeError(
+            f"Tartan fine-tune: {n_train:,}/{n_total:,} trainable "
+            f"({100*n_train/n_total:.1f}%) — backbone not frozen; refusing to proceed.")
+    model.print_trainable_parameters()
+    print(f"Tartan fine-tune: LoRA r={lora_rank} on {LORA_TARGET_MODULES} "
+          f"({n_train:,}/{n_total:,} trainable); backbone + heads frozen.")
     return model
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
+def _set_seed(seed):
+    """Seed Python/NumPy/Torch RNGs for reproducible training. No-op if seed is None."""
+    if seed is None:
+        return
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    print(f"  RNG seed = {seed} (reproducible training)")
+
+
 def train(args):
+    _set_seed(getattr(args, 'seed', 42))
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Training on device: {device}")
 
@@ -217,18 +267,27 @@ def train(args):
     else:
         CLEAN_SEQS_ACTIVE = CLEAN_SEQS
 
+    # NESTED split: --val-seq names the LOO HELD-OUT (test) sequence, which is
+    # never loaded here. The inner validation sequence driving best-checkpoint
+    # selection is carved out of the training sequences — see
+    # dl_filters._validation.inner_split for why validating on the held-out
+    # sequence biased these rows (this model's fold 08 was being frozen at
+    # epoch 3 of 50 on that basis).
     if args.mode == 'loo':
         if args.val_seq not in CLEAN_SEQS_ACTIVE:
             raise ValueError(f"--val-seq must be one of {CLEAN_SEQS_ACTIVE}")
-        train_seqs = [s for s in CLEAN_SEQS_ACTIVE if s != args.val_seq]
-        val_seq    = args.val_seq
+        from dl_filters._validation import inner_split
+        held_out_seq = args.val_seq
+        train_seqs, val_seq = inner_split(CLEAN_SEQS_ACTIVE, held_out_seq)
         out_name   = f'lora_fold_{args.val_seq}.pt'
     else:
+        held_out_seq = None
         train_seqs = CLEAN_SEQS_ACTIVE
         val_seq    = None
         out_name   = 'lora_adapters.pt'
 
-    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seq}")
+    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  "
+          f"inner_val={val_seq}  held_out(test, unused)={held_out_seq}")
 
     def _load_seq(seq):
         if args.dataset == 'cookies':
@@ -287,8 +346,55 @@ def train(args):
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    val_metric_path = output_dir / out_name.replace('.pt', '_val_metric.pt')
 
     best_val = float('inf')
+    # SELECTION criterion — see train_tlio.py for the full rationale. These
+    # models train OUTAGE-FREE, so a one-step loss on clean data says nothing
+    # about the dead-reckoning behaviour the tables report. J is the same cost
+    # ins_genetic_cv.py minimises for the seven classical filters, which is what
+    # makes the DL and classical rows comparable rather than merely adjacent.
+    best_J = float('inf')
+    best_J_epoch = None
+
+    # Journal-metric hook. NOT used in backprop — it selects the checkpoint.
+    # val_seq is the INNER validation sequence, not the LOO held-out one:
+    # printing the test metric every K epochs invites stopping or re-running on
+    # it, which is the same selection-on-test problem inner_split() removes,
+    # just routed through the operator instead of through code.
+    _val_hook = None
+    if val_seq is not None and args.val_metric_every > 0:
+        try:
+            import os as _os
+            import importlib
+            from dl_filters._validation import (validate_with_journal_metric,
+                                                format_val_line)
+            _tartan_runner = importlib.import_module(
+                'dl_filters.tartan_imu.tartan_runner')
+
+            def _val_hook(_epoch, _model):
+                _model.eval()
+                _save_lora(_model, _epoch, None, val_metric_path)
+                _prev = _os.environ.get('TARTAN_IMU_LORA')
+                _os.environ['TARTAN_IMU_LORA'] = str(val_metric_path)
+                _J = float('inf')
+                try:
+                    _m = validate_with_journal_metric(
+                        filter_module=_tartan_runner, val_seq=val_seq)
+                    print(format_val_line(_epoch, _m))
+                    _J = float(_m.get('J', float('inf')))
+                except Exception as _e:
+                    print(f"  [val] journal-metric hook failed: {_e}")
+                finally:
+                    if _prev is None:
+                        _os.environ.pop('TARTAN_IMU_LORA', None)
+                    else:
+                        _os.environ['TARTAN_IMU_LORA'] = _prev
+                _model.train()
+                return _J
+        except Exception as _e:
+            print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
+            _val_hook = None
 
     for epoch in range(args.epochs):
         model.train()
@@ -297,7 +403,7 @@ def train(args):
             imu_b  = imu_b.to(device)
             v_gt_b = v_gt_b.to(device)
             optimizer.zero_grad()
-            v_pred, log_std = model(imu_b, robot_type='car')
+            v_pred, log_std = model(imu_b, robot_type='car', return_sequence=True)
             loss = nll_velocity_loss(v_pred, log_std, v_gt_b)
             loss.backward()
             nn.utils.clip_grad_norm_(trainable, max_norm=5.)
@@ -314,21 +420,38 @@ def train(args):
                 for imu_b, v_gt_b in val_loader:
                     imu_b  = imu_b.to(device)
                     v_gt_b = v_gt_b.to(device)
-                    v_pred, log_std = model(imu_b, robot_type='car')
+                    v_pred, log_std = model(imu_b, robot_type='car', return_sequence=True)
                     loss = nll_velocity_loss(v_pred, log_std, v_gt_b)
                     val_loss += loss.item() * imu_b.size(0)
             avg_val = val_loss / len(val_loader.dataset)
             print(f"Epoch {epoch+1:4d}/{args.epochs}  "
                   f"train={avg_train:.4f}  val={avg_val:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
-            if avg_val < best_val:
-                best_val = avg_val
-                _save_lora(model, epoch, avg_val, output_dir / out_name)
-                print(f"  → saved best ({out_name})")
+            best_val = min(best_val, avg_val)
         else:
             print(f"Epoch {epoch+1:4d}/{args.epochs}  "
                   f"train={avg_train:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
+
+        # Journal-metric validation — THIS selects the deployed epoch.
+        if _val_hook is not None and (
+                (epoch + 1) % args.val_metric_every == 0
+                or epoch == args.epochs - 1):
+            _J = _val_hook(epoch, model)
+            if _J < best_J:
+                best_J, best_J_epoch = _J, epoch
+                _save_lora(model, epoch, _J, output_dir / out_name)
+                print(f"  → saved best ({out_name})  J={_J:.4f} @ epoch {epoch}")
+
+    # See train_tlio.py: a fold with no valid checkpoint must fail loudly.
+    if _val_hook is not None and best_J_epoch is None:
+        raise RuntimeError(
+            f"No checkpoint was selected: the journal metric was inf at every "
+            f"evaluated epoch on inner-val sequence {val_seq}. Refusing to "
+            f"deploy an unselected checkpoint.")
+    if _val_hook is not None:
+        print(f"Selected epoch {best_J_epoch} (J={best_J:.4f} on inner-val "
+              f"seq {val_seq}) -> {out_name}")
 
     if val_loader is None:
         _save_lora(model, args.epochs - 1, None, output_dir / out_name)
@@ -337,14 +460,23 @@ def train(args):
 
 
 def _save_lora(model, epoch, val_loss, path: Path):
-    """Save only the trainable (LoRA) parameters."""
-    lora_state = {k: v for k, v in model.state_dict().items()
-                  if 'lora_' in k or any(p.requires_grad
-                                          for name, p in model.named_parameters()
-                                          if name == k)}
+    """
+    Save a deployable checkpoint. LoRA adapters are merged into the (frozen)
+    backbone and the resulting plain _TartanIMUModel state dict is saved, so the
+    runner — which loads an unwrapped model with strict=False — applies the
+    adaptation without needing peft at inference. (Saving raw lora_ tensors would
+    be ignored by the runner, silently running the un-adapted base model.)
+    """
+    import copy
+    try:
+        merged = copy.deepcopy(model).merge_and_unload()   # fold BA into W, unwrap peft
+        state  = merged.state_dict()
+    except AttributeError:
+        # Not a peft model (should not happen — LoRA is mandatory). Save as-is.
+        state = model.state_dict()
     torch.save({
         'epoch':           epoch,
-        'lora_state_dict': lora_state,
+        'lora_state_dict': state,
         'val_loss':        val_loss,
     }, path)
 
@@ -362,6 +494,16 @@ def _parse_args():
     parser.add_argument('--lr',         type=float, default=1e-3)
     parser.add_argument('--lora-rank',  type=int,   default=8)
     parser.add_argument('--output',     default=str(_ARTIFACTS))
+    parser.add_argument('--val-metric-every', type=int, default=10,
+                        help="Every K epochs (and at final epoch), run a "
+                             "display-only validation on the held-out sequence "
+                             "using the journal three-component metric "
+                             "J = ATE_outage + t_rel + r_rel (default 10; "
+                             "0 disables). Original NLL training loss is "
+                             "unchanged.")
+    parser.add_argument('--seed', type=int, default=42,
+                        help="RNG seed for reproducible training (default: 42, "
+                             "matching the genetic optimiser).")
     return parser.parse_args()
 
 

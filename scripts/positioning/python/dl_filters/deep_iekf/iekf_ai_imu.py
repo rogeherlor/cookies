@@ -30,6 +30,27 @@ The IEKF state (Appendix A, eq. 21) is [φ(0:3), ξ_v(3:6), ξ_p(6:9),
 δb_ω(9:12), δb_a(12:15), ξ_Rc(15:18), ξ_pc(18:21)] — 21D.
 The car-to-IMU calibration (Rc, pc) is estimated online, starting at identity/zero.
 
+Execution model — BATCH CNN, then SEQUENTIAL filter (NOT fully online)
+----------------------------------------------------------------------
+This wrapper runs in two distinct phases, matching the original AI-IMU code:
+  1. The MesNet CNN is evaluated ONCE over the WHOLE IMU sequence in a single
+     forward pass (ONNX sess.run / torch forward_nets on the full u array),
+     producing the (N, 2) NHC measurement covariances for every timestep up front.
+  2. The IEKF then runs sequentially (propagate → NHC update → optional GPS update)
+     for i in 1..N, only *looking up* the pre-computed covariance for step i.
+So the Kalman recursion is causal/online, but the covariance adaptation is NOT:
+it is computed offline in bulk. This is a benchmark-replay design.
+
+Important for a true online / embedded (e.g. Hailo) deployment:
+MesNet is ACAUSAL. cov_net uses two Conv1d layers (k=5, the 2nd with dilation=3)
+with symmetric ReplicationPad1d(4) on both sides — receptive field ≈ 17 samples
+centred on i, so output[i] depends on ~8 FUTURE IMU samples. To reproduce these
+results online you must either (a) buffer a sliding window covering the full
+receptive field and accept ~8-sample (~80 ms @ 100 Hz) latency — interior samples
+then match the batch output numerically — or (b) retrain a causal (left-padded)
+MesNet. Also use the FIXED saved normalisation constants (u_loc/u_std from the
+*_norm.p sibling), never per-sequence statistics, or results will drift.
+
 GPS / GNSS
 ----------
 When nav_data.gps_available is True at a given timestep, the filter applies a
@@ -38,13 +59,14 @@ The CNN adapter continues to regulate NHC covariances independently.
 During GPS outages (gps_available=False), the filter runs pure CNN dead-reckoning.
 Set DR_MODE=True in ins_config.py to disable GPS for all filters (paper comparison).
 
-10 Hz vs 100 Hz
----------------
-The paper trains and tests at 100 Hz (raw KITTI OXTS).  Our nav_data is at 10 Hz
-(synchronized KITTI).  The CNN window (N=15 samples) thus covers 1.5 s instead of
-0.15 s.  For best performance, train at 100 Hz and run at 100 Hz (see train_ai_imu.py).
-Running at 10 Hz with weights trained at 10 Hz still works; paper results (1.10% t_rel)
-require 100 Hz data.
+Sample rate
+-----------
+The paper trains and tests at 100 Hz (raw KITTI OXTS), and so do we: nav_data is
+loaded at 100 Hz (KITTI native rate; see data_loader.get_kitti_dataset default and
+ins_config.py).  The CNN window (N=15 samples) therefore covers 0.15 s, matching
+the paper.  The filter runs at whatever nav_data.sample_rate provides, so train and
+test rates stay consistent (see train_ai_imu.py).  Paper results (1.10% t_rel)
+assume 100 Hz data.
 
 Weights
 -------
@@ -63,7 +85,7 @@ from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _HERE        = Path(__file__).resolve().parent
-_REPO_ROOT   = _HERE.parent.parent.parent.parent.parent   # c:/Github/cookies
+_REPO_ROOT   = _HERE.parent.parent.parent.parent.parent   # <repo>/cookies
 _AI_IMU_SRC  = _REPO_ROOT / 'external/ai-imu-dr/src'
 _ARTIFACTS   = _REPO_ROOT / 'artifacts/deep_iekf'
 
@@ -132,11 +154,20 @@ def _find_norm_factors(weights_path):
             seen.add(norm_path)
             continue
         seen.add(norm_path)
+        # The file EXISTS — a load failure here means it is corrupt or was
+        # written by an incompatible torch. Don't silently `continue` (which
+        # treats it as absent and makes the caller recompute per-sequence
+        # normalisation — "not deployable" and silently drift-inducing).
+        # Surface it and stop.
+        import torch
         try:
-            import torch
             return torch.load(norm_path)
-        except Exception:
-            continue
+        except Exception as e:
+            raise RuntimeError(
+                f"Normalisation factors file {norm_path} exists but could not "
+                f"be loaded ({type(e).__name__}: {e}). Refusing to silently fall "
+                f"back to per-sequence stats. Regenerate it (train_ai_imu.py)."
+            ) from e
     return None
 
 
@@ -298,7 +329,8 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     Parameters
     ----------
     nav_data        : NavigationData — IMU + GNSS data
-    params          : optional dict — supports 'Rpos' (GPS noise std [m], default 2.0)
+    params          : optional dict — supports 'Rpos' (GPS position measurement
+                      variance [m²] applied to R_gps diagonal, default 4.0 ≈ 2 m std)
     outage_config   : optional {'start': float, 'duration': float} — GPS blackout window
     use_3d_rotation : ignored (filter always runs in full 3D)
 
@@ -332,13 +364,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     # ── Load IEKF with KITTI-tuned parameters ──────────────────────────────────
     from utils_numpy_filter import NUMPYIEKF
 
-    # Import KITTIParameters from AI-IMU
-    try:
-        sys.path.insert(0, str(_AI_IMU_SRC))
-        from main_kitti import KITTIParameters
-        iekf = NUMPYIEKF(KITTIParameters)
-    except Exception:
-        iekf = NUMPYIEKF()   # fallback: base Parameters
+    # Import KITTIParameters (dependency-light; see kitti_params.py for why the
+    # direct `from main_kitti import KITTIParameters` cannot be used on every
+    # target — it drags in navpy/matplotlib/... absent on the Pi).
+    sys.path.insert(0, str(_AI_IMU_SRC))
+    from kitti_params import get_kitti_parameters
+    iekf = NUMPYIEKF(get_kitti_parameters())
 
     # Make gravity a numpy array (in case KITTIParameters stores it as list)
     if not isinstance(iekf.g, np.ndarray):
@@ -359,6 +390,13 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             print(f"Warning: ONNX inference failed ({e}). Trying PyTorch weights.")
             measurements_covs_np = None
 
+    # Journal-grade runs MUST use the learned MesNet weights: a silent fallback to
+    # the hand-tuned KITTIParameters covariances would quietly degrade this filter
+    # to a non-learning baseline and invalidate the comparison. Require weights by
+    # default (crash if missing or unloadable); set IEKF_AI_IMU_REQUIRE_WEIGHTS=0
+    # to allow the fixed-covariance fallback (e.g. quick smoke tests only).
+    _require_weights = os.environ.get('IEKF_AI_IMU_REQUIRE_WEIGHTS', '1') != '0'
+
     # ── Fall back to PyTorch .p weights ───────────────────────────────────────
     if measurements_covs_np is None:
         weights_path = _find_weights()
@@ -367,14 +405,11 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 import torch
                 from utils_torch_filter import TORCHIEKF
 
-                try:
-                    from main_kitti import KITTIParameters as _KP
-                    torch_iekf = TORCHIEKF(_KP)
-                except Exception:
-                    torch_iekf = TORCHIEKF()
+                from kitti_params import get_kitti_parameters
+                torch_iekf = TORCHIEKF(get_kitti_parameters())
                 if torch_iekf.cov0_measurement is None:
-                    # Fallback baseline: KITTIParameters defaults
-                    torch_iekf.cov0_measurement = torch.tensor([0.2, 300.0]).double()
+                    # Fallback baseline: KITTIParameters defaults (cov_lat, cov_up)
+                    torch_iekf.cov0_measurement = torch.tensor([1.0, 10.0]).double()
                 if isinstance(torch_iekf.g, np.ndarray):
                     torch_iekf.g = torch.from_numpy(torch_iekf.g).double()
 
@@ -392,8 +427,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                     u_std[u_std < 1e-6] = 1.0
                     torch_iekf.u_loc = u_loc
                     torch_iekf.u_std = u_std
-                    print("Warning: normalization factors not found — computed from inference data. "
-                          "For best results, run train_ai_imu.py which saves iekfnets_norm.p.")
+                    _expected_norm = Path(weights_path).with_name(Path(weights_path).stem + '_norm.p')
+                    print(f"[iekf_ai_imu] WARNING: normalisation factors not found at {_expected_norm} — "
+                          f"recomputing from inference data (train-test distribution mismatch risk). "
+                          f"Re-run train_ai_imu.py to regenerate the {_expected_norm.name} sibling file.")
 
                 # Transfer learned Q and initial covariance to numpy IEKF
                 iekf.set_learned_covariance(torch_iekf)
@@ -406,17 +443,37 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                 print(f"AI-IMU: loaded PyTorch weights from {weights_path}.")
 
             except Exception as e:
+                if _require_weights:
+                    raise RuntimeError(
+                        f"[iekf_ai_imu] Failed to load AI-IMU weights from "
+                        f"{weights_path} ({e}). Refusing to fall back to fixed "
+                        f"covariances; set IEKF_AI_IMU_REQUIRE_WEIGHTS=0 to allow it."
+                    ) from e
                 print(f"Warning: could not load AI-IMU weights ({e}). "
                       f"Falling back to fixed covariances.")
                 measurements_covs_np = None
 
     # ── Fallback: fixed measurement covariances ────────────────────────────────
     if measurements_covs_np is None:
+        if _require_weights:
+            searched = [
+                os.environ.get('AI_IMU_WEIGHTS', '<AI_IMU_WEIGHTS env unset>'),
+                str(_ARTIFACTS / 'iekfnets.p'),
+                str(_AI_IMU_SRC / 'iekfnets.p'),
+                str(_find_onnx() or _ARTIFACTS / 'iekfnets.onnx'),
+            ]
+            raise RuntimeError(
+                "[iekf_ai_imu] No learned MesNet weights found (required by "
+                "default). Searched: " + ', '.join(searched) +
+                ". Set IEKF_AI_IMU_REQUIRE_WEIGHTS=0 to allow the fixed-covariance "
+                "fallback (smoke tests only)."
+            )
         cov_lat = iekf.cov_lat
         cov_up  = iekf.cov_up
         measurements_covs_np = np.tile([cov_lat, cov_up], (N, 1))
-        print(f"AI-IMU: using fixed covariances [cov_lat={cov_lat}, cov_up={cov_up}] "
-              f"(no CNN adapter).")
+        print(f"[iekf_ai_imu] WARNING: using fallback KITTIParameters covariances "
+              f"[cov_lat={cov_lat}, cov_up={cov_up}] (no CNN adapter). "
+              f"IEKF_AI_IMU_REQUIRE_WEIGHTS=0 is set — this is a non-learning baseline.")
 
     # ── GPS data preparation ───────────────────────────────────────────────────
     # Compute ENU positions from geodetic (round-trip exact for same lla0).
@@ -428,7 +485,9 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     try:
         import ins_config as _ic
         dr_mode = getattr(_ic, 'DR_MODE', False)
-    except Exception:
+    except ImportError as _e:
+        print(f"[iekf_ai_imu] WARNING: ins_config not importable ({_e}); "
+              "defaulting DR_MODE=False (GPS aiding ON).")
         dr_mode = False
 
     if not dr_mode and hasattr(nav_data, 'gps_available') and nav_data.gps_available.any():

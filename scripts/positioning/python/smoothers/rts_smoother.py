@@ -4,7 +4,7 @@ RTS Smoother — Rauch-Tung-Striebel backward smoother built on top of
 EKF Enhanced (Euler-angle EKF + NHC + ZUPT).
 
 Two-pass algorithm:
-    Forward : identical to ekf_enhanced, but stores the per-step state,
+    Forward : identical to esekfg_enhanced, but stores the per-step state,
               posterior covariance, prior (predicted) covariance and
               discrete transition matrix needed for the backward sweep.
     Backward: standard RTS equations propagate information backward from
@@ -29,7 +29,7 @@ import numpy as np
 import pymap3d as pm
 from math import sin, cos
 
-from filters.ekf_enhanced import (
+from filters.esekfg_enhanced import (
     DEFAULT_PARAMS,
     GRAVITY,
     _skew,
@@ -335,7 +335,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
     Args:
         nav_data       : NavigationData dataclass (data_loader.py).
-        params         : Optional dict overriding DEFAULT_PARAMS (ekf_enhanced).
+        params         : Optional dict overriding DEFAULT_PARAMS (esekfg_enhanced).
         outage_config  : Ignored. Accepted for interface compatibility only.
         use_3d_rotation: True → full roll/pitch/yaw; False → yaw-only (2D).
 

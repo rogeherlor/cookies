@@ -17,9 +17,12 @@ Differences from the original paper:
    gps_available[i] is True.  Original paper is IMU-only (no GPS integration).
 
 3. Filter: 15-state ESKF (Solà 2017) for position/velocity/attitude tracking.
-   Tartan network outputs velocity in body frame → rotated to ENU → velocity
-   measurement (H = [0 | I_3 | 0_3×9]).  Original paper integrates velocity
-   directly without a Kalman filter.
+   Tartan network outputs body-frame velocity, fused as a BODY-FRAME velocity
+   measurement  z = v_body - Rbn^T v^n  with attitude Jacobian
+   H_θ = [Rbn^T v^n]_× , so the update observes heading (yaw) through the
+   vehicle's near-zero lateral/vertical body velocity.  (An ENU velocity
+   residual with H = [0 | I_3 | 0] leaves attitude unobserved.)  Original paper
+   integrates velocity directly without a Kalman filter.
 
 4. Online adaptation: DISABLED for fair comparison.  Tartan's GMM-based adaptive
    training buffer (paper Section 3.4) is not used during inference.
@@ -41,14 +44,17 @@ Weights search order (base model):
   4. external/tartan_imu/checkpoints/foundation_model/checkpoint_<N>.pt
      (HuggingFace snapshot_download layout — highest N wins)
 
-LoRA adapter search (optional, applied after base model):
-  1. artifacts/tartan_imu/lora_fold_<seq_id>.pt
-  2. artifacts/tartan_imu/lora_adapters.pt
-  (If none found, runs zero-shot with car head.)
+LoRA adapter search (applied after base model):
+  1. artifacts/tartan_imu/lora_fold_<seq_id>.pt   (REQUIRED when a seq_id is given;
+     a missing exact fold raises rather than borrowing another fold / the
+     all-sequences adapter / zero-shot — see _find_lora_adapter)
+  2. artifacts/tartan_imu/lora_adapters.pt        (only when no seq_id is given)
+  (Zero-shot with the car head only when no seq_id is given and no adapter exists.)
 """
 
 import os
 import sys
+import time
 import numpy as np
 from pathlib import Path
 import torch
@@ -105,12 +111,15 @@ class _TartanImuStub(nn.Module):
         super().__init__()
         self.scale = nn.Parameter(torch.ones(1))
 
-    def forward(self, imu_input, robot_type='car'):
-        B           = imu_input.shape[0]
+    def forward(self, imu_input, robot_type='car', return_sequence=False):
+        B, T        = imu_input.shape[0], imu_input.shape[1]
         last_step   = imu_input[:, -1, :, 0:3]    # (B, step_samples, 3) accel
         dt          = 1.0 / 200.0
         v_body      = last_step.mean(dim=1) * dt * last_step.shape[1] * self.scale
         log_std     = torch.ones(B, 3, device=imu_input.device) * 0.5
+        if return_sequence:
+            v_body  = v_body.unsqueeze(1).expand(B, T, 3)
+            log_std = log_std.unsqueeze(1).expand(B, T, 3)
         return v_body, log_std
 
 
@@ -271,16 +280,20 @@ class _TartanIMUBackbone(nn.Module):
         x = self.resnet_post_pro(x)          # (B, 128, 13)
         return x.flatten(1)                  # (B, 1664)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_sequence: bool = False) -> torch.Tensor:
         """
         x: (B, lstm_steps, step_samples, 6)
-        Returns: (B, 64) — transformer features from last LSTM step
+        Returns: (B, 64) transformer features from the last LSTM step, or the
+        full (B, T, 64) sequence when return_sequence=True (per-window training).
         """
         B, T, S, C = x.shape
-        feats = self.forward_cnn(x.reshape(B * T, C, S))  # (B*T, 1664)
+        x = x.permute(0, 1, 3, 2).reshape(B * T, C, S)     # (B*T, 6, step_samples)
+        feats = self.forward_cnn(x)                        # (B*T, 1664)
         feats = feats.reshape(B, T, -1)                    # (B, T, 1664)
         lstm_out, _ = self.lstm(feats)                     # (B, T, 64)
         trunk_out   = self.IMU_Trunk(lstm_out)             # (B, T, 64)
+        if return_sequence:
+            return trunk_out                               # (B, T, 64)
         return trunk_out[:, -1, :]                         # (B, 64)
 
 
@@ -306,8 +319,10 @@ class _TartanIMUModel(nn.Module):
             'drone': _RobotHead(),
         })
 
-    def forward(self, x: torch.Tensor, robot_type: str = 'car'):
-        feat = self.model(x)                    # (B, 64)
+    def forward(self, x: torch.Tensor, robot_type: str = 'car',
+                return_sequence: bool = False):
+        # feat is (B, 64) or (B, T, 64); the Linear head broadcasts over T.
+        feat = self.model(x, return_sequence=return_sequence)
         return self.heads[robot_type](feat)     # (v_body, log_std)
 
 
@@ -365,24 +380,36 @@ def _resolve_seq_id(seq_id):
 def _find_lora_adapter(seq_id=None):
     """
     Locate LoRA adapter weights.  Search order:
-      1. lora_fold_<seq_id>.pt  (LOO fold)
-      2. lora_adapters.pt       (all-sequences)
-      3. Any available lora_fold_*.pt (fallback with warning)
+      0. TARTAN_IMU_LORA env var       (explicit override / escape hatch)
+      1. lora_fold_<seq_id>.pt         (LOO fold — REQUIRED when seq_id is given)
+      2. lora_adapters.pt              (all-sequences, only when seq_id is None)
+
+    When seq_id is given, a missing exact fold raises instead of silently
+    borrowing another fold, using the all-sequences adapter (both would
+    train/test-leak for the held-out sequence), or dropping to zero-shot (which
+    would misreport zero-shot numbers as LoRA-fine-tuned). Set TARTAN_IMU_LORA to
+    a checkpoint for an intentional non-LOO run. Returns None only when seq_id is
+    None and no all-sequences adapter exists (genuine zero-shot deployment).
     """
+    env = os.environ.get('TARTAN_IMU_LORA')
+    if env and Path(env).exists():
+        return Path(env)
     short_id = _resolve_seq_id(seq_id)
     if short_id is not None:
         fold = _ARTIFACTS / f'lora_fold_{short_id}.pt'
         if fold.exists():
             return fold
+        raise RuntimeError(
+            f"Tartan lora_fold_{short_id}.pt not found in {_ARTIFACTS}. Refusing to "
+            f"fall back to another fold, the all-sequences adapter, or zero-shot "
+            f"(the first two train/test-leak for held-out sequence {short_id}; the "
+            f"last would misreport zero-shot as LoRA-fine-tuned).\n"
+            f"  Train it:  python ins_train.py tartan_imu --seqs {short_id}\n"
+            f"  Intentional non-LOO test: set TARTAN_IMU_LORA to a checkpoint path."
+        )
     general = _ARTIFACTS / 'lora_adapters.pt'
     if general.exists():
         return general
-    # Fallback: use any available LoRA fold
-    available = sorted(_ARTIFACTS.glob('lora_fold_*.pt'))
-    if available:
-        print(f"WARNING: Tartan lora_fold_{short_id}.pt not found, falling back to {available[0].name}. "
-              f"Train the proper fold with: python ins_train.py tartan_imu --seqs {short_id}")
-        return available[0]
     return None
 
 
@@ -405,25 +432,45 @@ def _load_tartan_model(weights_path: Path, lora_path, lora_rank: int,
             else:
                 print("Tartan IMU: checkpoint loaded successfully into _TartanIMUModel.")
         except Exception as e:
-            print(f"Tartan IMU: could not load state dict ({e}). Using stub.")
-            model = _TartanImuStub()
+            if os.environ.get('TARTAN_ALLOW_STUB') == '1':
+                print(f"Tartan IMU: could not load state dict ({e}). "
+                      "TARTAN_ALLOW_STUB=1 — using non-learned stub (smoke test).")
+                model = _TartanImuStub()
+            else:
+                raise RuntimeError(
+                    f"Tartan IMU: failed to load the trained checkpoint state_dict "
+                    f"({type(e).__name__}: {e}). Refusing to silently substitute the "
+                    f"non-learned _TartanImuStub physics integrator (which would report "
+                    f"stub numbers as if they were the model's). Fix the checkpoint. "
+                    f"Set TARTAN_ALLOW_STUB=1 only for explicit smoke tests."
+                ) from e
     else:
-        print(f"Tartan IMU: unrecognised checkpoint type ({type(ckpt)}). Using stub.")
-        model = _TartanImuStub()
+        if os.environ.get('TARTAN_ALLOW_STUB') == '1':
+            print(f"Tartan IMU: unrecognised checkpoint type ({type(ckpt)}). "
+                  "TARTAN_ALLOW_STUB=1 — using non-learned stub (smoke test).")
+            model = _TartanImuStub()
+        else:
+            raise RuntimeError(
+                f"Tartan IMU: checkpoint at {weights_path} is neither an nn.Module "
+                f"nor a state_dict (got {type(ckpt)}). Refusing to silently "
+                f"substitute the non-learned _TartanImuStub. Set TARTAN_ALLOW_STUB=1 "
+                f"only for explicit smoke tests.")
 
     model = model.to(device)
 
     use_lora = False
     if lora_path is not None:
-        try:
-            lora_ckpt = torch.load(lora_path, map_location=device, weights_only=False)
-            if isinstance(lora_ckpt, dict):
-                sd = lora_ckpt.get('lora_state_dict') or lora_ckpt
-                model.load_state_dict(sd, strict=False)
-            print(f"Tartan IMU: LoRA adapter loaded from {lora_path.name}")
-            use_lora = True
-        except Exception as e:
-            print(f"Tartan IMU: WARNING — LoRA load failed: {e}")
+        # lora_path was already resolved by _find_lora_adapter, which RAISES for a
+        # missing required fold precisely so a run never silently drops to zero-shot.
+        # If the found adapter then fails to LOAD, that is equally a real error —
+        # raise rather than silently continuing zero-shot with the wrong effective
+        # model for this LOO fold.
+        lora_ckpt = torch.load(lora_path, map_location=device, weights_only=False)
+        if isinstance(lora_ckpt, dict):
+            sd = lora_ckpt.get('lora_state_dict') or lora_ckpt
+            model.load_state_dict(sd, strict=False)
+        print(f"Tartan IMU: LoRA adapter loaded from {lora_path.name}")
+        use_lora = True
     else:
         print("Tartan IMU: no LoRA adapter — zero-shot inference.")
 
@@ -474,13 +521,20 @@ def _qto_Rbn(q):
 
 # ── Main filter ───────────────────────────────────────────────────────────────
 
-def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
+def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
+        backend='cpu', hailo_net=None):
     """
     Run Tartan IMU filter on nav_data.
 
+    backend   : 'cpu' (default) or 'hailo' — same ES-EKF/outage logic either
+                way, only the 1 Hz velocity-network call swaps.
+    hailo_net : Required when backend='hailo' — an already-activated
+                hailo_backend.HailoTartanIMU instance.
+
     Returns dict: p, v, r, bias_acc, bias_gyr,
-                  std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr.
-    All arrays (N, 3) float64.
+                  std_pos, std_vel, std_orient, std_bias_acc, std_bias_gyr,
+                  net_latency_s (one entry per Tartan network update, seconds).
+    All arrays (N, 3) float64 (net_latency_s is 1-D, shorter than N).
     """
     from scipy.interpolate import interp1d
 
@@ -536,10 +590,13 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         accel_gf_up[k] = accel_up[k] - g_body
 
     # ── GPS outage mask ────────────────────────────────────────────────────
+    # Narrow to ImportError + surface the fallback — dr_mode toggles GPS aiding.
     try:
         import ins_config as _ic
         dr_mode = getattr(_ic, 'DR_MODE', False)
-    except Exception:
+    except ImportError as _e:
+        print(f"Tartan IMU: WARNING — ins_config not importable ({_e}); "
+              "defaulting DR_MODE=False (GPS aiding ON).")
         dr_mode = False
 
     gps_avail = nav_data.gps_available.copy()
@@ -556,6 +613,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     p_gps_enu = np.column_stack([e, n, u])
 
     # ── Output arrays ──────────────────────────────────────────────────────
+    net_latency_s = []
+    # Thread CPU time for the same span. Wall time alone cannot separate a slow
+    # call from a descheduled one; see _full_eval_worker.py's wall/cpu check.
+    net_cpu_s     = []
     pos        = np.zeros((N, 3))
     vel        = np.zeros((N, 3))
     rpy_out    = np.zeros((N, 3))
@@ -645,26 +706,47 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
                     imu_block[0, step, :, 0:3] = accel_gf_up[ss:ee].astype(np.float32)
                     imu_block[0, step, :, 3:6] = gyro_up[ss:ee].astype(np.float32)
 
-                imu_t = torch.from_numpy(imu_block).to(device)
-                with torch.no_grad():
-                    v_body_t, log_std_t = model(imu_t, robot_type='car')
-
-                v_body  = v_body_t[0].cpu().numpy().astype(np.float64)
-                log_std = log_std_t[0].cpu().numpy().astype(np.float64)
+                if backend == 'hailo':
+                    _c0 = time.thread_time()
+                    (v_body, log_std), dt = hailo_net.step(imu_block[0])
+                    # Host-side share only — the 10 device calls are not this
+                    # thread's CPU time, so wall/cpu is legitimately >1 here.
+                    net_cpu_s.append(time.thread_time() - _c0)
+                    net_latency_s.append(dt)
+                else:
+                    imu_t = torch.from_numpy(imu_block).to(device)
+                    _t0 = time.perf_counter()
+                    _c0 = time.thread_time()
+                    with torch.no_grad():
+                        v_body_t, log_std_t = model(imu_t, robot_type='car')
+                    net_cpu_s.append(time.thread_time() - _c0)
+                    net_latency_s.append(time.perf_counter() - _t0)
+                    v_body  = v_body_t[0].cpu().numpy().astype(np.float64)
+                    log_std = log_std_t[0].cpu().numpy().astype(np.float64)
                 log_std = np.clip(log_std, -10.0, 10.0)   # prevent exp underflow/overflow
 
-                v_enu_pred = Rbn @ v_body
-                Sigma_body = np.diag(np.maximum(np.exp(log_std), 1e-4))   # floor at 1e-4 m²/s²
-                Sigma_enu  = Rbn @ Sigma_body @ Rbn.T
+                # Body-frame velocity update — observes attitude (esp. yaw):
+                #   h(x) = R_bn v^n = Rbn^T v^n          (predicted body velocity)
+                #   z    = v_body_net - Rbn^T vIMU
+                #   H_v  = ∂h/∂δv = Rbn^T
+                #   H_θ  = ∂h/∂δα = [Rbn^T vIMU]_×       (body-frame error, ES-EKF Solà)
+                # A car's true lateral/vertical body velocity is ≈0, so the
+                # body-frame residual constrains heading — unlike an ENU velocity
+                # residual (H = [0 | I | 0]) which leaves attitude unobserved.
+                Rbn_T       = Rbn.T
+                v_body_pred = Rbn_T @ vIMU
+                Sigma_body  = np.diag(np.maximum(np.exp(log_std), 1e-4))  # body-frame vel cov [m²/s²]
 
-                z_vel  = v_enu_pred - vIMU
-                H_vel  = np.zeros((3,15)); H_vel[:,3:6] = np.eye(3)
-                S_vel  = H_vel @ P @ H_vel.T + Sigma_enu
+                z_vel  = v_body - v_body_pred
+                H_vel  = np.zeros((3, 15))
+                H_vel[:, 3:6] = Rbn_T                 # ∂h/∂δv
+                H_vel[:, 6:9] = _skew(v_body_pred)    # ∂h/∂δα
+                S_vel  = H_vel @ P @ H_vel.T + Sigma_body
                 S_vel_reg = S_vel + 1e-9 * np.eye(3)
                 K_vel  = np.linalg.solve(S_vel_reg, H_vel @ P).T   # 15×3
                 dx     = dx + K_vel @ (z_vel - H_vel @ dx)
                 IKH_v  = np.eye(15) - K_vel @ H_vel
-                P      = IKH_v @ P @ IKH_v.T + K_vel @ Sigma_enu @ K_vel.T  # Joseph form
+                P      = IKH_v @ P @ IKH_v.T + K_vel @ Sigma_body @ K_vel.T  # Joseph form
                 P      = 0.5*(P + P.T)
                 update_occurred = True
 
@@ -709,4 +791,6 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         'bias_acc': b_acc_out, 'bias_gyr': b_gyr_out,
         'std_pos': std_pos, 'std_vel': std_vel, 'std_orient': std_orient,
         'std_bias_acc': std_b_acc, 'std_bias_gyr': std_b_gyr,
+        'net_latency_s': np.array(net_latency_s),
+        'net_cpu_s':     np.array(net_cpu_s),
     }

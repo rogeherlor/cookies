@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Shared configuration for ins_runner.py, ins_genetic.py, and ins_compare.py.
+Shared configuration for ins_runner.py, ins_genetic_cv.py, and ins_compare.py.
 
 All scripts read from here so they always operate on the same dataset,
 outage window, rotation mode, and filter selection.
@@ -8,7 +8,7 @@ outage window, rotation mode, and filter selection.
 IMPORTANT — performance conclusions
 ------------------------------------
 Do NOT compare filter outputs from a first run.  The default parameters
-here are generic starting points.  Run ins_genetic.py for each filter
+here are generic starting points.  Run ins_genetic_cv.py for each filter
 variant to obtain tuned FILTER_PARAMS before drawing any conclusions.
 """
 import sys
@@ -22,12 +22,12 @@ import filter_params as fp
 
 # ── Filter / smoother selection ────────────────────────────────────────────────
 # Classical filters:
-#   "ekf_vanilla"    — Euler-angle EKF, GPS-only  (Groves 2013)
-#   "ekf_enhanced"   — Euler-angle EKF + NHC + ZUPT
-#   "eskf_vanilla"   — Quaternion ESKF, GPS-only  (Solà 2017)
-#   "eskf_enhanced"  — Quaternion ESKF + NHC + ZUPT
-#   "iekf_vanilla"   — Left-invariant EKF, GPS-only  (Barrau & Bonnabel 2017)
-#   "iekf_enhanced"  — Left-invariant EKF + NHC + ZUPT
+#   "esekfg_vanilla"   — ES-EKF Groves, GPS-only  (Euler nav-frame phi-angle, Groves 2013)
+#   "esekfg_enhanced"  — ES-EKF Groves + NHC + ZUPT
+#   "esekfs_vanilla"   — ES-EKF Solà, GPS-only  (quaternion body-frame error, Solà 2017)
+#   "esekfs_enhanced"  — ES-EKF Solà + NHC + ZUPT
+#   "iekf_vanilla"     — Left-invariant EKF, GPS-only  (Barrau & Bonnabel 2017)
+#   "iekf_enhanced"    — Left-invariant EKF + NHC + ZUPT
 #   "imu_only"       — Pure dead reckoning (no GNSS, no filter)
 # Smoothers (see smoothers/):
 #   "rts_smoother"   — Rauch-Tung-Striebel batch smoother (uses all GPS — not causal)
@@ -35,6 +35,7 @@ import filter_params as fp
 #                      Requires: conda install -c conda-forge gtsam
 # Deep learning filters (require trained weights in artifacts/ — see dl_filters/):
 #   "iekf_ai_imu"    — AI-IMU Dead-Reckoning (Brossard et al. IEEE TIV 2020)
+#   "iekf_ai_imu_online" — AI-IMU, causal/online MesNet (Hailo variant; no future data)
 #   "tlio"           — Tight Learned Inertial Odometry (Liu et al. IEEE RA-L 2020)
 #   "deep_kf"        — Deep Kalman Filter GNSS+IMU (Hosseinyalamdary MDPI Sensors 2018)
 #   "tartan_imu"     — Tartan IMU foundation model (Zhao et al. CVPR 2025)
@@ -84,7 +85,7 @@ USE_RTS_AS_GT = (GT_SOURCE == 'rts')   # backward-compat alias
 
 # ── Filter parameters ──────────────────────────────────────────────────────────
 # Set to None to use each filter's built-in DEFAULT_PARAMS.
-# After running ins_genetic.py, paste the optimised dict here.
+# After running ins_genetic_cv.py, paste the optimised dict here.
 #
 # Example (ESKF enhanced, KITTI 3D, optimised):
 # FILTER_PARAMS = {

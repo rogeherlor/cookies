@@ -27,7 +27,7 @@ FILE_DIR  = Path(__file__).resolve().parent
 ONNX_PATH = FILE_DIR / "tartan_imu.onnx"
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CHOSEN_HW_ARCH  = "hailo8"
+CHOSEN_HW_ARCH  = "hailo8l"
 ONNX_MODEL_NAME = "tartan_imu"
 
 STEP_SAMPLES = 200

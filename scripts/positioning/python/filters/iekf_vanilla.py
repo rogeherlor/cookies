@@ -3,33 +3,47 @@
 IEKF Vanilla — Left-Invariant Extended Kalman Filter on SE_2(3).
 GPS position update only.
 
-Reference:
-    Barrau, A. & Bonnabel, S., "The Invariant Extended Kalman Filter as a
-    Stable Observer", IEEE Transactions on Automatic Control, vol. 62, no. 4,
-    pp. 1797-1812, April 2017.  DOI: 10.1109/TAC.2016.2594085
+References:
+    [iekf1] Barrau, A. & Bonnabel, S., "Invariant Kalman Filtering",
+        Annual Review of Control, Robotics, and Autonomous Systems
+        1:237-257, 2018.  (Tutorial. The "imperfect IEKF" with
+        appended Euclidean biases is described in §3 Remark 3.)
+    [iekf2] Barrau, A. & Bonnabel, S., "The Invariant Extended Kalman
+        Filter as a Stable Observer", IEEE Transactions on Automatic
+        Control 62(4):1797-1812, April 2017.
+        DOI: 10.1109/TAC.2016.2594085  (Theoretical foundation —
+        log-linear property and stability proof; the SE_2(3) flat-Earth
+        navigation example is in §V, without biases.)
 
 Implementation notes:
-    This is the "imperfect IEKF" formulation (Barrau 2017, Sec. V) where
-    the IMU biases are treated as Euclidean states rather than group elements.
-    The group state X = (R, v, p) ∈ SE_2(3) follows exact group propagation
-    while biases use the standard additive Gauss-Markov model.
+    This is the "imperfect IEKF" formulation (iekf1 §3 Remark 3) where
+    the IMU biases are appended as Euclidean states rather than group
+    elements. The group state X = (R, v, p) ∈ SE_2(3) follows exact
+    group propagation; biases use additive Gauss-Markov dynamics, which
+    extends iekf1's pure random-walk treatment.
 
-    Error definition: left-invariant error  η = X̂⁻¹ · X.
+    Error definition: left-invariant error  η = X̂⁻¹ · X
+        (this is the inverse of iekf1 footnote 2's η = χ⁻¹·χ̂; both are
+        "left-invariant" — the choice fixes sign conventions in the F
+        matrix and injection rules. The X̂⁻¹·X convention used here gives
+        the body-frame injection p ← p + R̂·ξ_p shown below.)
     At identity the Lie algebra coordinates give:
-        ξ[0:3]  — attitude error  φ      in FLU body frame  [rad]
+        ξ[0:3]  — attitude error  ξ_R    in FLU body frame  [rad]   (δφ in some derivations)
         ξ[3:6]  — velocity error  ξ_v    in FLU body frame  [m/s]
         ξ[6:9]  — position error  ξ_p    in FLU body frame  [m]
         ξ[9:12] — accelerometer bias error  δb_a  [m/s²]
         ξ[12:15]— gyroscope bias error      δb_g  [rad/s]
 
-    Key property: the transition Jacobian for (φ, ξ_v, ξ_p) is
-    state-independent (depends only on slowly-varying bias estimates),
-    improving linearization robustness vs. the standard EKF/ESKF.
+    Key property: the transition Jacobian for (ξ_R, ξ_v, ξ_p) is
+    state-independent — it depends only on the bias-corrected sensor
+    inputs ω̂ = ω_meas − b̂_g and â = a_meas − b̂_a, not on R, v, or p.
+    This is the log-linear property of invariant systems (iekf2 §III)
+    and is what improves linearization robustness vs. EKF/ESKF.
 
-    GPS update: the position measurement p_GPS (nav frame) maps to a
-    linear function of ξ_p (body frame):
-        H = [0, 0, R̂ᵀ, 0, 0]   (3×15)
-        z = R̂ᵀ @ (p_GPS − p̂)
+    GPS update: the body-frame residual z_body = R̂ᵀ(p_GPS − p̂) is a
+    linear function of ξ_p (body frame), so:
+        H = [0, 0, I, 0, 0]   (3×15)         # selects ξ_p directly
+        z_body = R̂ᵀ @ (p_GPS − p̂)            # rotate residual into body frame
 
     Error injection after update:
         p  += R̂ @ ξ[6:9]     (body → nav)
@@ -44,6 +58,8 @@ Conventions:
     Navigation: ENU frame (East, North, Up)
     Quaternion: Hamilton convention  q = [w, x, y, z]  (q_NB = body→nav)
 """
+import time
+
 import numpy as np
 import pymap3d as pm
 
@@ -197,7 +213,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     Q[9:12,  9:12]  = np.eye(3) * (p_cfg['Qacc'] * Ts)
     Q[12:15, 12:15] = np.diag([p_cfg['QgyrXY'], p_cfg['QgyrXY'], p_cfg['QgyrZ']]) * Ts
 
-    # ── Initial covariance (same ordering as error-state: φ, ξ_v, ξ_p, b_a, b_g) ──
+    # ── Initial covariance (same ordering as error-state: ξ_R, ξ_v, ξ_p, b_a, b_g) ──
     P = np.diag([
         p_cfg['P_orient_std'], p_cfg['P_orient_std'], p_cfg['P_orient_std'] * 2,
         p_cfg['P_vel_std'],    p_cfg['P_vel_std'],    p_cfg['P_vel_std'],
@@ -207,6 +223,15 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     ]) ** 2
 
     R_pos = np.eye(3) * p_cfg['Rpos']
+
+    # Per-event wall-clock instrumentation: one entry per IMU sample on which
+    # a measurement update actually fired, timing the correction itself (gain
+    # solve, Joseph covariance update, error injection) in isolation from the
+    # propagation that runs on every sample. Same convention as the DL
+    # runners' `net_latency_s`, so the real-time tables can treat a GPS
+    # correction and a network call as the same kind of Event.
+    event_latency_s = []
+    event_cpu_s = []
 
     for i in range(NN - 1):
 
@@ -226,20 +251,22 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         pIMU   = pIMU + Ts * vIMU + 0.5 * Ts**2 * (accENU + g)
         vIMU   = vIMU + Ts * (accENU + g)
 
-        # ── Left-invariant Jacobian (continuous time, Barrau 2017 Eq. 26) ────
-        # Error state ordering: [φ(3), ξ_v(3), ξ_p(3), δb_a(3), δb_g(3)]
-        # Key property: Ajac[0:9, 0:9] depends only on b̂_a, b̂_g, not on R/v/p.
+        # ── Left-invariant Jacobian (continuous time, iekf1 §3.2 / iekf2 §V) ──
+        # Error state ordering: [ξ_R(3), ξ_v(3), ξ_p(3), δb_a(3), δb_g(3)]
+        # Key property: Ajac[0:9, 0:9] depends only on the bias-corrected
+        # inputs (ω̂, â), not on R/v/p — this is the IEKF state-autonomy.
+        # Same form as Brossard, Bonnabel & Barrau 2020 (AI-IMU Dead-Reckoning §IV).
         Ajac = np.zeros((15, 15))
         # Attitude dynamics
-        Ajac[0:3,  0:3 ] = -_skew(b_g)     # φ̇ ~ −b̂_g × φ
-        Ajac[0:3,  12:15] = -np.eye(3)     # φ̇ ~ −δb_g
+        Ajac[0:3,  0:3 ] = -_skew(omega_b)  # ξ̇_R = −[ω̂]_× ξ_R
+        Ajac[0:3,  12:15] = -np.eye(3)      # ξ̇_R = −δb_g
         # Velocity dynamics (body frame)
-        Ajac[3:6,  0:3 ] = -_skew(b_a)    # ξ̇_v ~ −b̂_a × φ
-        Ajac[3:6,  3:6 ] = -_skew(b_g)    # ξ̇_v ~ −b̂_g × ξ_v
-        Ajac[3:6,  9:12] = -np.eye(3)     # ξ̇_v ~ −δb_a
+        Ajac[3:6,  0:3 ] = -_skew(acc_b)    # ξ̇_v = −[â]_× ξ_R
+        Ajac[3:6,  3:6 ] = -_skew(omega_b)  # ξ̇_v = −[ω̂]_× ξ_v
+        Ajac[3:6,  9:12] = -np.eye(3)       # ξ̇_v = −δb_a
         # Position dynamics (body frame)
-        Ajac[6:9,  3:6 ] = np.eye(3)      # ξ̇_p ~ ξ_v
-        Ajac[6:9,  6:9 ] = -_skew(b_g)   # ξ̇_p ~ −b̂_g × ξ_p
+        Ajac[6:9,  3:6 ] = np.eye(3)        # ξ̇_p = ξ_v
+        Ajac[6:9,  6:9 ] = -_skew(omega_b)  # ξ̇_p = −[ω̂]_× ξ_p
         # Bias dynamics (Gauss-Markov)
         Ajac[9:12,  9:12]  = beta_acc * np.eye(3)
         Ajac[12:15, 12:15] = beta_gyr * np.eye(3)
@@ -250,6 +277,8 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         P = Fd @ P @ Fd.T + Q
 
         update_occurred = False
+        _ev_t0 = time.perf_counter()
+        _ev_c0 = time.thread_time()
 
         # ── GPS Position Update ────────────────────────────────────────────────
         # h(X) = p  →  in left-invariant error: z = Rbnᵀ @ (p_GPS − p̂)
@@ -285,23 +314,25 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             b_g  += xi[12:15]
 
             # Attitude update via quaternion multiplication (same as ESKF)
-            delta_theta = xi[0:3]
-            q = _qnorm(_qmul(q, _qfrom_axis_angle(delta_theta)))
+            xi_R = xi[0:3]
+            q = _qnorm(_qmul(q, _qfrom_axis_angle(xi_R)))
             Rbn = _qto_Rbn(q)   # update Rbn after attitude correction
 
             # Covariance reset (Solà Eq. 288; only attitude block is nonlinear)
             G           = np.eye(15)
-            G[0:3, 0:3] = np.eye(3) - 0.5 * _skew(delta_theta)
+            G[0:3, 0:3] = np.eye(3) - 0.5 * _skew(xi_R)
             P           = G @ P @ G.T
 
             xi[:] = 0.0
+            event_cpu_s.append(time.thread_time() - _ev_c0)
+            event_latency_s.append(time.perf_counter() - _ev_t0)
 
         pos[i+1, :]       = pIMU
         vel[i+1, :]       = vIMU
         rpy_out[i+1, :]   = _qto_rpy(q)
         b_acc_out[i+1, :] = b_a
         b_gyr_out[i+1, :] = b_g
-        # Map IEKF covariance back to ENU for output (φ, ξ_v, ξ_p → p, v, orient)
+        # Map IEKF covariance back to ENU for output (ξ_R, ξ_v, ξ_p → p, v, orient)
         # For display purposes, multiply body-frame std by Rbn to get nav-frame std
         cov_p_nav   = Rbn @ P[6:9, 6:9] @ Rbn.T
         cov_v_nav   = Rbn @ P[3:6, 3:6] @ Rbn.T
@@ -316,4 +347,6 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         'bias_acc': b_acc_out, 'bias_gyr': b_gyr_out,
         'std_pos': std_pos, 'std_vel': std_vel, 'std_orient': std_orient,
         'std_bias_acc': std_b_acc, 'std_bias_gyr': std_b_gyr,
+        'event_latency_s': np.asarray(event_latency_s),
+        'event_cpu_s': np.asarray(event_cpu_s),
     }

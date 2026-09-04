@@ -43,13 +43,14 @@ import visualize
 import visualize_state
 import visualize_compare
 from filters import (
-    ekf_vanilla, ekf_enhanced,
-    eskf_vanilla, eskf_enhanced,
+    esekfg_vanilla, esekfg_enhanced,
+    esekfs_vanilla, esekfs_enhanced,
     iekf_vanilla, iekf_enhanced,
     imu_only,
 )
-from smoothers import rts_smoother, isam2_runner, isam2_map_runner, fgo_batch_runner
-from dl_filters.deep_iekf  import iekf_ai_imu
+from smoothers import (rts_smoother, isam2_runner, isam2_map_runner,
+                       isam2_fixedlag_runner, fgo_batch_runner)
+from dl_filters.deep_iekf  import iekf_ai_imu, iekf_ai_imu_online
 from dl_filters.tlio       import tlio_runner
 from dl_filters.deep_kf    import deep_kf_runner
 from dl_filters.tartan_imu import tartan_runner
@@ -69,13 +70,13 @@ def _load_tuned_params(nav_data, mode_3d):
     DL filters (tlio, deep_kf, tartan_imu) share the same classical-filter
     parameter names (Qpos, Qvel, Rpos, P_pos_std, …) as the ESKF/EKF.  When
     no DL-specific tuned params exist, derive them from the best available
-    classical filter (eskf_enhanced → eskf_vanilla → ekf_enhanced → ekf_vanilla).
+    classical filter (esekfs_enhanced → esekfs_vanilla → esekfg_enhanced → esekfg_vanilla).
     """
     result = {}
     loo_key = f'__loo_held_{nav_data.dataset_name}__'
     cv_key  = '__cv_kitti__'
 
-    for key in ['ekf_vanilla', 'ekf_enhanced', 'eskf_vanilla', 'eskf_enhanced',
+    for key in ['esekfg_vanilla', 'esekfg_enhanced', 'esekfs_vanilla', 'esekfs_enhanced',
                 'iekf_vanilla', 'iekf_enhanced']:
         p = (fp.get(key, mode_3d, loo_key)
              or fp.get(key, mode_3d, nav_data.dataset_name)
@@ -83,15 +84,31 @@ def _load_tuned_params(nav_data, mode_3d):
         if p is not None:
             result[key] = p
 
+    # ── GTSAM smoothers (tuned by ins_genetic_cv with the smoother search space) ─
+    # The iSAM2 family shares one IMU-preintegration/GPS backbone, so the base
+    # 'isam2' tuning is applied to the fixed-lag and track variants too (their
+    # variant-specific keys — smoother_lag, sigma_lat … — stay at DEFAULT_PARAMS).
+    for key in ['isam2', 'isam2_fixedlag', 'isam2_map']:
+        p = (fp.get(key, mode_3d, loo_key)
+             or fp.get(key, mode_3d, nav_data.dataset_name)
+             or fp.get(key, mode_3d, cv_key))
+        if p is not None:
+            result[key] = p
+    _base_isam2 = result.get('isam2')
+    if _base_isam2 is not None:
+        for k in ['isam2_fixedlag', 'isam2_map']:
+            if k not in result:
+                result[k] = dict(_base_isam2)
+
     # ── Derive DL-filter classical params from best tuned classical filter ────
     # TLIO / Deep-KF / Tartan-IMU all have a traditional KF layer whose
     # parameters (Qpos, Qvel, Rpos, P_pos_std …) are identical in name to
     # the ESKF/EKF tuned set.  Use the best available tuned classical filter
     # so DL filters benefit from genetic optimisation without a separate run.
-    _best_classical = (result.get('eskf_enhanced')
-                       or result.get('eskf_vanilla')
-                       or result.get('ekf_enhanced')
-                       or result.get('ekf_vanilla'))
+    _best_classical = (result.get('esekfs_enhanced')
+                       or result.get('esekfs_vanilla')
+                       or result.get('esekfg_enhanced')
+                       or result.get('esekfg_vanilla'))
 
     if _best_classical is not None:
         # Keys shared directly between classical filters and DL filter params
@@ -101,17 +118,18 @@ def _load_tuned_params(nav_data, mode_3d):
                    'P_acc_std', 'P_gyr_std']
         _dl_base = {k: _best_classical[k] for k in _shared if k in _best_classical}
 
-        # Anisotropic orient / gyro noise: average X/Y and Z components
+        # Anisotropic orient / gyro noise: average X/Y and Z components. If a
+        # tuned filter has no separate Z component, fall back to its OWN XY value
+        # (isotropic assumption) rather than an arbitrary hardcoded constant that
+        # silently substitutes a value unrelated to this filter's tuning.
         if 'QorientXY' in _best_classical:
-            _dl_base['Qorient'] = (
-                _best_classical.get('QorientXY', 1e-5) +
-                _best_classical.get('QorientZ', 1e-5)) / 2.0
+            _xy = _best_classical['QorientXY']
+            _dl_base['Qorient'] = (_xy + _best_classical.get('QorientZ', _xy)) / 2.0
         if 'QgyrXY' in _best_classical:
-            _dl_base['Qgyr'] = (
-                _best_classical.get('QgyrXY', 1e-7) +
-                _best_classical.get('QgyrZ', 1e-7)) / 2.0
+            _xy = _best_classical['QgyrXY']
+            _dl_base['Qgyr'] = (_xy + _best_classical.get('QgyrZ', _xy)) / 2.0
 
-        for dl_key in ['tlio', 'deep_kf', 'tartan_imu']:
+        for dl_key in ['tlio', 'deep_kf', 'tartan_imu', 'iekf_ai_imu', 'iekf_ai_imu_online']:
             if dl_key not in result:   # don't overwrite if already tuned directly
                 result[dl_key] = _dl_base.copy()
 
@@ -120,21 +138,25 @@ def _load_tuned_params(nav_data, mode_3d):
 
 # ── Filter configurations ──────────────────────────────────────────────────────
 FILTER_CONFIGS = [
-    {'name': 'EKF Vanilla',    'key': 'ekf_vanilla',   'module': ekf_vanilla},
-    {'name': 'EKF Enhanced',   'key': 'ekf_enhanced',  'module': ekf_enhanced},
-    {'name': 'ESKF Vanilla',   'key': 'eskf_vanilla',  'module': eskf_vanilla},
-    {'name': 'ESKF Enhanced',  'key': 'eskf_enhanced', 'module': eskf_enhanced},
+    {'name': 'ES-EKF Groves',     'key': 'esekfg_vanilla',  'module': esekfg_vanilla},
+    {'name': 'ES-EKF Groves+',    'key': 'esekfg_enhanced', 'module': esekfg_enhanced},
+    {'name': 'ES-EKF Solà',       'key': 'esekfs_vanilla',  'module': esekfs_vanilla},
+    {'name': 'ES-EKF Solà+',      'key': 'esekfs_enhanced', 'module': esekfs_enhanced},
     {'name': 'IEKF Vanilla',   'key': 'iekf_vanilla',  'module': iekf_vanilla},
     {'name': 'IEKF Enhanced',  'key': 'iekf_enhanced', 'module': iekf_enhanced},
     {'name': 'IMU Only',       'key': 'imu_only',      'module': imu_only},
     # Deep learning filters
-    {'name': 'IEKF AI-IMU',  'key': 'iekf_ai_imu', 'module': iekf_ai_imu},
+    # Acausal batch AI-IMU: opt-in diagnostic reference only (peeks at future
+    # samples). Excluded from the default run; request via --filters iekf_ai_imu.
+    {'name': 'IEKF AI-IMU',  'key': 'iekf_ai_imu', 'module': iekf_ai_imu, 'default_run': False},
+    {'name': 'IEKF AI-IMU Online', 'key': 'iekf_ai_imu_online', 'module': iekf_ai_imu_online},
     {'name': 'TLIO',         'key': 'tlio',         'module': tlio_runner},
     {'name': 'Deep KF',      'key': 'deep_kf',      'module': deep_kf_runner},
     {'name': 'Tartan IMU',   'key': 'tartan_imu',   'module': tartan_runner},
     # Online smoothers
     {'name': 'iSAM2',        'key': 'isam2',        'module': isam2_runner},
-    {'name': 'iSAM2 Map',    'key': 'isam2_map',    'module': isam2_map_runner},
+    {'name': 'iSAM2 FL',     'key': 'isam2_fixedlag', 'module': isam2_fixedlag_runner},
+    {'name': 'iSAM2 Track',  'key': 'isam2_map',    'module': isam2_map_runner},
 ]
 
 
@@ -157,7 +179,38 @@ def main():
                         help='GNSS outage start time [s] (overrides ins_config.OUTAGE_START)')
     parser.add_argument('--outage-duration', type=float, default=None,
                         help='GNSS outage duration [s] (overrides ins_config.OUTAGE_DURATION)')
+    parser.add_argument('--filters', nargs='+', default=None,
+                        help='Restrict evaluation to a subset of filter keys '
+                             '(e.g. --filters iekf_ai_imu tlio deep_kf tartan_imu). '
+                             'Default: all filters in FILTER_CONFIGS. '
+                             'Useful shortcut: --filters dl runs only the DL filters.')
     args = parser.parse_args()
+
+    # Resolve the "dl" alias and apply the filter restriction.
+    if args.filters:
+        _DL_KEYS = {'iekf_ai_imu', 'iekf_ai_imu_online', 'tlio', 'deep_kf', 'tartan_imu'}
+        _CLASSICAL_KEYS = {'esekfg_vanilla', 'esekfg_enhanced',
+                           'esekfs_vanilla', 'esekfs_enhanced',
+                           'iekf_vanilla', 'iekf_enhanced', 'imu_only'}
+        wanted = set()
+        for k in args.filters:
+            if k == 'dl':
+                wanted |= _DL_KEYS
+            elif k == 'classical':
+                wanted |= _CLASSICAL_KEYS
+            else:
+                wanted.add(k)
+        _kept = [cfg for cfg in FILTER_CONFIGS if cfg['key'] in wanted]
+        _unknown = wanted - {cfg['key'] for cfg in FILTER_CONFIGS}
+        if _unknown:
+            parser.error(f"Unknown filter keys: {sorted(_unknown)}. "
+                         f"Available: {[cfg['key'] for cfg in FILTER_CONFIGS]}")
+        FILTER_CONFIGS[:] = _kept
+    else:
+        # No explicit --filters: run the default set, excluding opt-in-only filters
+        # (e.g. the acausal batch AI-IMU, a diagnostic reference).
+        FILTER_CONFIGS[:] = [cfg for cfg in FILTER_CONFIGS
+                             if cfg.get('default_run', True)]
 
     # ── Shared configuration ───────────────────────────────────────────────────
     if args.test_seq is not None:
@@ -209,14 +262,50 @@ def main():
         }
 
     # ── AI-IEKF weights path (LOO fold-specific) ───────────────────────────────
-    _repo_root = _HERE / '../../../..'
+    # Two naming schemes coexist: train_kitti writes iekfnets_held_<drive>.p
+    # and train_loo writes fold_<seq>.p. Search both so the right fold weights
+    # are used regardless of how the model was trained.
+    # _HERE = scripts/positioning/python/, so the repo root is THREE levels up.
+    _repo_root = _HERE / '../../..'
+    _drive  = data_loader.KITTI_SEQ_TO_DRIVE.get(
+        nav_data.dataset_name, nav_data.dataset_name)
+    _drive_to_seq = {v: k for k, v in data_loader.KITTI_SEQ_TO_DRIVE.items()}
+    _seq_id = _drive_to_seq.get(_drive, nav_data.dataset_name)
+
+    # Batch (acausal) AI-IEKF weights — opt-in diagnostic filter (deep_iekf/).
     if args.ai_imu_weights:
         _ai_weights = Path(args.ai_imu_weights)
     else:
-        _drive = data_loader.KITTI_SEQ_TO_DRIVE.get(
-            nav_data.dataset_name, nav_data.dataset_name)
-        _candidate = _repo_root / f'artifacts/deep_iekf/iekfnets_held_{_drive}.p'
-        _ai_weights = _candidate if _candidate.exists() else None
+        _candidates = [
+            _repo_root / f'artifacts/deep_iekf/fold_{_seq_id}.p',           # train_loo
+            _repo_root / f'artifacts/deep_iekf/iekfnets_held_{_drive}.p',   # train_kitti
+        ]
+        _ai_weights = next((p for p in _candidates if p.exists()), None)
+
+    # Causal (online) AI-IEKF weights — the DEFAULT AI-IMU. Resolved seq-aware from
+    # deep_iekf_online/, independently of the batch weights (no coupling, no leak).
+    _online_candidates = [
+        _repo_root / f'artifacts/deep_iekf_online/fold_{_seq_id}.p',
+        _repo_root / f'artifacts/deep_iekf_online/iekfnets_held_{_drive}.p',
+    ]
+    _ai_online_weights = next((p for p in _online_candidates if p.exists()), None)
+
+    # Fail loudly if a SELECTED Deep-IEKF filter has no LOO fold weights: silently
+    # letting it fall back to the generic non-held-out iekfnets.p would leak test
+    # data into a leave-one-out evaluation and quietly invalidate the result.
+    _active_keys = {cfg['key'] for cfg in FILTER_CONFIGS}
+    if _ai_online_weights is None and 'iekf_ai_imu_online' in _active_keys:
+        raise FileNotFoundError(
+            f"Deep IEKF (online, iekf_ai_imu_online) is selected but no LOO fold "
+            f"weights exist for seq '{_seq_id}' / drive '{_drive}' (looked for "
+            f"artifacts/deep_iekf_online/fold_{_seq_id}.p and "
+            f"iekfnets_held_{_drive}.p). Refusing to run rather than silently use "
+            f"generic non-held-out weights (LOO leak). Train the fold first: "
+            f"train_ai_imu.py --causal --mode loo --held-out {_drive}.")
+    if _ai_weights is None and 'iekf_ai_imu' in _active_keys:
+        print(f"WARNING: batch AI-IMU (iekf_ai_imu) is selected but has no fold "
+              f"weights for seq '{_seq_id}' — it will fall back to internal "
+              f"defaults (opt-in diagnostic filter; not a journal-grade result).")
 
     # ── Output directories ─────────────────────────────────────────────────────
     if dr_mode:
@@ -261,6 +350,8 @@ def main():
     if dr_mode:
         p_rts_vis = None
         p_gt      = p_kitti
+        v_gt      = nav_data.vel_enu
+        r_gt      = nav_data.orient
         gt_label  = 'KITTI GPS GT'
         logger.info("DR_MODE: ground truth = KITTI GPS")
     elif gt_source == 'batch':
@@ -270,6 +361,8 @@ def main():
             params=TUNED_PARAMS.get('isam2', None),
         )
         p_gt      = batch_result['p']
+        v_gt      = batch_result['v']
+        r_gt      = batch_result['r']
         p_rts_vis = None
         gt_label  = 'Ground Truth (FGO-Batch)'
         logger.info("  FGO-Batch done.")
@@ -278,18 +371,22 @@ def main():
         logger.info("Running RTS smoother…")
         rts_result = rts_smoother.run(
             nav_data=nav_data,
-            params=TUNED_PARAMS.get('ekf_enhanced', None),
+            params=TUNED_PARAMS.get('esekfg_enhanced', None),
             use_3d_rotation=use_3d,
         )
         p_rts = rts_result['p']
         logger.info("  RTS smoother done.")
         if gt_source == 'rts':
             p_gt      = p_rts
+            v_gt      = rts_result['v']
+            r_gt      = rts_result['r']
             p_rts_vis = None
             gt_label  = 'Ground Truth (RTS)'
             logger.info("Ground truth: RTS smoother")
         else:   # 'kitti'
             p_gt      = p_kitti
+            v_gt      = nav_data.vel_enu
+            r_gt      = nav_data.orient
             p_rts_vis = p_rts
             gt_label  = 'KITTI GPS GT'
             logger.info("Ground truth: KITTI GPS")
@@ -305,11 +402,19 @@ def main():
 
         logger.info(f"\nRunning {fname}  ({'tuned' if params else 'default params'})…")
 
-        # For AI-IEKF: inject fold-specific weights via env var if available
-        if fkey == 'iekf_ai_imu' and _ai_weights is not None:
-            os.environ['AI_IMU_WEIGHTS'] = str(_ai_weights)
-        elif fkey == 'iekf_ai_imu':
-            os.environ.pop('AI_IMU_WEIGHTS', None)
+        # For AI-IEKF (batch): inject fold-specific acausal weights via env var.
+        if fkey == 'iekf_ai_imu':
+            if _ai_weights is not None:
+                os.environ['AI_IMU_WEIGHTS'] = str(_ai_weights)
+            else:
+                os.environ.pop('AI_IMU_WEIGHTS', None)
+        # For AI-IEKF online (causal, default): use the seq-specific causal fold
+        # from deep_iekf_online/. No coupling to the batch weights.
+        elif fkey == 'iekf_ai_imu_online':
+            if _ai_online_weights is not None:
+                os.environ['AI_IMU_ONLINE_WEIGHTS'] = str(_ai_online_weights)
+            else:
+                os.environ.pop('AI_IMU_ONLINE_WEIGHTS', None)
 
         _t0 = datetime.now()
         try:
@@ -336,7 +441,7 @@ def main():
         try:
             mets = metrics.evaluate_navigation_performance(
                 p_est=p, v_est=v, r_est=r,
-                p_gt=p_gt, v_gt=nav_data.vel_enu, r_gt=nav_data.orient,
+                p_gt=p_gt, v_gt=v_gt, r_gt=r_gt,
                 dataset_name=nav_data.dataset_name,
                 gnss_outage_info=gnss_outage_info,
                 sample_rate=frecIMU,
@@ -349,10 +454,11 @@ def main():
         pos_rmse_2d = mets.get('position_rmse', {}).get('2D', float('nan'))
         logger.info(f"  ATE 2D = {ate_2d:.2f} m  |  pos RMSE 2D = {pos_rmse_2d:.2f} m")
 
-        # KITTI t_rel / r_rel — always vs raw KITTI GPS, full sequence (no outage)
+        # KITTI t_rel / r_rel — full sequence (no outage), vs the same ground
+        # truth as the rest of this run's metrics (GT_SOURCE, default 'batch').
         kitti_mets = metrics.compute_kitti_metrics(
             p_est=p, r_est=r,
-            p_gt=p_kitti, r_gt=nav_data.orient,
+            p_gt=p_gt, r_gt=r_gt,
         )
         logger.info(f"  t_rel = {kitti_mets['t_rel']:.2f} %  |  r_rel = {kitti_mets['r_rel']:.2f} deg/km"
                     f"  (n_seg={kitti_mets['n_segments']}, dist={kitti_mets['total_dist_m']:.0f} m,"
@@ -380,7 +486,7 @@ def main():
         np.savez(
             ind_dir / f'{run_id}_trajectories.npz',
             p_est=p, v_est=v, r_est=r,
-            p_gt=p_gt, v_gt=nav_data.vel_enu, r_gt=nav_data.orient,
+            p_gt=p_gt, v_gt=v_gt, r_gt=r_gt,
             bias_acc=result['bias_acc'], bias_gyr=result['bias_gyr'],
             std_pos=result['std_pos'], std_vel=result['std_vel'],
             std_orient=result['std_orient'],
@@ -442,7 +548,7 @@ def main():
           f"{_mode_str}  |  {'3D' if use_3d else '2D'}")
     print("=" * 112)
     print(f"{'Filter':<20} {'ATE 2D [m]':>12} {'ATE 3D [m]':>12} {'Pos RMSE 2D':>13} "
-          f"{'Outage max [m]':>16} {'t_rel [%]':>11} {'r_rel [°/km]':>13} {'Time [s]':>10}")
+          f"{'Outage max [m]':>16} {'t_rel [%]':>11} {'r_rel [°/km]':>13} {'Proc wall [s]':>14}")
     print("-" * 112)
     for entry in all_results:
         mets   = entry['metrics']
@@ -455,10 +561,13 @@ def main():
         rrel   = km.get('r_rel', float('nan'))
         elapsed = entry.get('elapsed_s', float('nan'))
         print(f"{entry['name']:<20} {ate2d:>12.2f} {ate3d:>12.2f} {prmse:>13.2f} "
-              f"{outagm:>16.2f} {trel:>11.2f} {rrel:>13.2f} {elapsed:>10.1f}")
+              f"{outagm:>16.2f} {trel:>11.2f} {rrel:>13.2f} {elapsed:>14.1f}")
     print("=" * 112)
     print("NOTE: Tune parameters with ins_genetic.py before drawing conclusions.\n"
-          "      t_rel / r_rel are KITTI odometry metrics (full sequence, vs raw GPS).\n")
+          "      t_rel / r_rel are KITTI odometry metrics (full sequence, vs GT_SOURCE).\n"
+          "      Proc wall = total dev-machine wall-clock to process the whole\n"
+          "      sequence in Python; it is a relative throughput proxy, NOT the\n"
+          "      per-sample real-time / embedded latency of a live deployment.\n")
 
 
 if __name__ == '__main__':
