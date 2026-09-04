@@ -196,6 +196,13 @@ def main():
                         help="Directory where outputs will be written")
     parser.add_argument("--opset",   type=int, default=11,
                         help="ONNX opset version (Hailo DFC 3.x supports up to 11/12)")
+    parser.add_argument(
+        "--artifact", type=Path, default=None,
+        help="LoRA adapter for ONE LOO fold, e.g. artifacts/tartan_imu/lora_fold_06.pt. "
+             "Mirrors tlio/0_onnx_converter.py's --artifact so build_per_fold_hefs.py "
+             "can select the fold explicitly. Omit only for a deliberate "
+             "all-sequences/zero-shot export.",
+    )
     args = parser.parse_args()
 
     from tartan_runner import (
@@ -203,7 +210,20 @@ def main():
     )
 
     weights_path = _find_tartan_weights()
-    lora_path    = _find_lora_adapter()
+    # Fold selection must be EXPLICIT. _find_lora_adapter() with no seq_id falls
+    # back to the all-sequences adapter, or — when that file does not exist, which
+    # is the case in this repo — to zero-shot, silently. Either would produce seven
+    # identical "per-fold" HEFs carrying weights that are not the held-out fold's,
+    # which is precisely the leakage build_per_fold_hefs.py exists to remove.
+    if args.artifact is not None:
+        if not args.artifact.exists():
+            raise FileNotFoundError(f"LoRA adapter not found: {args.artifact}")
+        lora_path = args.artifact
+    else:
+        lora_path = _find_lora_adapter()
+        print("[warning] no --artifact given: exporting the all-sequences/zero-shot "
+              "model. This is NOT a leave-one-out fold; do not use the resulting "
+              "HEF for a per-fold accuracy comparison.")
     model, use_lora = _load_tartan_model(weights_path, lora_path, lora_rank=8, device="cpu")
 
     if not isinstance(model, _TartanIMUModel):

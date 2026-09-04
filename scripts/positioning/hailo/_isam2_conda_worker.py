@@ -66,12 +66,20 @@ def main():
     wall_s = time.perf_counter() - t0
 
     args.out_npz.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(
-        args.out_npz,
+    save_kwargs = dict(
         p=result['p'], v=result['v'], r=result['r'],
         bias_acc=result['bias_acc'], bias_gyr=result['bias_gyr'],
         wall_s=np.array(wall_s),
     )
+    # Per-epoch factor-graph solve times — the smoothers' Event, in the same
+    # sense as a DL filter's network call (see isam2_runner.py's own
+    # "Instrumentation" docstring section). Full-length (N,) array, non-zero
+    # only on the epochs where update()+calculateEstimate() actually ran;
+    # the caller filters it. fgo_batch_runner has no incremental update loop
+    # and does not produce it.
+    if 'update_ms' in result:
+        save_kwargs['update_ms'] = np.asarray(result['update_ms'], dtype=float)
+    np.savez(args.out_npz, **save_kwargs)
     print(f"OK {args.runner} -> {args.out_npz} ({wall_s:.3f}s)")
 
 

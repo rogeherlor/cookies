@@ -30,23 +30,30 @@ _REPO_ROOT = _HERE.parent.parent.parent
 _PY_DIR = _REPO_ROOT / "scripts/positioning/python"
 sys.path.insert(0, str(_PY_DIR))
 
+# HEF/postproc paths are PER LOO FOLD and resolved against DATASET_ID below.
+# There is no single all-folds .hef any more: build_per_fold_hefs.py emits
+# <model>_fold_<seq>.hef (+ <model>_postproc_fold_<seq>.pt for the two models
+# whose head stays on the host), because one HEF reused across all seven
+# sequences evaluated six of them on a model that had trained on them. The old
+# single-file artefacts are kept under <model>/_pre_per_fold/ for reference and
+# must not be used for a per-fold result.
 APPROACH_CFG = {
     'deep_kf': dict(
         runner_path=_PY_DIR / "dl_filters/deep_kf",
         runner_mod="deep_kf_runner",
-        hef=_HERE / "deep_kf/deep_kf.hef",
+        hef=_HERE / "deep_kf/deep_kf_fold_{seq}.hef",
     ),
     'tlio': dict(
         runner_path=_PY_DIR / "dl_filters/tlio",
         runner_mod="tlio_runner",
-        hef=_HERE / "tlio/tlio.hef",
-        postproc=_HERE / "tlio/tlio_postproc.pt",
+        hef=_HERE / "tlio/tlio_fold_{seq}.hef",
+        postproc=_HERE / "tlio/tlio_postproc_fold_{seq}.pt",
     ),
     'tartan_imu': dict(
         runner_path=_PY_DIR / "dl_filters/tartan_imu",
         runner_mod="tartan_runner",
-        hef=_HERE / "tartan_imu/tartan_imu.hef",
-        postproc=_HERE / "tartan_imu/tartan_imu_postproc.pt",
+        hef=_HERE / "tartan_imu/tartan_imu_fold_{seq}.hef",
+        postproc=_HERE / "tartan_imu/tartan_imu_postproc_fold_{seq}.pt",
     ),
     'deep_iekf': dict(
         runner_path=_PY_DIR / "dl_filters/deep_iekf",
@@ -98,15 +105,41 @@ def main():
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
 
-    cfg = APPROACH_CFG[args.approach]
+    cfg = dict(APPROACH_CFG[args.approach])
+    # Resolve the per-fold artefacts for the sequence actually being evaluated.
+    # Missing means "this fold was never compiled" — raise rather than fall back
+    # to another fold, mirroring tlio_runner._find_weights on the CPU side.
+    for _k in ("hef", "postproc"):
+        _v = cfg.get(_k)
+        if _v is None:
+            continue
+        _v = Path(str(_v).format(seq=DATASET_ID))
+        if "_fold_" in _v.name and not _v.exists():
+            raise FileNotFoundError(
+                f"{_v} not found — fold {DATASET_ID} of {args.approach} has not "
+                f"been compiled. Build it with:\n"
+                f"  python3 build_per_fold_hefs.py --models {args.approach} "
+                f"--folds {DATASET_ID}\n"
+                f"Refusing to substitute another fold's artefact.")
+        cfg[_k] = _v
     sys.path.insert(0, str(cfg["runner_path"]))
     runner = importlib.import_module(cfg["runner_mod"])
 
     import data_loader
     nav = data_loader.get_kitti_dataset(DATASET_ID)
 
+    # Prefer the per-fold STREAMING HEF (any-length, genuine online) when
+    # present — same reasoning as _full_eval_worker.py. The old fixed
+    # SEQ_LEN=4544 HEF requires truncating BOTH backends to a fair (but
+    # unrealistic) common slice; the streaming HEF needs no truncation at all.
+    _use_stream = False
     if args.approach == "deep_iekf":
-        nav = _truncate(nav, IEKF_SEQ_LEN)
+        _sdir = _HERE / "deep_iekf_stream"
+        _shef = _sdir / f"deep_iekf_stream_fold_{DATASET_ID}.hef"
+        _spp = _sdir / f"deep_iekf_stream_fold_{DATASET_ID}_postproc.npz"
+        _use_stream = _shef.exists() and _spp.exists()
+        if not _use_stream:
+            nav = _truncate(nav, IEKF_SEQ_LEN)
         outage_cfg = IEKF_OUTAGE if args.scenario == "outage" else {'start': 0., 'duration': 0.}
     else:
         outage_cfg = FULL_OUTAGE if args.scenario == "outage" else {'start': 0., 'duration': 0.}
@@ -125,7 +158,10 @@ def main():
         elif args.approach == "tartan_imu":
             hailo_cm = hailo_backend.HailoTartanIMU(cfg["hef"], cfg["postproc"])
         elif args.approach == "deep_iekf":
-            hailo_cm = hailo_backend.HailoDeepIEKF(cfg["hef"], cfg["postproc"])
+            if _use_stream:
+                hailo_cm = hailo_backend.HailoDeepIEKFStream(_shef, _spp)
+            else:
+                hailo_cm = hailo_backend.HailoDeepIEKF(cfg["hef"], cfg["postproc"])
         hailo_net = hailo_cm.__enter__()
 
     try:

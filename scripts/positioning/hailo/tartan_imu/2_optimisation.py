@@ -220,6 +220,16 @@ def print_comparison(backends: dict, reference: str = "PyTorch"):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--artifact", type=Path, default=None,
+        help="LoRA adapter for ONE LOO fold (e.g. artifacts/tartan_imu/lora_fold_06.pt). "
+             "Must be the SAME fold 0_onnx_converter.py exported, or the "
+             "'MAE vs PyTorch' line below compares the quantised fold-F graph "
+             "against a different model and is meaningless.",
+    )
+    args = parser.parse_args()
+
     # ── Calibration data — real KITTI LSTM windows at 200 Hz ─────────────────
     try:
         import data_loader as _dl
@@ -268,7 +278,15 @@ def main():
     from tartan_runner import _find_tartan_weights, _find_lora_adapter, _load_tartan_model, _TartanImuStub
     try:
         weights_path = _find_tartan_weights()
-        lora_path = _find_lora_adapter()
+        if args.artifact is not None:
+            if not args.artifact.exists():
+                raise FileNotFoundError(f"LoRA adapter not found: {args.artifact}")
+            lora_path = args.artifact
+        else:
+            lora_path = _find_lora_adapter()
+            log.warning("no --artifact given: the PyTorch reference is the "
+                        "all-sequences/zero-shot model, so 'MAE vs PyTorch' below "
+                        "does NOT measure quantisation error of a per-fold graph.")
         model, _ = _load_tartan_model(weights_path, lora_path, lora_rank=8)
     except RuntimeError as e:
         log.warning("Base model unavailable (%s). Using _TartanImuStub.", e)
@@ -335,11 +353,16 @@ def main():
             with runner.infer_context(InferenceContext.SDK_QUANTIZED) as ctx:
                 backends["SDK_QUANTIZED"] = infer_hailo(runner, ctx, infer_np, postproc)
         except Exception as e:
-            log.warning(
-                "Quantization failed (%s: %s). "
-                "SDK_NATIVE and SDK_FP_OPTIMIZED results are still valid.",
-                type(e).__name__, e,
+            # Fatal on purpose — see the same guard in tlio/2_optimisation.py.
+            # 3_compilation.py compiles whatever quantized HAR is on disk, so a
+            # swallowed failure here silently ships the previous fold's weights.
+            log.error(
+                "Quantization FAILED (%s: %s). Not writing %s — the stale one on "
+                "disk belongs to a different export. No HEF may be built from this run.",
+                type(e).__name__, e, QUANTIZED_HAR_PATH.name,
             )
+            print_comparison(backends)
+            raise
 
     # ── Print results ─────────────────────────────────────────────────────────
     print_comparison(backends)

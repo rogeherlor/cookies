@@ -37,6 +37,8 @@ Conventions:
     Euler angles: ZYX, stored as [roll, pitch, yaw]  [rad]
     Attitude error δε: defined in the navigation frame (Groves phi-angle)
 """
+import time
+
 import numpy as np
 import pymap3d as pm
 from math import sin, cos, sqrt
@@ -285,6 +287,15 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
     g_mag = float(np.linalg.norm(g_n))   # used by ZUPT detector (Somigliana-aware)
 
     # ── Main loop ──────────────────────────────────────────────────────────────
+    # Per-event wall-clock instrumentation: one entry per IMU sample on which
+    # a measurement update actually fired, timing the correction itself (gain
+    # solve, Joseph covariance update, error injection) in isolation from the
+    # propagation that runs on every sample. Same convention as the DL
+    # runners' `net_latency_s`, so the real-time tables can treat a GPS
+    # correction and a network call as the same kind of Event.
+    event_latency_s = []
+    event_cpu_s = []
+
     for i in range(NN - 1):
 
         # 1. Bias-corrected IMU measurements
@@ -339,6 +350,8 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
         dx = Fd @ dx
 
         update_occurred = False
+        _ev_t0 = time.perf_counter()
+        _ev_c0 = time.thread_time()
 
         # 5a. GPS position update (sparse: 3 observations)
         gps_ok    = nav_data.gps_available[i]
@@ -420,6 +433,8 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
             b_g    += dx[12:15]
             rpy[2]  = (rpy[2] + np.pi) % (2.0 * np.pi) - np.pi
             dx[:]   = 0.0
+            event_cpu_s.append(time.thread_time() - _ev_c0)
+            event_latency_s.append(time.perf_counter() - _ev_t0)
 
         # 7. Store outputs
         pos[i+1, :]       = pIMU
@@ -438,4 +453,6 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
         'bias_acc': b_acc_out, 'bias_gyr': b_gyr_out,
         'std_pos': std_pos, 'std_vel': std_vel, 'std_orient': std_orient,
         'std_bias_acc': std_b_acc, 'std_bias_gyr': std_b_gyr,
+        'event_latency_s': np.asarray(event_latency_s),
+        'event_cpu_s': np.asarray(event_cpu_s),
     }

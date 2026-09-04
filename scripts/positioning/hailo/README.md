@@ -51,10 +51,14 @@ python3 3_compilation.py       # writes <approach>.hef + <approach>_compiled_mod
 python3 4_inference.py         # real hardware run, prints HEF vs PyTorch MAE
 ```
 
-`tartan_imu` needs `TARTAN_IMU_LORA=<repo>/artifacts/tartan_imu/lora_fold_01.pt`
-exported first (or another fold) — without it, both the CNN export and the
-PyTorch reference silently fall back to the zero-shot base model, which will
-never match a `.hef` compiled from a specific fold.
+`tartan_imu` takes `--artifact <repo>/artifacts/tartan_imu/lora_fold_01.pt` on
+both `0_onnx_converter.py` and `2_optimisation.py`, mirroring `tlio`'s flag.
+Without it, both the CNN export and the PyTorch reference silently fall back to
+the zero-shot base model, which will never match a `.hef` compiled from a
+specific fold. (The `TARTAN_IMU_LORA` env var still works as an escape hatch,
+but `--artifact` is what `build_per_fold_hefs.py` uses and what these scripts
+document — an env var whose name has to match a *different* module's spelling
+is too easy to get silently wrong.)
 
 `deep_iekf` defaults to `artifacts/deep_iekf_online/iekfnets.p` — **if a
 training run is writing to that folder, pass an explicit, already-completed
@@ -62,6 +66,60 @@ fold instead** (`--weights <repo>/artifacts/deep_iekf_online/fold_01.p`, or
 `fold_04.p`/`fold_06.p`/`fold_07.p`, whichever are already finished) on
 `0_onnx_converter.py`, `2_optimisation.py`, and `4_inference.py` alike — the
 default path is exactly the file the training loop is actively overwriting.
+
+## Per-LOO-fold compilation (required)
+
+**There is no single `<model>.hef`.** Each of the four models is compiled once
+per leave-one-out fold, and the evaluator loads the fold matching the sequence
+under test.
+
+This is not a refinement — it is the difference between measuring quantisation
+and measuring train/test leakage. The Hailo side originally shipped one
+`tlio.hef` / `deep_kf.hef` / `tartan_imu.hef` used for all seven sequences,
+traced to `fold_01`. On sequence 06 that gave ATE 5.3955 where the LOO-correct
+`fold_06` weights give 7.2033; the "Hailo beats CPU" result on five of six
+sequences was the model recognising data it had trained on. The CPU backends
+never had this problem — `tlio_runner._find_weights` raises rather than
+substitute a fold — so the two columns were not comparable.
+
+```bash
+python3 build_per_fold_hefs.py --dry-run     # inspect the plan
+python3 build_per_fold_hefs.py               # 21 builds (3 models x 7 folds)
+python3 build_per_fold_hefs.py --models tlio --folds 06     # rebuild just one
+```
+
+Produces, for seq in {01,04,06,07,08,09,10}:
+
+```
+tlio/tlio_fold_<seq>.hef              + tlio/tlio_postproc_fold_<seq>.pt
+deep_kf/deep_kf_fold_<seq>.hef        (no postproc — whole net is on-device)
+tartan_imu/tartan_imu_fold_<seq>.hef  + tartan_imu/tartan_imu_postproc_fold_<seq>.pt
+deep_iekf_stream/deep_iekf_stream_fold_<seq>.hef + ..._postproc.npz  (built by build_stream.py)
+```
+
+### The postproc file is half the model
+
+For `tlio` and `tartan_imu` the accelerator holds only the backbone; the head
+runs on the host (`tlio`: bn1 + fc1/2/3, `tartan`: LSTM + Trunk + robot head)
+from `<model>_postproc_fold_<seq>.pt`, which stage 0 writes **straight from the
+fold checkpoint**. Those weights are exactly as fold-specific as the backbone.
+Pairing a per-fold `.hef` with a single shared postproc would run fold F's
+backbone into whichever fold's head was exported last — a second leak, and a
+numerically incoherent model on top. `_fold_hef()` therefore requires **both**
+files and treats a lone `.hef` as "not built".
+
+### Why the driver wipes intermediates
+
+Stages 1-3 hardcode canonical filenames (`tlio.onnx` -> `tlio_hailo_model.har`
+-> `tlio.hef`), so the driver runs the normal pipeline once per fold and moves
+the result aside. That makes stale files dangerous: if stage 2 failed and
+exited 0, stage 3 would compile the **previous fold's** quantized HAR and the
+driver would report success. Two guards close this:
+
+* every `2_optimisation.py` now re-raises on a quantisation failure instead of
+  warning and exiting 0;
+* the driver deletes all intermediates, **including the fold being rebuilt**,
+  before each fold. A missing file fails loudly; a stale one does not.
 
 ## See the real hardware results yourself
 
@@ -100,13 +158,18 @@ are the ones backed by real hardware measurements.
 | `deep_kf`    | ✅ validated | 0.094 (core state channels match to 4-5 sig figs; error concentrated in near-zero covariance channels, which are coarsely quantized by design — see `LSTM h0` comment in the model) | |
 | `tlio`       | ✅ validated | 0.046 | Needed 3 real fixes, see below |
 | `tartan_imu` | ✅ validated | 0.014 | Needed 3 real fixes + a pre-existing bug fix in `tartan_runner.py`, see below |
-| `deep_iekf`  | ✅ validated | 5.01 steady-state (excl. first 20 samples — see below) | Tested against completed fold `fold_01.p` while a *different* fold trains in the background; needed 1 real fix, see below |
+| `deep_iekf`  | ⚠️ superseded | 5.01 steady-state (excl. first 20 samples — see below) | Fixed `SEQ_LEN=4544` input — covers only `min(N,4544)` of a real sequence (8–40% of most KITTI drives, `N≠4544` raises). Not a deployable online path; kept for history. **Use `deep_iekf_stream/` instead.** |
+| `deep_iekf` (**streaming, `deep_iekf_stream/`**) | ✅ validated, **on real Hailo-8L, all 7 LOO folds** | 0.003–0.855 m end-to-end trajectory ATE vs float reference (per-fold, real device) | Fixed `SEQ_LEN=32`, driven per-tick or block-16 over any sequence length — genuinely online. See `deep_iekf_stream/README.md`. |
 
-All four approaches ran the **entire** pipeline (steps 0-4) on the physical
-Hailo-8L, not just the DFC's software emulator. `deep_iekf` was tested against
-`artifacts/deep_iekf_online/fold_01.p` — a completed LOO fold — while a
-training run for a *different* held-out fold continued untouched in the
-background throughout.
+All four original approaches ran the **entire** pipeline (steps 0-4) on the
+physical Hailo-8L, not just the DFC's software emulator. `deep_iekf` was
+tested against `artifacts/deep_iekf_online/fold_01.p` — a completed LOO fold —
+while a training run for a *different* held-out fold continued untouched in
+the background throughout. **`deep_iekf`'s fixed 4544-sample whole-sequence
+HEF was later found unusable as an online deployment** (see below) and
+replaced by `deep_iekf_stream/` (small fixed window, driven over the whole
+sequence one window at a time) — validated end-to-end, per LOO fold, on this
+PC's physical Hailo-8L card (firmware 4.20.0, same as the Pi's).
 
 ### `deep_iekf` result detail
 
@@ -130,6 +193,14 @@ MAE vs PyTorch, steady-state (excl. first 20 samples):        0.0098  (SDK_FP_OP
 ```
 cov_up's scale is ~80-300, so a steady-state MAE of ~5 is a ~2-6% relative
 error — the same order as the other three approaches' quantization error.
+
+**This whole-sequence 4544-sample HEF was later found unusable for real
+deployment**: its fixed input length only covers `min(N,4544)` of an actual
+KITTI sequence (8–40% of most drives; the runtime raises outright if
+`N≠4544`), and it cannot be driven per-tick as new IMU samples arrive. See
+`deep_iekf_stream/README.md` for the small-fixed-window (`SEQ_LEN=32`)
+replacement, validated end-to-end on real Hailo-8L hardware across all 7 LOO
+folds, that supersedes it.
 
 ## Bugs found and fixed
 
@@ -303,3 +374,79 @@ See [`docker/`](docker/) for the HailoRT-only multi-arch runtime image
 (builds for both this PC's `amd64` and the Pi 5's `arm64`). The DFC/compile
 step stays here on x86_64; only the compiled `.hef` + `4_inference.py`-style
 inference code needs to travel to the Pi.
+
+## Timing measurement protocol
+
+The per-event timings in the thesis tables are only valid if the run was not
+competing with anything else on the board. An earlier sweep that ignored this
+reported figures inflated by 2-4x, and the error was not uniform: it changed a
+verdict (TLIO read 64.51 ms against its 50 ms budget and appeared to FAIL,
+where a clean measurement gives 15.96 ms and PASSes) and it invented a
+difference between the outage and no-outage scenarios that does not exist
+(ES-EKF Groves' outage event median read 0.48 +/- 0.56 ms against a true
+0.23 +/- 0.02 ms). A GNSS correction cannot cost more during a GNSS outage —
+the outage removes events, it does not make each one more expensive.
+
+Rules, in order of importance:
+
+1. **One measurement process at a time.** `run_full_benchmark.py` already runs
+   its jobs sequentially, but nothing stops a second sweep, an editor's
+   language server, or a forgotten background job from running alongside it.
+   Check with `ps aux` before starting and after finishing.
+2. **Single-threaded BLAS.** `_full_eval_worker.py` now sets
+   `OMP_NUM_THREADS=1` and friends at import time, before numpy/torch load, so
+   this is automatic. Do not override it. Multi-threaded BLAS is slower here,
+   not faster: the tensors are small enough that thread fan-out/join costs more
+   than the arithmetic.
+3. **Pin the cores, identically for every row.** Set `BENCH_TASKSET` once and
+   both `run_full_benchmark.py` and `_hailo_rerun.sh` apply it to every job:
+
+   ```bash
+   BENCH_TASKSET=1,2,3 python3 run_full_benchmark.py    # leaves core 0 for the OS
+   BENCH_TASKSET=1,2,3 ./_hailo_rerun.sh
+   ```
+
+   This used to be split — `_hailo_rerun.sh` hardcoded `taskset -c 1,2,3` while
+   `run_full_benchmark.py` pinned nothing — so the Hailo and CPU halves of the
+   same table were measured on different effective machines with nothing in the
+   output recording it. Every result JSON now carries `n_cpus_affinity` and the
+   1-minute load average before and after the run, so an inconsistency is
+   visible after the fact instead of invisible. Pinning alone is not sufficient
+   — it stops migration, not preemption.
+4. **Check the board is cool and idle first.** `vcgencmd measure_temp` and
+   `vcgencmd get_throttled`. A long prior sweep can leave it thermally
+   throttled, which silently inflates everything that follows.
+
+### The self-check
+
+Every run records thread CPU time beside wall-clock and emits `wall_cpu_ratio`
+in its JSON. CPU time counts only cycles actually retired on the thread, so a
+run that was descheduled shows wall >> cpu. **A ratio near 1.0 is positive
+evidence the measurement is clean; the worker prints a warning above 1.25.** A
+clean full sweep of the seven classical filters holds
+`max |wall/cpu - 1| = 0.033`.
+
+This now covers **all eleven CPU-backed filters**, not just the seven classical
+ones. The four DL runners emit `net_cpu_s` alongside `net_latency_s`; before
+that, a preempted TLIO/DKF/Tartan/Deep-IEKF CPU run was reported as a genuine
+latency with nothing to contradict it — the exact failure the check exists to
+catch, left uncovered on the rows most likely to be quoted.
+
+On the **Hailo** rows the same field is recorded but the warning is gated off
+(`wall_cpu_ratio_gated: false` in the JSON). There the host thread really is
+blocked on the accelerator, so wall >> cpu is the expected offload signature
+rather than contamination — but having the number still lets you separate
+"waiting on the device" from "waiting on some other process", which a bare
+wall-clock figure cannot do.
+
+A **pre-run load check** runs before any timed work: if the 1-minute load
+average already exceeds half the assigned core count, the worker warns that the
+machine is not idle. This catches interference that starts before the run and
+so never shows up in a per-event ratio.
+
+### Statistics
+
+Event counts differ by three orders of magnitude between filters (about 120k
+for a per-sample update, 30-540 for a 1 Hz GNSS correction). A 95th percentile
+over ~56 events is roughly the third-largest sample and is dominated by
+scheduler noise; pool events across sequences before quoting a tail statistic.

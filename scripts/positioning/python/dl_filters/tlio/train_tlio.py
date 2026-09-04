@@ -278,19 +278,27 @@ def train(args):
     else:
         CLEAN_SEQS_ACTIVE = CLEAN_SEQS   # kitti clean seqs
 
-    # Determine sequences
+    # Determine sequences.
+    # NESTED split: --val-seq names the LOO HELD-OUT (test) sequence, which is
+    # never loaded here. The inner validation sequence that drives best-checkpoint
+    # selection and ReduceLROnPlateau is carved out of the remaining training
+    # sequences by dl_filters._validation.inner_split — see that function for why
+    # validating on the held-out sequence biased these rows.
     if args.mode == 'loo':
         if args.val_seq not in CLEAN_SEQS_ACTIVE:
             raise ValueError(f"--val-seq must be one of {CLEAN_SEQS_ACTIVE}")
-        train_seqs = [s for s in CLEAN_SEQS_ACTIVE if s != args.val_seq]
-        val_seq    = args.val_seq
+        from dl_filters._validation import inner_split
+        held_out_seq = args.val_seq
+        train_seqs, val_seq = inner_split(CLEAN_SEQS_ACTIVE, held_out_seq)
         out_name   = f'fold_{args.val_seq}.pt'
     else:  # all
+        held_out_seq = None
         train_seqs = CLEAN_SEQS_ACTIVE
         val_seq    = None
         out_name   = 'tlio_resnet.pt'
 
-    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seq}")
+    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  "
+          f"inner_val={val_seq}  held_out(test, unused)={held_out_seq}")
 
     # Window size in TARGET_HZ (200 Hz) samples — same as build_windows
     sample_rate = 100.0
@@ -331,9 +339,25 @@ def train(args):
     val_metric_path = output_dir / out_name.replace('.pt', '_val_metric.pt')
 
     best_val_loss = float('inf')
+    # SELECTION criterion. best_J is the three-component journal cost
+    #     J = ATE_outage/1m + t_rel/1% + r_rel/1(deg/km)
+    # measured by closing the loop on the INNER-VALIDATION sequence with the
+    # standard 40s/60s outage — i.e. the same objective ins_genetic_cv.py
+    # minimises for the seven classical filters.
+    #
+    # It replaces one-step NLL validation loss for choosing which epoch to
+    # deploy. NLL cannot see this at all: these models are trained OUTAGE-FREE
+    # (run_dl_training.sh: "outages are simulated only at evaluation time"), so
+    # a one-step density score on clean data carries no information about the
+    # dead-reckoning behaviour the tables actually report. Selecting on it was
+    # effectively arbitrary with respect to the reported metric, and measurably
+    # so — Deep KF's LOO outage mean moved between 86 m and 557 m depending only
+    # on which epoch that blind criterion happened to pick.
+    best_J = float('inf')
+    best_J_epoch = None
 
-    # Journal-metric validation hook (display-only — not used in backprop).
-    # Reuses ins_cost.single_window_cost, identical to the genetic pipeline.
+    # Journal-metric hook. NOT used in backprop — it selects the checkpoint.
+    # It scores the INNER validation sequence, never the LOO held-out one.
     _val_hook = None
     if args.mode == 'loo' and val_seq is not None and args.val_metric_every > 0:
         try:
@@ -345,6 +369,12 @@ def train(args):
                 'dl_filters.tlio.tlio_runner')
 
             def _val_hook(_epoch, _model):
+                """Score this epoch on the inner-val sequence; returns J (inf on
+                failure). The weights have to reach the runner through a file
+                because the runner resolves its own checkpoint — writing them to
+                val_metric_path and pointing TLIO_WEIGHTS at it is the same
+                mechanism the evaluation uses, so the number measured here is
+                produced by the identical code path that produces the table."""
                 _model.eval()
                 torch.save({'epoch': _epoch,
                             'model_state_dict': _model.state_dict(),
@@ -352,10 +382,12 @@ def train(args):
                            val_metric_path)
                 _prev = _os.environ.get('TLIO_WEIGHTS')
                 _os.environ['TLIO_WEIGHTS'] = str(val_metric_path)
+                _J = float('inf')
                 try:
                     _m = validate_with_journal_metric(
                         filter_module=_tlio_runner, val_seq=val_seq)
                     print(format_val_line(_epoch, _m))
+                    _J = float(_m.get('J', float('inf')))
                 except Exception as _e:
                     print(f"  [val] journal-metric hook failed: {_e}")
                 finally:
@@ -364,6 +396,7 @@ def train(args):
                     else:
                         _os.environ['TLIO_WEIGHTS'] = _prev
                 _model.train()
+                return _J
         except Exception as _e:
             print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
             _val_hook = None
@@ -408,22 +441,15 @@ def train(args):
                                     epoch, phase_switch)
                     val_loss += loss.item() * imu_w.size(0)
             avg_val = val_loss / len(val_ds)
-            scheduler.step(avg_val)   # ReduceLROnPlateau on held-out loss
+            # LR schedule still follows the inner-val NLL: it is a smooth,
+            # every-epoch signal, which is what a plateau detector needs. Only
+            # CHECKPOINT SELECTION moves to the journal metric, below.
+            scheduler.step(avg_val)
+            best_val_loss = min(best_val_loss, avg_val)
             if _should_print:
                 print(f"Epoch {epoch+1:4d}/{args.epochs} [{phase}]  "
                       f"train={avg_train:.4f}  val={avg_val:.4f}  "
                       f"lr={optimizer.param_groups[0]['lr']:.2e}")
-
-            # Save best
-            if avg_val < best_val_loss:
-                best_val_loss = avg_val
-                torch.save({
-                    'epoch':            epoch,
-                    'model_state_dict': model.state_dict(),
-                    'val_loss':         avg_val,
-                    'args':             vars(args),
-                }, output_dir / out_name)
-                print(f"  → saved best weights ({out_name})")
         else:
             scheduler.step(avg_train)   # no val set (--mode all): plateau on train loss
             if _should_print:
@@ -439,11 +465,38 @@ def train(args):
                 'args':             vars(args),
             }, ckpt_path)
 
-        # Journal-metric validation (display-only; never enters backprop).
+        # Journal-metric validation — THIS is what selects the deployed epoch.
+        # Never enters backprop; it only decides which weights are kept.
         if _val_hook is not None and (
                 (epoch + 1) % args.val_metric_every == 0
                 or epoch == args.epochs - 1):
-            _val_hook(epoch, model)
+            _J = _val_hook(epoch, model)
+            if _J < best_J:
+                best_J, best_J_epoch = _J, epoch
+                torch.save({
+                    'epoch':            epoch,
+                    'model_state_dict': model.state_dict(),
+                    'val_loss':         avg_val if val_loader is not None else None,
+                    'journal_J':        _J,
+                    'selection':        'journal_metric_inner_val',
+                    'inner_val_seq':    val_seq,
+                    'args':             vars(args),
+                }, output_dir / out_name)
+                print(f"  → saved best weights ({out_name})  J={_J:.4f} @ epoch {epoch}")
+
+    # Every scored epoch was rejected (J=inf everywhere, e.g. the filter
+    # diverged on the inner-val sequence at every checkpoint). Saving the last
+    # epoch anyway would look identical on disk to a legitimate selection, so
+    # fail instead — a fold with no valid checkpoint must not silently become a
+    # table row.
+    if _val_hook is not None and best_J_epoch is None:
+        raise RuntimeError(
+            f"No checkpoint was selected for fold {held_out_seq}: the journal "
+            f"metric was inf at every evaluated epoch on inner-val sequence "
+            f"{val_seq}. Refusing to deploy an unselected checkpoint.")
+    if _val_hook is not None:
+        print(f"Selected epoch {best_J_epoch} (J={best_J:.4f} on inner-val "
+              f"seq {val_seq}) -> {out_name}")
 
     # If no validation, save at the end
     if val_loader is None:

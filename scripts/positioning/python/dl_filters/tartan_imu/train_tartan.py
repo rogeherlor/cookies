@@ -267,18 +267,27 @@ def train(args):
     else:
         CLEAN_SEQS_ACTIVE = CLEAN_SEQS
 
+    # NESTED split: --val-seq names the LOO HELD-OUT (test) sequence, which is
+    # never loaded here. The inner validation sequence driving best-checkpoint
+    # selection is carved out of the training sequences — see
+    # dl_filters._validation.inner_split for why validating on the held-out
+    # sequence biased these rows (this model's fold 08 was being frozen at
+    # epoch 3 of 50 on that basis).
     if args.mode == 'loo':
         if args.val_seq not in CLEAN_SEQS_ACTIVE:
             raise ValueError(f"--val-seq must be one of {CLEAN_SEQS_ACTIVE}")
-        train_seqs = [s for s in CLEAN_SEQS_ACTIVE if s != args.val_seq]
-        val_seq    = args.val_seq
+        from dl_filters._validation import inner_split
+        held_out_seq = args.val_seq
+        train_seqs, val_seq = inner_split(CLEAN_SEQS_ACTIVE, held_out_seq)
         out_name   = f'lora_fold_{args.val_seq}.pt'
     else:
+        held_out_seq = None
         train_seqs = CLEAN_SEQS_ACTIVE
         val_seq    = None
         out_name   = 'lora_adapters.pt'
 
-    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seq}")
+    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  "
+          f"inner_val={val_seq}  held_out(test, unused)={held_out_seq}")
 
     def _load_seq(seq):
         if args.dataset == 'cookies':
@@ -340,8 +349,19 @@ def train(args):
     val_metric_path = output_dir / out_name.replace('.pt', '_val_metric.pt')
 
     best_val = float('inf')
+    # SELECTION criterion — see train_tlio.py for the full rationale. These
+    # models train OUTAGE-FREE, so a one-step loss on clean data says nothing
+    # about the dead-reckoning behaviour the tables report. J is the same cost
+    # ins_genetic_cv.py minimises for the seven classical filters, which is what
+    # makes the DL and classical rows comparable rather than merely adjacent.
+    best_J = float('inf')
+    best_J_epoch = None
 
-    # Journal-metric validation hook (display-only — not used in backprop).
+    # Journal-metric hook. NOT used in backprop — it selects the checkpoint.
+    # val_seq is the INNER validation sequence, not the LOO held-out one:
+    # printing the test metric every K epochs invites stopping or re-running on
+    # it, which is the same selection-on-test problem inner_split() removes,
+    # just routed through the operator instead of through code.
     _val_hook = None
     if val_seq is not None and args.val_metric_every > 0:
         try:
@@ -357,10 +377,12 @@ def train(args):
                 _save_lora(_model, _epoch, None, val_metric_path)
                 _prev = _os.environ.get('TARTAN_IMU_LORA')
                 _os.environ['TARTAN_IMU_LORA'] = str(val_metric_path)
+                _J = float('inf')
                 try:
                     _m = validate_with_journal_metric(
                         filter_module=_tartan_runner, val_seq=val_seq)
                     print(format_val_line(_epoch, _m))
+                    _J = float(_m.get('J', float('inf')))
                 except Exception as _e:
                     print(f"  [val] journal-metric hook failed: {_e}")
                 finally:
@@ -369,6 +391,7 @@ def train(args):
                     else:
                         _os.environ['TARTAN_IMU_LORA'] = _prev
                 _model.train()
+                return _J
         except Exception as _e:
             print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
             _val_hook = None
@@ -404,20 +427,31 @@ def train(args):
             print(f"Epoch {epoch+1:4d}/{args.epochs}  "
                   f"train={avg_train:.4f}  val={avg_val:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
-            if avg_val < best_val:
-                best_val = avg_val
-                _save_lora(model, epoch, avg_val, output_dir / out_name)
-                print(f"  → saved best ({out_name})")
+            best_val = min(best_val, avg_val)
         else:
             print(f"Epoch {epoch+1:4d}/{args.epochs}  "
                   f"train={avg_train:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
 
-        # Journal-metric validation (display-only; never enters backprop).
+        # Journal-metric validation — THIS selects the deployed epoch.
         if _val_hook is not None and (
                 (epoch + 1) % args.val_metric_every == 0
                 or epoch == args.epochs - 1):
-            _val_hook(epoch, model)
+            _J = _val_hook(epoch, model)
+            if _J < best_J:
+                best_J, best_J_epoch = _J, epoch
+                _save_lora(model, epoch, _J, output_dir / out_name)
+                print(f"  → saved best ({out_name})  J={_J:.4f} @ epoch {epoch}")
+
+    # See train_tlio.py: a fold with no valid checkpoint must fail loudly.
+    if _val_hook is not None and best_J_epoch is None:
+        raise RuntimeError(
+            f"No checkpoint was selected: the journal metric was inf at every "
+            f"evaluated epoch on inner-val sequence {val_seq}. Refusing to "
+            f"deploy an unselected checkpoint.")
+    if _val_hook is not None:
+        print(f"Selected epoch {best_J_epoch} (J={best_J:.4f} on inner-val "
+              f"seq {val_seq}) -> {out_name}")
 
     if val_loader is None:
         _save_lora(model, args.epochs - 1, None, output_dir / out_name)

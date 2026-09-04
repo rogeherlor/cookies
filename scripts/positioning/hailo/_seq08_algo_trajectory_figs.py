@@ -130,13 +130,21 @@ for key, kind, label in ALGOS:
     diff = p_gt[:n] - p_est[:n]
     error_3D = np.linalg.norm(diff, axis=1)
     rmse = float(np.sqrt(np.mean(error_3D ** 2)))
+    # The Mercator cross-check below is a purely HORIZONTAL distance, so it has
+    # to be compared against the horizontal (E,N) RMSE. Comparing it against the
+    # 3D RMSE — as this check originally did — silently mixes in the vertical
+    # error and makes vertically-drifting filters look broken: deep_iekf's
+    # error here is 2.86m horizontal but 4.35m vertical, which dragged the ratio
+    # to 0.84 and tripped the warning even though its projection was exact.
+    rmse_2D = float(np.sqrt(np.mean(np.sum(diff[:, :2] ** 2, axis=1))))
 
     lat_est, lon_est, _ = pm.enu2geodetic(p_est[:n, 0], p_est[:n, 1], p_est[:n, 2], lla0[0], lla0[1], lla0[2])
     x_est, y_est = _latlon_to_mercator(lat_est, lon_est)
     merc_rmse = float(np.sqrt(np.mean(np.hypot(x_est - x_gt[:n], y_est - y_gt[:n]) ** 2)))
-    ratio = merc_rmse / rmse if rmse > 0 else float("nan")
-    flag = "  <-- CHECK THIS" if not (1.0 <= ratio <= 1.6) else ""
-    print(f"  raw-ENU rmse={rmse:.2f}m  mercator-check rmse={merc_rmse:.2f}m  ratio={ratio:.2f}{flag}")
+    ratio = merc_rmse / rmse_2D if rmse_2D > 0 else float("nan")
+    flag = "  <-- CHECK THIS" if not (1.3 <= ratio <= 1.7) else ""
+    print(f"  raw-ENU rmse={rmse:.2f}m (2D {rmse_2D:.2f}m)  mercator-check "
+          f"rmse={merc_rmse:.2f}m  ratio={ratio:.2f}{flag}")
 
     save_path = OUT_DIR / f"{key}.png"
     plot_mercator(x_gt[:n], y_gt[:n], x_est, y_est, x_go, y_go, B > A, label, str(save_path))

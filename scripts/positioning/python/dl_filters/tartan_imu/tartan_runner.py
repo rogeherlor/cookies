@@ -614,6 +614,9 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
 
     # ── Output arrays ──────────────────────────────────────────────────────
     net_latency_s = []
+    # Thread CPU time for the same span. Wall time alone cannot separate a slow
+    # call from a descheduled one; see _full_eval_worker.py's wall/cpu check.
+    net_cpu_s     = []
     pos        = np.zeros((N, 3))
     vel        = np.zeros((N, 3))
     rpy_out    = np.zeros((N, 3))
@@ -704,13 +707,19 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
                     imu_block[0, step, :, 3:6] = gyro_up[ss:ee].astype(np.float32)
 
                 if backend == 'hailo':
+                    _c0 = time.thread_time()
                     (v_body, log_std), dt = hailo_net.step(imu_block[0])
+                    # Host-side share only — the 10 device calls are not this
+                    # thread's CPU time, so wall/cpu is legitimately >1 here.
+                    net_cpu_s.append(time.thread_time() - _c0)
                     net_latency_s.append(dt)
                 else:
                     imu_t = torch.from_numpy(imu_block).to(device)
                     _t0 = time.perf_counter()
+                    _c0 = time.thread_time()
                     with torch.no_grad():
                         v_body_t, log_std_t = model(imu_t, robot_type='car')
+                    net_cpu_s.append(time.thread_time() - _c0)
                     net_latency_s.append(time.perf_counter() - _t0)
                     v_body  = v_body_t[0].cpu().numpy().astype(np.float64)
                     log_std = log_std_t[0].cpu().numpy().astype(np.float64)
@@ -783,4 +792,5 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
         'std_pos': std_pos, 'std_vel': std_vel, 'std_orient': std_orient,
         'std_bias_acc': std_b_acc, 'std_bias_gyr': std_b_gyr,
         'net_latency_s': np.array(net_latency_s),
+        'net_cpu_s':     np.array(net_cpu_s),
     }

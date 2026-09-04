@@ -290,11 +290,19 @@ def main():
             with runner.infer_context(InferenceContext.SDK_QUANTIZED) as ctx:
                 backends["SDK_QUANTIZED"] = infer_hailo(runner, ctx, infer_windows, head1_state, head2_state)
         except Exception as e:
-            log.warning(
-                "Quantization failed (%s: %s). "
-                "SDK_NATIVE and SDK_FP_OPTIMIZED results are still valid.",
-                type(e).__name__, e,
+            # Do NOT downgrade this to a warning. 3_compilation.py loads whatever
+            # tlio_quantized_model.har happens to be on disk; if this script exits 0
+            # after failing, that file is the PREVIOUS fold's, and build_per_fold_hefs.py
+            # would move a stale, wrong-fold HEF into tlio_fold_<seq>.hef and report
+            # success. A failed quantisation must stop the pipeline.
+            log.error(
+                "Quantization FAILED (%s: %s). Not writing %s — the stale one on "
+                "disk belongs to a different export. SDK_NATIVE/SDK_FP_OPTIMIZED "
+                "results above are still valid, but no HEF may be built from this run.",
+                type(e).__name__, e, QUANTIZED_HAR_PATH.name,
             )
+            print_comparison(backends)
+            raise
 
     # ── Print results ─────────────────────────────────────────────────────────
     print_comparison(backends)

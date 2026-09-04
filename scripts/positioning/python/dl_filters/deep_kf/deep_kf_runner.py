@@ -30,12 +30,24 @@ Differences from the original paper
    not P.  We reuse Solà's F for consistency with the other filters; it is more
    numerically stable and leverages the established kinematic model.
 
-2. State space: the network input/target is the absolute 15-state
-   [p, v, rpy(Euler), b_a, b_g]; the error-state propagated for the covariance
-   is [δp, δv, δα, δb_a, δb_g], identical to esekfs_enhanced.py.  The original
-   paper's KF state is the explicit error-state [δp, δv, δθ, b_acc, b_gyro]
-   (Appendix Eq. A1) and its 3000-node latent vector h is separate; we model
-   the absolute posterior because the error posterior resets to ~0 each step.
+2. State space: MATCHES the paper.  The network input/target is the 15-element
+   feedforward ERROR state e = [δp, δv, δθ, b_a, b_g] (aided posterior minus
+   free-running dead reckoning; see train_deep_kf.py::generate_error_targets),
+   fed normalised as (e - norm_mean)/norm_std.  The paper defines its Kalman
+   state the same way -- "in terms of positioning error, velocity error,
+   orientation error, and the bias of accelerometers and gyroscopes" (Sec. 3)
+   -- so this is faithful, not a deviation.
+   (An earlier version of this docstring claimed the network modelled the
+   ABSOLUTE 15-state.  That was wrong on both counts: wrong about this code,
+   which has always fed the error state, and wrong about the paper.)
+
+   Capacity IS a deviation: the paper uses "only one latent layer while every
+   latent vector h_t contained 3000 variables", whereas this implementation
+   uses 2 layers of 128 -- roughly 23x smaller, chosen for the edge target.
+   Note the paper and the author's own reference implementation disagree here:
+   github.com/siavashha/DeepKF uses three LSTM layers of 40 units, univariate
+   per coordinate, and contains no Kalman filter at all.  The paper is treated
+   as the authority throughout.
 
 3. GPS update: standard ESKF position update (H = [I_3 | 0_3×12]) applied
    when gps_available[i] is True.  Paper also uses GPS; update structure same.
@@ -291,12 +303,11 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
     params         : Optional dict overriding DEFAULT_PARAMS.
     outage_config  : Optional {'start': t1_s, 'duration': d_s}.
     use_3d_rotation: True -> full 3D strapdown; False -> yaw-only (2D).
-    backend        : 'cpu' (default, unchanged behaviour — error-state EKF
-                     with the LSTM run on torch) or 'hailo' (see
-                     _run_hailo below — a different, simplified algorithm;
-                     the Hailo-compiled network is NOT calibration-
-                     compatible with the error-state input the CPU path
-                     uses, see hailo_backend.HailoDeepKF's docstring).
+    backend        : 'cpu' (default — error-state EKF with the LSTM run on
+                     torch) or 'hailo' (see _run_hailo below — the IDENTICAL
+                     error-state EKF loop, only the LSTM forward pass swapped
+                     to the Hailo device; the HEF must be calibrated on the
+                     real e_norm_in signal, see hailo/deep_kf/2_optimisation.py).
     hailo_net      : Required when backend='hailo' — an already-activated
                      hailo_backend.HailoDeepKF instance (caller owns its
                      lifecycle so device open/close isn't timed).
@@ -351,15 +362,28 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
               "defaulting DR_MODE=False (GPS aiding ON).")
         dr_mode = False
 
+    # `gps_avail` is the RAW per-tick fix availability (1 Hz decimation vs the
+    # 100 Hz IMU — True only ~1% of ticks, same as every other filter in this
+    # project) and is NEVER modified by outage_config/dr_mode: it only gates
+    # the GPS MEASUREMENT UPDATE below, exactly like esekfs_enhanced.py's
+    # `gps_ok`. `in_outage` is the SEPARATE, genuine-outage signal (the
+    # synthetic [A,B) window, or the whole run under dr_mode) — matching
+    # esekfs_enhanced.py's `not_outage` check. Conflating these two (treating
+    # "no fix at this exact 100Hz tick" as "outage") was a bug that made the
+    # LSTM replace the analytic prior on ~99% of every tick, continuously,
+    # even with outage_config=None — causing its one-step training error to
+    # compound autoregressively for the entire sequence instead of only
+    # during a genuine outage window.
     gps_avail = nav_data.gps_available.copy()
+    in_outage = np.zeros(N, dtype=bool)
     if outage_config is not None:
         t1 = outage_config.get('start', 0.)
         d  = outage_config.get('duration', 0.)
         A  = int(t1 * sample_rate)
         B  = int((t1 + d) * sample_rate)
-        gps_avail[A:B] = False
+        in_outage[A:B] = True
     if dr_mode:
-        gps_avail[:] = False
+        in_outage[:] = True
 
     # ── GPS positions in ENU ───────────────────────────────────────────────
     e, n, u = pm.geodetic2enu(
@@ -423,6 +447,9 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
     # ── LSTM (feedforward error model) state ────────────────────────────────
     hidden = model.init_hidden(batch_size=1, device=device)
     net_latency_s = np.zeros(N - 1)
+    # Thread CPU time for the same span — wall time alone cannot separate a slow
+    # call from a descheduled one (see _full_eval_worker.py's wall/cpu check).
+    net_cpu_s     = np.zeros(N - 1)
 
     print(f"Deep KF: running feedforward error filter on {N} samples ...")
 
@@ -451,17 +478,26 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
         # GNSS": under aiding the ordinary feedforward EKF runs and the LSTM is
         # only kept warm (output ignored); under outage the LSTM prediction is
         # the prior.  Either way the network sees the previous error once/step.
+        # "Absence of GNSS" means a genuine outage (in_outage), NOT the routine
+        # 1 Hz-vs-100 Hz decimation gap every filter in this project has.
         e_norm_in = (e - norm_mean) / norm_std
         _t0 = time.perf_counter()
+        _c0 = time.thread_time()
         with torch.no_grad():
             e_t = torch.from_numpy(e_norm_in).float().unsqueeze(0).to(device)
             e_pred_t, hidden = model(e_t, hidden)
             e_lstm = e_pred_t[0].cpu().numpy() * norm_std + norm_mean
+        net_cpu_s[i]     = time.thread_time() - _c0
         net_latency_s[i] = time.perf_counter() - _t0
 
-        if gps_avail[i + 1]:
-            # ── C. AIDING: analytic feedforward EKF prior + GPS position update
-            e = Fd @ e                                            # Solà-F error prior
+        # ── C. Analytic feedforward prior — ALWAYS propagated, exactly like
+        # esekfs_enhanced.py (physical strapdown propagation never stops just
+        # because this particular 100 Hz tick has no fresh GPS fix).
+        e = Fd @ e                                                # Solà-F error prior
+
+        if gps_avail[i + 1] and not in_outage[i + 1]:
+            # GPS position update — gated on a REAL fix AND not a genuine
+            # outage, matching esekfs_enhanced.py's `gps_ok and not_outage`.
             corrected_p = p_dr[i + 1] + e[0:3]
             innov     = p_gps_enu[i + 1] - corrected_p
             S_gps     = P[0:3, 0:3] + R_pos
@@ -472,8 +508,10 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
             IKH_gps   = np.eye(15) - K_gps @ H_gps
             P         = IKH_gps @ P @ IKH_gps.T + K_gps @ R_pos @ K_gps.T  # Joseph
             P         = 0.5 * (P + P.T)
-        else:
-            # ── C. OUTAGE: LSTM prediction replaces the analytic prior ──────
+
+        if in_outage[i + 1]:
+            # Genuine outage: LSTM prediction REPLACES the (already-propagated,
+            # uncorrected) analytic prior — its actual, intended role.
             e = e_lstm
 
         # ── D. Output = free IMU + estimated error (feedforward add-back) ────
@@ -500,43 +538,49 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
         'std_bias_acc': std_b_acc,
         'std_bias_gyr': std_b_gyr,
         'net_latency_s': net_latency_s,
+        'net_cpu_s':     net_cpu_s,
     }
 
 
 def _run_hailo(nav_data, params, outage_config, hailo_net):
     """
-    backend='hailo' path — a standalone autoregressive full-state predictor,
-    NOT the error-state EKF the CPU path runs (see hailo_backend.HailoDeepKF's
-    docstring for why: the compiled HEF was quantisation-calibrated on real
-    full nav states, not on the small normalised error-state residuals the
-    CPU EKF feeds its LSTM — feeding it error-state values would be invalid,
-    out-of-distribution input for its INT8 quantisation range).
+    backend='hailo' path — the IDENTICAL error-state EKF loop as the CPU path
+    (run(), above), with only the LSTM forward pass swapped to the Hailo
+    device (hailo_net.step()) — same structure as HailoTLIO/HailoTartanIMU/
+    HailoDeepIEKFStream. hailo_net.step() does `input + delta` (a residual
+    add — see hailo_backend.HailoDeepKF), which is exactly what's needed here
+    since the input IS the normalised error state e_norm_in, so the returned
+    value is the network's predicted next normalised error state, matching
+    what `model(e_norm_in, hidden)` returns on CPU.
 
-    Same trained LSTM+decoder weights, applied causally tick-by-tick via
-    HailoRT's persistent recurrent state across calls (one continuous
-    `activate()` for the whole run — see hailo_backend._BaseHailoNet).  GPS,
-    when available, hard-resets the position component (no covariance-based
-    gain — this path has no P/std to report); the network's own prediction
-    carries velocity/orientation/biases forward at all times, and *is* the
-    whole state during outage.  This is the only role the HEF is actually
-    compatible with, so it's what gets measured.
+    The compiled HEF must be calibrated on REAL e_norm_in samples (see
+    hailo/deep_kf/2_optimisation.py) — not raw absolute nav states — or its
+    INT8 quantisation range is wrong for what it's actually fed here.
     """
     p_cfg = dict(DEFAULT_PARAMS)
     if params:
         p_cfg.update(params)
 
-    accel_flu = nav_data.accel_flu
-    orient    = nav_data.orient
-    lla       = nav_data.lla
-    vel_enu   = nav_data.vel_enu
-    lla0      = nav_data.lla0
+    accel_flu   = nav_data.accel_flu
+    gyro_flu    = nav_data.gyro_flu
+    orient      = nav_data.orient
+    lla         = nav_data.lla
+    vel_enu     = nav_data.vel_enu
     sample_rate = nav_data.sample_rate
+    lla0        = nav_data.lla0
 
     import pymap3d as pm
-    N = accel_flu.shape[0]
+    N  = accel_flu.shape[0]
+    Ts = 1.0 / sample_rate
 
-    # Narrow to ImportError + surface the fallback (see the CPU-path note above);
-    # this is the Hailo backend path, same dr_mode semantics.
+    # norm_mean/norm_std only — the Hailo device runs the LSTM, not this
+    # PyTorch model, but the same normalisation the CPU path uses is required
+    # to feed/read the HEF in the signal it was calibrated on.
+    seq_id = getattr(nav_data, 'dataset_name', None)
+    weights_path = _find_weights(seq_id)
+    _, norm_mean, norm_std = _load_model(
+        weights_path, int(p_cfg['latent_dim']), int(p_cfg['num_layers']), 'cpu')
+
     try:
         import ins_config as _ic
         dr_mode = getattr(_ic, 'DR_MODE', False)
@@ -545,55 +589,138 @@ def _run_hailo(nav_data, params, outage_config, hailo_net):
               "defaulting DR_MODE=False (GPS aiding ON).")
         dr_mode = False
 
+    # Same two-signal separation as the CPU path (and esekfs_enhanced.py) —
+    # see run()'s comment above for why conflating these was a bug.
     gps_avail = nav_data.gps_available.copy()
+    in_outage = np.zeros(N, dtype=bool)
     if outage_config is not None:
         t1 = outage_config.get('start', 0.)
         d  = outage_config.get('duration', 0.)
         A  = int(t1 * sample_rate)
         B  = int((t1 + d) * sample_rate)
-        gps_avail[A:B] = False
+        in_outage[A:B] = True
     if dr_mode:
-        gps_avail[:] = False
+        in_outage[:] = True
 
-    e, n, u = pm.geodetic2enu(lla[:, 0], lla[:, 1], lla[:, 2], lla0[0], lla0[1], lla0[2])
-    p_gps_enu = np.column_stack([e, n, u])
+    e_, n_, u_ = pm.geodetic2enu(lla[:, 0], lla[:, 1], lla[:, 2], lla0[0], lla0[1], lla0[2])
+    p_gps_enu = np.column_stack([e_, n_, u_])
 
-    pos       = np.zeros((N, 3))
-    vel       = np.zeros((N, 3))
-    rpy_out   = np.zeros((N, 3))
-    b_acc_out = np.zeros((N, 3))
-    b_gyr_out = np.zeros((N, 3))
-    zeros3    = np.zeros((N, 3))
-    net_latency_s = np.zeros(N - 1)
+    pos        = np.zeros((N, 3))
+    vel        = np.zeros((N, 3))
+    rpy_out    = np.zeros((N, 3))
+    b_acc_out  = np.zeros((N, 3))
+    b_gyr_out  = np.zeros((N, 3))
+    std_pos    = np.zeros((N, 3))
+    std_vel    = np.zeros((N, 3))
+    std_orient = np.zeros((N, 3))
+    std_b_acc  = np.zeros((N, 3))
+    std_b_gyr  = np.zeros((N, 3))
 
     pos[0]     = p_gps_enu[0]
     vel[0]     = vel_enu[0]
     rpy_out[0] = orient[0]
 
-    x_full = np.concatenate([pos[0], vel[0], rpy_out[0], np.zeros(3), np.zeros(3)])
+    q0 = _qfrom_euler(orient[0, 0], orient[0, 1], orient[0, 2])
+    p_dr, v_dr, th_dr = _free_dead_reckoning(
+        accel_flu, gyro_flu, p_gps_enu[0], vel_enu[0], q0, Ts, N, True)
 
-    print(f"Deep KF (Hailo, standalone full-state predictor): running on {N} samples ...")
+    e = np.zeros(15)
+    beta_acc = p_cfg['beta_acc']
+    beta_gyr = p_cfg['beta_gyr']
+
+    Q = np.zeros((15, 15))
+    Q[0:3,   0:3]   = np.eye(3) * p_cfg['Qpos']
+    Q[3:6,   3:6]   = np.eye(3) * (p_cfg['Qvel'] * Ts**2)
+    Q[6:9,   6:9]   = np.diag([p_cfg['QorientXY'], p_cfg['QorientXY'], p_cfg['QorientZ']])
+    Q[9:12,  9:12]  = np.eye(3) * (p_cfg['Qacc']  * Ts)
+    Q[12:15, 12:15] = np.diag([p_cfg['QgyrXY'], p_cfg['QgyrXY'], p_cfg['QgyrZ']]) * Ts
+
+    P = np.diag([
+        p_cfg['P_pos_std'],    p_cfg['P_pos_std'],    p_cfg['P_pos_std'],
+        p_cfg['P_vel_std'],    p_cfg['P_vel_std'],    p_cfg['P_vel_std'],
+        p_cfg['P_orient_std'], p_cfg['P_orient_std'], p_cfg['P_orient_std'],
+        p_cfg['P_acc_std'],    p_cfg['P_acc_std'],    p_cfg['P_acc_std'],
+        p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],    p_cfg['P_gyr_std'],
+    ]) ** 2
+
+    R_pos = np.eye(3) * p_cfg['Rpos']
+    net_latency_s = np.zeros(N - 1)
+    # Thread CPU time for the same span — wall time alone cannot separate a slow
+    # call from a descheduled one (see _full_eval_worker.py's wall/cpu check).
+    net_cpu_s     = np.zeros(N - 1)
+
+    print(f"Deep KF (Hailo): running the SAME error-state EKF loop as CPU on "
+          f"{N} samples (LSTM forward pass swapped to Hailo) ...")
 
     for i in range(N - 1):
-        x_pred, dt = hailo_net.step(x_full)
+        acc_b   = accel_flu[i]
+        omega_b = gyro_flu[i]
+        Rbn = _qto_Rbn(_qfrom_euler(th_dr[i, 0], th_dr[i, 1], th_dr[i, 2]))
+
+        F = np.zeros((15, 15))
+        F[0:3,   3:6]   = np.eye(3)
+        F[3:6,   6:9]   = -Rbn @ _skew(acc_b)
+        F[3:6,   9:12]  = -Rbn
+        F[6:9,   6:9]   = -_skew(omega_b)
+        F[6:9,   12:15] = -np.eye(3)
+        F[9:12,  9:12]  = beta_acc * np.eye(3)
+        F[12:15, 12:15] = beta_gyr * np.eye(3)
+
+        Fd           = np.eye(15) + F * Ts
+        Fd[6:9, 6:9] = _qto_Rbn(_qfrom_axis_angle(omega_b * Ts)).T
+        P = Fd @ P @ Fd.T + Q
+
+        # LSTM forward on the previous error (normalised) — HAILO DEVICE CALL,
+        # the only line that differs from run()'s CPU (torch) equivalent.
+        e_norm_in = ((e - norm_mean) / norm_std).astype(np.float32)
+        _c0 = time.thread_time()
+        e_pred_norm, dt = hailo_net.step(e_norm_in)
+        # Host-side share only: the device wait is not this thread's CPU time,
+        # so wall/cpu is legitimately >1 here and is reported, not warned on.
+        net_cpu_s[i]     = time.thread_time() - _c0
+        e_lstm = e_pred_norm * norm_std + norm_mean
         net_latency_s[i] = dt
 
-        if gps_avail[i + 1]:
-            x_full = x_pred.copy()
-            x_full[0:3] = p_gps_enu[i + 1]
-        else:
-            x_full = x_pred
+        # Analytic feedforward prior — ALWAYS propagated (see run()'s comment).
+        e = Fd @ e
 
-        pos[i+1]       = x_full[0:3]
-        vel[i+1]       = x_full[3:6]
-        rpy_out[i+1]   = _wrap(x_full[6:9])
-        b_acc_out[i+1] = x_full[9:12]
-        b_gyr_out[i+1] = x_full[12:15]
+        if gps_avail[i + 1] and not in_outage[i + 1]:
+            corrected_p = p_dr[i + 1] + e[0:3]
+            innov     = p_gps_enu[i + 1] - corrected_p
+            S_gps     = P[0:3, 0:3] + R_pos
+            S_gps_reg = S_gps + 1e-9 * np.eye(3)
+            K_gps     = np.linalg.solve(S_gps_reg, P[0:3, :]).T
+            e         = e + K_gps @ innov
+            H_gps     = np.zeros((3, 15)); H_gps[:, 0:3] = np.eye(3)
+            IKH_gps   = np.eye(15) - K_gps @ H_gps
+            P         = IKH_gps @ P @ IKH_gps.T + K_gps @ R_pos @ K_gps.T
+            P         = 0.5 * (P + P.T)
+
+        if in_outage[i + 1]:
+            e = e_lstm
+
+        pos[i+1]       = p_dr[i+1] + e[0:3]
+        vel[i+1]       = v_dr[i+1] + e[3:6]
+        rpy_out[i+1]   = _wrap(th_dr[i+1] + e[6:9])
+        b_acc_out[i+1] = e[9:12]
+        b_gyr_out[i+1] = e[12:15]
+        std_pos[i+1]      = np.sqrt(np.maximum(np.diag(P[0:3,   0:3]),   0.))
+        std_vel[i+1]      = np.sqrt(np.maximum(np.diag(P[3:6,   3:6]),   0.))
+        std_orient[i+1]   = np.sqrt(np.maximum(np.diag(P[6:9,   6:9]),   0.))
+        std_b_acc[i+1]    = np.sqrt(np.maximum(np.diag(P[9:12,  9:12]),  0.))
+        std_b_gyr[i+1]    = np.sqrt(np.maximum(np.diag(P[12:15, 12:15]), 0.))
 
     return {
-        'p': pos, 'v': vel, 'r': rpy_out,
-        'bias_acc': b_acc_out, 'bias_gyr': b_gyr_out,
-        'std_pos': zeros3, 'std_vel': zeros3, 'std_orient': zeros3,
-        'std_bias_acc': zeros3, 'std_bias_gyr': zeros3,
+        'p':            pos,
+        'v':            vel,
+        'r':            rpy_out,
+        'bias_acc':     b_acc_out,
+        'bias_gyr':     b_gyr_out,
+        'std_pos':      std_pos,
+        'std_vel':      std_vel,
+        'std_orient':   std_orient,
+        'std_bias_acc': std_b_acc,
+        'std_bias_gyr': std_b_gyr,
         'net_latency_s': net_latency_s,
+        'net_cpu_s':     net_cpu_s,
     }

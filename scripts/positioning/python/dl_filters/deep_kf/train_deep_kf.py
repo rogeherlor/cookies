@@ -269,18 +269,27 @@ def train(args):
     else:
         CLEAN_SEQS_ACTIVE = CLEAN_SEQS
 
+    # NESTED split: --val-seq names the LOO HELD-OUT (test) sequence, which is
+    # never loaded here. The inner validation sequence driving best-checkpoint
+    # selection is carved out of the training sequences — see
+    # dl_filters._validation.inner_split for why validating on the held-out
+    # sequence biased these rows.
     if args.mode == 'loo':
         if args.val_seq not in CLEAN_SEQS_ACTIVE:
             raise ValueError(f"--val-seq must be one of {CLEAN_SEQS_ACTIVE}")
-        train_seqs = [s for s in CLEAN_SEQS_ACTIVE if s != args.val_seq]
-        val_seqs   = [args.val_seq]
+        from dl_filters._validation import inner_split
+        held_out_seq = args.val_seq
+        train_seqs, _inner_val = inner_split(CLEAN_SEQS_ACTIVE, held_out_seq)
+        val_seqs   = [_inner_val]
         out_name   = f'fold_{args.val_seq}.pt'
     else:
+        held_out_seq = None
         train_seqs = CLEAN_SEQS_ACTIVE
         val_seqs   = []
         out_name   = 'deep_kf.pt'
 
-    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  val={val_seqs}")
+    print(f"Dataset={args.dataset}  Mode={args.mode}  train={train_seqs}  "
+          f"inner_val={val_seqs}  held_out(test, unused)={held_out_seq}")
 
     def _load_seq(seq):
         if args.dataset == 'cookies':
@@ -354,10 +363,22 @@ def train(args):
     val_metric_path = output_dir / out_name.replace('.pt', '_val_metric.pt')
 
     best_val = float('inf')
+    # SELECTION criterion — see train_tlio.py for the full rationale. In short:
+    # these models train OUTAGE-FREE, so a one-step loss on clean data carries
+    # no information about dead-reckoning behaviour, which is what the tables
+    # report. This model is the clearest case: its LOO outage mean moved between
+    # 86 m and 557 m purely on which epoch the blind criterion happened to pick.
+    # J is the same cost ins_genetic_cv.py minimises for the classical filters.
+    best_J = float('inf')
+    best_J_epoch = None
 
-    # Journal-metric validation hook (display-only — not used in backprop).
+    # Journal-metric hook. NOT used in backprop — it selects the checkpoint.
+    # Scores the INNER validation sequence, not the LOO held-out one: printing
+    # the test metric every K epochs invites stopping or re-running on it, which
+    # is the same selection-on-test problem inner_split() removes, just routed
+    # through the operator instead of through code.
     _val_hook = None
-    _val_seq_for_hook = args.val_seq if (args.mode == 'loo' and val_seqs) else None
+    _val_seq_for_hook = val_seqs[0] if (args.mode == 'loo' and val_seqs) else None
     if _val_seq_for_hook is not None and args.val_metric_every > 0:
         try:
             import os as _os
@@ -382,10 +403,12 @@ def train(args):
                 }, val_metric_path)
                 _prev = _os.environ.get('DEEP_KF_WEIGHTS')
                 _os.environ['DEEP_KF_WEIGHTS'] = str(val_metric_path)
+                _J = float('inf')
                 try:
                     _m = validate_with_journal_metric(
                         filter_module=_dkf_runner, val_seq=_val_seq_for_hook)
                     print(format_val_line(_epoch, _m))
+                    _J = float(_m.get('J', float('inf')))
                 except Exception as _e:
                     print(f"  [val] journal-metric hook failed: {_e}")
                 finally:
@@ -394,6 +417,7 @@ def train(args):
                     else:
                         _os.environ['DEEP_KF_WEIGHTS'] = _prev
                 _model.train()
+                return _J
         except Exception as _e:
             print(f"  [val] hook unavailable ({_e}) — skipping journal metric")
             _val_hook = None
@@ -438,12 +462,26 @@ def train(args):
                   f"train={train_loss:.4f}  val={val_loss:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}  "
                   f"ss={_ss_prob:.3f}")
-            if val_loss < best_val:
-                best_val = val_loss
+            best_val = min(best_val, val_loss)
+        else:
+            print(f"Epoch {epoch+1:4d}/{args.epochs}  "
+                  f"train={train_loss:.4f}  "
+                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+
+        # Journal-metric validation — THIS selects the deployed epoch.
+        if _val_hook is not None and (
+                (epoch + 1) % args.val_metric_every == 0
+                or epoch == args.epochs - 1):
+            _J = _val_hook(epoch, model)
+            if _J < best_J:
+                best_J, best_J_epoch = _J, epoch
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
-                    'val_loss': val_loss,
+                    'val_loss': val_loss if val_posteriors else None,
+                    'journal_J': _J,
+                    'selection': 'journal_metric_inner_val',
+                    'inner_val_seq': _val_seq_for_hook,
                     'config': {
                         'latent_dim': args.latent_dim,
                         'num_layers': 2,
@@ -452,17 +490,18 @@ def train(args):
                     'norm_mean': torch.from_numpy(norm_mean),
                     'norm_std': torch.from_numpy(norm_std),
                 }, output_dir / out_name)
-                print(f"  -> saved best ({out_name})")
-        else:
-            print(f"Epoch {epoch+1:4d}/{args.epochs}  "
-                  f"train={train_loss:.4f}  "
-                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+                print(f"  -> saved best ({out_name})  J={_J:.4f} @ epoch {epoch}")
 
-        # Journal-metric validation (display-only; never enters backprop).
-        if _val_hook is not None and (
-                (epoch + 1) % args.val_metric_every == 0
-                or epoch == args.epochs - 1):
-            _val_hook(epoch, model)
+    # See train_tlio.py: a fold with no valid checkpoint must fail loudly rather
+    # than silently deploy an unselected one.
+    if _val_hook is not None and best_J_epoch is None:
+        raise RuntimeError(
+            f"No checkpoint was selected: the journal metric was inf at every "
+            f"evaluated epoch on inner-val sequence {_val_seq_for_hook}. "
+            f"Refusing to deploy an unselected checkpoint.")
+    if _val_hook is not None:
+        print(f"Selected epoch {best_J_epoch} (J={best_J:.4f} on inner-val "
+              f"seq {_val_seq_for_hook}) -> {out_name}")
 
     if not val_posteriors:
         torch.save({
@@ -496,12 +535,22 @@ def _parse_args():
                              "state; 30-100 is standard for 1 Hz GPS "
                              "supervision over 100 Hz IMU. Hosseinyalamdary "
                              "2018 does not pin the value.")
-    parser.add_argument('--sampling-prob-max', type=float, default=0.25,
+    parser.add_argument('--sampling-prob-max', type=float, default=0.0,
                         help="Maximum probability of feeding the model's own "
                              "previous output instead of the teacher posterior "
                              "during the second half of training (scheduled "
-                             "sampling curriculum, Bengio et al. NeurIPS 2015; "
-                             "0 disables, restoring pure teacher forcing).")
+                             "sampling curriculum, Bengio et al. NeurIPS 2015). "
+                             "DEFAULT 0 = pure teacher forcing, which is what "
+                             "Hosseinyalamdary 2018 specifies: its energy "
+                             "function (Eq. 27) is measured against the estimated "
+                             "posterior x_t^+ at every step, and neither the paper "
+                             "nor the author's reference implementation "
+                             "(github.com/siavashha/DeepKF) uses a sampling "
+                             "curriculum. It was enabled here at 0.25 and is now "
+                             "off by default: it is the one component of this "
+                             "training loop present in neither source, so leaving "
+                             "it on would credit the method with an advantage its "
+                             "author never claimed.")
     parser.add_argument('--output',     default=str(_REPO_ROOT / 'artifacts/deep_kf'))
     parser.add_argument('--resume',     default=None)
     parser.add_argument('--val-metric-every', type=int, default=10,

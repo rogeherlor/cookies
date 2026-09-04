@@ -48,12 +48,21 @@ NAV_DIM    = 15
 INPUT_DIM  = NAV_DIM   # 15
 BATCH_SIZE = 1
 
-# Single 3-D input: (batch, seq=1, features) — required for Hailo conv ops.
-START_NODES = ["x"]
-END_NODES   = ["state"]
+# STATEFUL cell: the hidden and cell states of both LSTM layers are ordinary
+# graph inputs and outputs, so the host can carry them between ticks. The
+# previous single-input graph baked h0 in as a constant, which made the
+# deployed model memoryless — see 0_onxx_converter.py's docstring.
+HIDDEN_DIM = 128
+
+START_NODES = ["x", "h_l0", "c_l0", "h_l1", "c_l1"]
+END_NODES   = ["state", "h_l0_o", "c_l0_o", "h_l1_o", "c_l1_o"]
 
 NET_INPUT_SHAPES = {
-    "x": [BATCH_SIZE, 1, INPUT_DIM],   # [1, 1, 15]
+    "x":    [BATCH_SIZE, 1, INPUT_DIM],    # [1, 1, 15]
+    "h_l0": [BATCH_SIZE, 1, HIDDEN_DIM],   # [1, 1, 128]
+    "c_l0": [BATCH_SIZE, 1, HIDDEN_DIM],
+    "h_l1": [BATCH_SIZE, 1, HIDDEN_DIM],
+    "c_l1": [BATCH_SIZE, 1, HIDDEN_DIM],
 }
 
 # ── Parse ─────────────────────────────────────────────────────────────────────

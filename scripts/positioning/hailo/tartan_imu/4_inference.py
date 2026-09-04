@@ -226,6 +226,15 @@ def main():
     parser.add_argument("--hef",       type=Path,
                         default=_HERE / "tartan_imu.hef")
     parser.add_argument("--n-samples", type=int, default=4)
+    parser.add_argument("--artifact",  type=Path, default=None,
+                        help="LoRA adapter for the SAME LOO fold the --hef was "
+                             "compiled from (e.g. artifacts/tartan_imu/lora_fold_06.pt). "
+                             "Without it the PyTorch reference is the zero-shot base "
+                             "model and 'MAE vs PyTorch' below measures the missing "
+                             "LoRA adapter, not quantisation.")
+    parser.add_argument("--postproc",  type=Path, default=POSTPROC_PATH,
+                        help="Host-side LSTM/Trunk/head weights exported with the "
+                             "same fold (tartan_imu_postproc_fold_<seq>.pt).")
     args = parser.parse_args()
 
     # ── Test data — real KITTI LSTM windows at 200 Hz ────────────────────────
@@ -264,7 +273,15 @@ def main():
     from tartan_runner import _find_tartan_weights, _find_lora_adapter, _load_tartan_model, _TartanImuStub
     try:
         weights_path = _find_tartan_weights()
-        lora_path = _find_lora_adapter()
+        if args.artifact is not None:
+            if not args.artifact.exists():
+                raise FileNotFoundError(f"LoRA adapter not found: {args.artifact}")
+            lora_path = args.artifact
+        else:
+            lora_path = _find_lora_adapter()
+            log.warning("no --artifact given: the PyTorch reference is the "
+                        "all-sequences/zero-shot model, so the MAE below is NOT "
+                        "a quantisation measurement.")
         model, _ = _load_tartan_model(weights_path, lora_path, lora_rank=8)
     except RuntimeError as e:
         log.warning("Base model unavailable (%s). Using _TartanImuStub.", e)
@@ -282,10 +299,11 @@ def main():
         log.error("HEF not found: %s — run 3_compilation.py first.", args.hef)
         return
 
-    if not POSTPROC_PATH.exists():
-        log.error("Postproc weights not found: %s — run 0_onnx_converter.py first.", POSTPROC_PATH)
+    if not args.postproc.exists():
+        log.error("Postproc weights not found: %s — run 0_onnx_converter.py first.",
+                  args.postproc)
         return
-    postproc = TartanPostproc(POSTPROC_PATH, robot_type=ROBOT_TYPE)
+    postproc = TartanPostproc(args.postproc, robot_type=ROBOT_TYPE)
 
     log.info("HEF inference on Hailo-8: %s", args.hef)
     hef_out = infer_hef(args.hef, test_np, postproc)

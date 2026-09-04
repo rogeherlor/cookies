@@ -184,7 +184,7 @@ def _load_torch_iekf(nav_data, u_np):
 
 
 def causal_mes_inference(torch_iekf, u_np, window=DEFAULT_WINDOW, lookahead=0,
-                         _timing=None):
+                         _timing=None, _cpu_timing=None):
     """
     Causal MesNet inference: one output per step from a window of PAST samples
     (plus an optional small `lookahead` of future samples).
@@ -231,9 +231,12 @@ def causal_mes_inference(torch_iekf, u_np, window=DEFAULT_WINDOW, lookahead=0,
                 win = np.vstack([win, np.repeat(u_np[N - 1:N], hi - (N - 1), axis=0)])
             if _timing is not None:
                 _t0 = time.perf_counter()
+                _c0 = time.thread_time()
             out = torch_iekf.forward_nets(torch.from_numpy(win).double())  # (len, 2)
             if _timing is not None:
                 _timing.append(time.perf_counter() - _t0)
+                if _cpu_timing is not None:
+                    _cpu_timing.append(time.thread_time() - _c0)
             covs[i] = out[-(lookahead + 1)].cpu().numpy()    # row aligned to sample i
     return covs
 
@@ -341,11 +344,13 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
             "initprocesscov_net, not compiled into the HEF) — none found. "
             "See the RuntimeError below for how to train them.")
 
-    if backend == 'hailo' and N != hailo_net.SEQ_LEN:
+    _hailo_streaming = backend == 'hailo' and getattr(hailo_net, 'STREAMING', False)
+    if backend == 'hailo' and not _hailo_streaming and N != hailo_net.SEQ_LEN:
         raise ValueError(
             f"backend='hailo' requires nav_data truncated to exactly "
             f"{hailo_net.SEQ_LEN} samples (the HEF's fixed input length); "
-            f"got N={N}.")
+            f"got N={N}. Use a streaming HEF (HailoDeepIEKFStream) to process "
+            f"any-length sequences one small window at a time.")
 
     measurements_covs_np = None
     net_latency_s = np.zeros(0)
@@ -361,9 +366,19 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
         torch_iekf = _load_causal_torch_iekf(u_np, online_weights)
         iekf.set_learned_covariance(torch_iekf)
 
-        if backend == 'hailo':
+        if _hailo_streaming:
+            # Small-window HEF driven over the whole sequence one window at a
+            # time (per-tick or block) — genuine online, any length. Unlike the
+            # whole-sequence path there IS a per-call latency distribution.
+            measurements_covs_np, net_latency_s, net_cpu_s = hailo_net.run_stream(
+                u_np.astype(np.float32))
+            print(f"AI-IMU (online, Hailo streaming W={hailo_net.SEQ_LEN}, "
+                  f"mode={hailo_net.mode}): {len(net_latency_s)} HEF calls, "
+                  f"mean {net_latency_s.mean()*1000:.3f} ms/call for {N} samples.")
+        elif backend == 'hailo':
             measurements_covs_np, dt = hailo_net.run_whole_sequence(u_np.astype(np.float32))
             net_latency_s = np.array([dt])
+            net_cpu_s = np.zeros(0)   # single whole-sequence call; no distribution
             print(f"AI-IMU (online, Hailo): CAUSAL MesNet whole-sequence HEF call "
                   f"— {dt*1000:.3f} ms for {N} samples.")
         else:
@@ -375,11 +390,12 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
             # DEFAULT_WINDOW — there is no accuracy cost to streaming this,
             # only the removed convenience of one big call instead of N
             # small ones. This is what a real online deployment would run.
-            _timing = []
+            _timing, _cpu = [], []
             measurements_covs_np = causal_mes_inference(
                 torch_iekf, u_np, window=DEFAULT_WINDOW, lookahead=0,
-                _timing=_timing)
+                _timing=_timing, _cpu_timing=_cpu)
             net_latency_s = np.array(_timing)
+            net_cpu_s = np.array(_cpu)
             print(f"AI-IMU (online): CAUSAL MesNet (left-padded), streamed "
                   f"{N} samples one {DEFAULT_WINDOW}-sample window at a time "
                   f"from {online_weights}.")
@@ -417,6 +433,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
         'std_pos': std_pos, 'std_vel': std_vel, 'std_orient': std_orient,
         'std_bias_acc': std_bias_acc, 'std_bias_gyr': std_bias_gyr,
         'net_latency_s': net_latency_s,
+        'net_cpu_s':     net_cpu_s,
     }
 
 

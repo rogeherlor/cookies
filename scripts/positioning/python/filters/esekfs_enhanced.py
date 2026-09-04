@@ -31,6 +31,8 @@ Conventions:
     Navigation: ENU frame (East, North, Up)
     Quaternion: Hamilton convention  q = [w, x, y, z]
 """
+import time
+
 import numpy as np
 import pymap3d as pm
 
@@ -201,6 +203,15 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
     R_nhc  = np.eye(2) * p_cfg['Rnhc']
     R_zupt = np.eye(3) * p_cfg['Rzupt']
 
+    # Per-event wall-clock instrumentation: one entry per IMU sample on which
+    # a measurement update actually fired, timing the correction itself (gain
+    # solve, Joseph covariance update, error injection) in isolation from the
+    # propagation that runs on every sample. Same convention as the DL
+    # runners' `net_latency_s`, so the real-time tables can treat a GPS
+    # correction and a network call as the same kind of Event.
+    event_latency_s = []
+    event_cpu_s = []
+
     for i in range(NN - 1):
 
         acc_b   = accel_flu[i, :] - b_a
@@ -232,6 +243,8 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
 
         P  = Fd @ P @ Fd.T + Q
         update_occurred = False
+        _ev_t0 = time.perf_counter()
+        _ev_c0 = time.thread_time()
 
         # ── A. GPS Position Update ─────────────────────────────────────────────
         gps_ok     = nav_data.gps_available[i]
@@ -318,6 +331,8 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
             G[6:9, 6:9] = np.eye(3) - 0.5 * _skew(delta_alpha)
             P           = G @ P @ G.T
             dx[:]       = 0.0
+            event_cpu_s.append(time.thread_time() - _ev_c0)
+            event_latency_s.append(time.perf_counter() - _ev_t0)
 
         pos[i+1, :]       = pIMU
         vel[i+1, :]       = vIMU
@@ -335,4 +350,6 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True):
         'bias_acc': b_acc_out, 'bias_gyr': b_gyr_out,
         'std_pos': std_pos, 'std_vel': std_vel, 'std_orient': std_orient,
         'std_bias_acc': std_b_acc, 'std_bias_gyr': std_b_gyr,
+        'event_latency_s': np.asarray(event_latency_s),
+        'event_cpu_s': np.asarray(event_cpu_s),
     }

@@ -274,7 +274,7 @@ def _R_to_rpy(R):
 # ── Network inference helper ──────────────────────────────────────────────────
 
 def _predict_displacement(model, imu_window: np.ndarray, device: str = 'cpu',
-                          hailo_net=None, _timing=None):
+                          hailo_net=None, _timing=None, _cpu_timing=None):
     """
     Run one TLIO forward pass and decode displacement + covariance.
 
@@ -284,6 +284,13 @@ def _predict_displacement(model, imu_window: np.ndarray, device: str = 'cpu',
     hailo_net  : Optional hailo_backend.HailoTLIO — when given, runs the
                  Hailo backbone + host head instead of the torch model.
     _timing    : Optional list — per-call wall-clock seconds get appended.
+    _cpu_timing: Optional list — per-call THREAD CPU seconds for the same span.
+                 Wall time cannot tell a slow call from a descheduled one; thread
+                 CPU time excludes any interval this thread was not running, so
+                 wall/cpu is a contamination self-check (see _full_eval_worker.py,
+                 which warns above 1.25). The classical filters have always
+                 emitted this; without it here, a preempted TLIO CPU run was
+                 reported as a genuine latency.
 
     Returns
     -------
@@ -291,17 +298,26 @@ def _predict_displacement(model, imu_window: np.ndarray, device: str = 'cpu',
     Sigma_ga : (3, 3) float64 — diagonal covariance
     """
     if hailo_net is not None:
+        _c0 = time.thread_time()
         (dp_ga, log_std), dt = hailo_net.step(imu_window.astype(np.float32))
+        if _cpu_timing is not None:
+            # Host-side share only: the device wait is not this thread's CPU
+            # time, so wall/cpu is legitimately >1 here and is reported rather
+            # than warned on.
+            _cpu_timing.append(time.thread_time() - _c0)
         if _timing is not None:
             _timing.append(dt)
     else:
         import torch
         _t0 = time.perf_counter()
+        _c0 = time.thread_time()
         x = torch.from_numpy(imu_window[None]).float().to(device)   # (1, 6, W)
         with torch.no_grad():
             mean, logstd = model(x)    # each (1, 3)
         dp_ga   = mean[0].cpu().numpy().astype(np.float64)
         log_std = logstd[0].cpu().numpy().astype(np.float64)
+        if _cpu_timing is not None:
+            _cpu_timing.append(time.thread_time() - _c0)
         if _timing is not None:
             _timing.append(time.perf_counter() - _t0)
     # A trained TLIO network must never emit NaN/Inf. If it does, that signals a
@@ -459,6 +475,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
 
     # ── Output arrays ─────────────────────────────────────────────────────
     net_latency_s = []
+    net_cpu_s     = []
     pos        = np.zeros((N, 3))
     vel        = np.zeros((N, 3))
     rpy_out    = np.zeros((N, 3))
@@ -545,7 +562,7 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
                 dp_ga, Sigma_ga = _predict_displacement(
                     model, imu_win, device,
                     hailo_net=(hailo_net if backend == 'hailo' else None),
-                    _timing=net_latency_s)
+                    _timing=net_latency_s, _cpu_timing=net_cpu_s)
 
                 # SCEKF update: meas = dp in GA frame; filter computes pred = Rz.T@(p_end−p_begin)
                 # Mahalanobis gate is built-in (active after 10 s).
@@ -594,4 +611,5 @@ def run(nav_data, params=None, outage_config=None, use_3d_rotation=True,
         'std_bias_acc': std_b_acc,
         'std_bias_gyr': std_b_gyr,
         'net_latency_s': np.array(net_latency_s),
+        'net_cpu_s':     np.array(net_cpu_s),
     }

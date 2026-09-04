@@ -244,3 +244,49 @@ artifacts/
     ├── lora_fold_01.pt … lora_fold_10.pt
     └── lora_adapters.pt            # all-seqs LoRA (--mode all)
 ```
+
+
+## LOO protocol and checkpoint selection
+
+Per fold, with the 7 clean KITTI drives `01 04 06 07 08 09 10`:
+
+| | train | validation | test |
+|---|---|---|---|
+| TLIO / Deep KF / Tartan | 5 drives | 1 drive (inner) | held-out drive |
+| deep_iekf | 6 drives | none (final epoch) | held-out drive |
+| classical + smoothers | 5 drives | 1 drive (report-only) | held-out drive |
+
+The held-out drive is **never loaded during training**. The inner validation
+drive is chosen by `dl_filters._validation.inner_split`: the next drive after the
+held-out one, cyclically, skipping seq 04 (29.7 s against 113-537 s for every
+other drive — too few windows to select on).
+
+### What selects the deployed epoch
+
+The **journal metric**, closed-loop on the inner-validation drive with the
+standard 40 s / 60 s outage:
+
+    J = ATE_outage / 1 m  +  t_rel / 1 %  +  r_rel / 1 (deg/km)
+
+This is the same objective `ins_genetic_cv.py` minimises for the seven classical
+filters, which is what makes the DL and classical rows comparable rather than
+merely adjacent.
+
+It replaced one-step NLL validation loss, for two reasons:
+
+1. **NLL cannot see what the tables report.** These models train OUTAGE-FREE by
+   design — outages are simulated only at evaluation. A one-step density score
+   on clean data therefore carries no information about dead-reckoning
+   behaviour during a GNSS outage, which is the headline result.
+2. **It measurably mattered.** Deep KF's leave-one-out outage mean landed at
+   86 m or 557 m depending only on which epoch that blind criterion happened to
+   pick — and the 86 m version was the one selected on the *test* drive.
+
+`--val-metric-every K` sets how often J is scored, i.e. the granularity at which
+the epoch can be chosen (not a logging interval). It is 2 for TLIO/Tartan and 5
+for Deep KF. A fold where J is `inf` at every evaluated epoch **raises** rather
+than deploying an unselected checkpoint.
+
+The LR schedule still follows inner-val NLL: a plateau detector needs a smooth
+every-epoch signal, and only *selection* moved.
+

@@ -144,18 +144,25 @@ def _maybe_make_causal(iekf, causal, warm_start=None):
 
 # ── Journal-metric validation hook (display-only) ─────────────────────────────
 
-def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int,
+def _build_aiimu_val_hook(output_dir: Path, val_drive, val_metric_every: int,
                           causal: bool = False):
     """
-    Return a callable hook(epoch) that runs the journal three-component metric
-    on the held-out sequence using the just-saved fold weights. Returns None
-    if validation should be skipped (no held_out, or val_metric_every == 0,
-    or imports unavailable).
+    Return a callable hook(epoch) -> J that runs the journal three-component
+    metric on VAL_DRIVE using the just-saved weights, and returns the resulting
+    cost (inf on failure). Returns None if validation should be skipped.
+
+    val_drive is the INNER-VALIDATION drive, never the LOO held-out one. This
+    hook previously scored the held-out (test) drive: harmless for the deployed
+    weights, since nothing selected on it, but it printed the test metric every
+    K epochs, which is the same selection-on-test problem the other three models
+    had — just routed through whoever was reading the log rather than through
+    code. It now also drives checkpoint selection, so pointing it at the test
+    drive would be an outright leak.
 
     When `causal`, validation uses the online runner (iekf_ai_imu_online) loading
     the CausalMesNet weights via AI_IMU_ONLINE_WEIGHTS; otherwise the batch runner.
     """
-    if not held_out or not val_metric_every:
+    if not val_drive or not val_metric_every:
         return None
     try:
         from kitti_sequences import KITTI_SEQ_TO_DRIVE
@@ -163,7 +170,7 @@ def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int,
         print(f"  [val] AI-IMU hook unavailable ({e}) — skipping journal metric")
         return None
     _drive_to_seq = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
-    val_seq = _drive_to_seq.get(held_out, held_out)
+    val_seq = _drive_to_seq.get(val_drive, val_drive)
     if val_seq not in {'01', '04', '06', '07', '08', '09', '10'}:
         return None
     runner_mod = ('dl_filters.deep_iekf.iekf_ai_imu_online' if causal
@@ -182,12 +189,14 @@ def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int,
     def _hook(epoch):
         import os as _os
         if not weights_canonical.exists():
-            return
+            return float('inf')
         _prev = _os.environ.get(env_var)
         _os.environ[env_var] = str(weights_canonical)
+        _J = float('inf')
         try:
             m = validate_with_journal_metric(filter_module=runner, val_seq=val_seq)
             print(format_val_line(epoch, m))
+            _J = float(m.get('J', float('inf')))
         except Exception as exc:
             print(f"  [val] journal-metric hook failed: {exc}")
         finally:
@@ -195,6 +204,7 @@ def _build_aiimu_val_hook(output_dir: Path, held_out, val_metric_every: int,
                 _os.environ.pop(env_var, None)
             else:
                 _os.environ[env_var] = _prev
+        return _J
     return _hook
 
 
@@ -351,6 +361,34 @@ def train_loo(output_dir, epochs, held_out=None, val_metric_every=0,
     dataset = MultiSequenceDataset(seqs=KITTI_CLEAN_SEQS, held_out=held_out,
                                    sample_rate=100.0)
 
+    # NESTED split, matching TLIO / Deep KF / Tartan IMU. MultiSequenceDataset
+    # puts only the held-out drive aside; one more drive is carved out here as
+    # the INNER VALIDATION set, and it drives both the journal metric and
+    # checkpoint selection below.
+    #
+    # This departs from the upstream protocol, which trains on everything except
+    # the held-out drive and deploys the final epoch. The trade is deliberate:
+    # the other three estimators each spend one drive on validation, so leaving
+    # this one training on all of them gave it ~19% more data on average, and
+    # deploying its last epoch meant it was the only model with no guard against
+    # a bad final epoch. Consistency across the four is worth more here than
+    # fidelity to a training-loop detail.
+    from kitti_sequences import KITTI_SEQ_TO_DRIVE
+    _d2s = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
+    inner_val_drive = None
+    if held_out:
+        from dl_filters._validation import inner_split
+        _held_seq = _d2s.get(held_out, held_out)
+        if _held_seq in KITTI_CLEAN_SEQS:
+            _, _inner_seq = inner_split(list(KITTI_CLEAN_SEQS), _held_seq)
+            inner_val_drive = KITTI_SEQ_TO_DRIVE[_inner_seq]
+            for key in list(dataset.datasets_train_filter.keys()):
+                if inner_val_drive in key or inner_val_drive.replace('_extract', '') in key:
+                    del dataset.datasets_train_filter[key]
+                    print(f"  Inner validation: seq {_inner_seq} ({key}) "
+                          f"removed from training.")
+            print(f"  Training drives  : {list(dataset.datasets_train_filter)}")
+
     args = types.SimpleNamespace()
     args.path_temp         = str(output_dir)
     args.parameter_class   = KITTIParameters
@@ -362,38 +400,61 @@ def train_loo(output_dir, epochs, held_out=None, val_metric_every=0,
     iekf      = _maybe_make_causal(iekf, causal, _resolve_warm_start(warm_start, held_out))
     prepare_loss_data(args, dataset)
     optimizer = set_optimizer(iekf)
-    _val_hook = _build_aiimu_val_hook(output_dir, held_out, val_metric_every,
+    _val_hook = _build_aiimu_val_hook(output_dir, inner_val_drive, val_metric_every,
                                       causal=causal)
+
+    seq_id = _d2s.get(held_out, held_out) if held_out else None
+    stem = f'fold_{seq_id}' if held_out else 'iekfnets'
+    fold_dst = output_dir / f'{stem}.p'
+    best_J, best_J_epoch = float('inf'), None
 
     for epoch in range(1, epochs + 1):
         train_loop(args, dataset, epoch, iekf, optimizer, args.seq_dim)
-        save_iekf(args, iekf)
+        save_iekf(args, iekf)          # canonical iekfnets.p, read by the hook
         if epoch % 50 == 0 or epoch == epochs:
             print(f"  Epoch {epoch}/{epochs} done")
         if _val_hook is not None and (
                 epoch % val_metric_every == 0 or epoch == epochs):
-            _val_hook(epoch)
+            _J = _val_hook(epoch)
+            # Keep the BEST epoch by the journal metric on the inner-validation
+            # drive, as the other three models do, rather than whatever the last
+            # epoch happened to produce.
+            if held_out and _J < best_J:
+                best_J, best_J_epoch = _J, epoch
+                shutil.copy2(output_dir / 'iekfnets.p', fold_dst)
+                print(f"  -> saved best ({fold_dst.name})  J={_J:.4f} @ epoch {epoch}")
 
     if held_out:
-        from kitti_sequences import KITTI_SEQ_TO_DRIVE
-        _drive_to_seq = {v: k for k, v in KITTI_SEQ_TO_DRIVE.items()}
-        seq_id = _drive_to_seq.get(held_out, held_out)
-        stem = f'fold_{seq_id}'
-    else:
-        stem = 'iekfnets'
-
-    if held_out:
-        src = output_dir / 'iekfnets.p'
-        dst = output_dir / f'{stem}.p'
-        if src.exists():
-            shutil.copy2(src, dst)
-            print(f"  Fold weights saved to {dst}")
+        if _val_hook is None:
+            # No validation available: fall back to the upstream behaviour, but
+            # say so, because the resulting file is NOT a selected checkpoint.
+            src = output_dir / 'iekfnets.p'
+            if src.exists():
+                shutil.copy2(src, fold_dst)
+                print(f"  [warn] no validation hook — deployed FINAL epoch to {fold_dst}")
+        elif best_J_epoch is None:
+            raise RuntimeError(
+                f"No checkpoint selected for {stem}: the journal metric was inf "
+                f"at every evaluated epoch on inner-validation drive "
+                f"{inner_val_drive}. Refusing to deploy an unselected checkpoint.")
+        else:
+            print(f"  Selected epoch {best_J_epoch} (J={best_J:.4f} on "
+                  f"inner-val {inner_val_drive}) -> {fold_dst}")
 
     norm_path = output_dir / f'{stem}_norm.p'
     torch.save(dataset.normalize_factors, norm_path)
     print(f"  Normalization factors saved to {norm_path}")
 
-    _export_onnx(output_dir, weights_stem=stem)
+    # Convenience export only. It is NOT on the deployment path: the Hailo
+    # binaries come from deep_iekf_stream/build_stream.py, which exports its own
+    # ONNX from these weights. It currently fails on some opset/onnx combinations
+    # ("No Adapter To Version 17 for Pad"), and a failure here must not mark the
+    # fold as failed and discard a checkpoint that was already written.
+    try:
+        _export_onnx(output_dir, weights_stem=stem)
+    except Exception as exc:
+        print(f"  [warn] optional ONNX export failed ({type(exc).__name__}: {exc}); "
+              f"weights at {fold_dst if held_out else output_dir} are unaffected.")
 
 
 # ── Single-sequence mode ───────────────────────────────────────────────────────
@@ -529,7 +590,7 @@ def main():
                         'the genetic optimiser and the other DL filters). With a fixed '
                         'seed the acausal and causal models share identical conv init, '
                         'giving a controlled "cost of causality" comparison.')
-    p.add_argument('--val-metric-every', type=int, default=50,
+    p.add_argument('--val-metric-every', type=int, default=20,
                    help='[kitti/loo modes] Every K epochs (and at final epoch), '
                         'run a display-only validation on the held-out sequence '
                         'using the journal three-component metric '

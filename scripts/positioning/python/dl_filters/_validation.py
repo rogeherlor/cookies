@@ -45,6 +45,73 @@ if str(_POSITIONING_PY) not in sys.path:
     sys.path.insert(0, str(_POSITIONING_PY))
 
 
+# Sequences too short to be a meaningful inner validation set. Measured on the
+# KITTI clean drives: seq 04 is 2967 samples / 29.7 s, every other clean drive is
+# 11363-53663 samples / 113.6-536.6 s. Still trained on — just never the validator.
+SHORT_SEQS = frozenset({'04'})
+
+
+def inner_split(clean_seqs: list, held_out: str) -> tuple:
+    """Split the LOO training pool into (train_seqs, inner_val_seq).
+
+    Why this exists
+    ---------------
+    In a leave-one-out study the held-out sequence is the TEST set. Using it to
+    pick the epoch to deploy — `if val_loss < best_val: save()` — or to drive
+    ReduceLROnPlateau is model selection on the test set, and it measurably
+    inflated the DL rows: TLIO's folds were being frozen at epochs 10/11/12 of
+    50 and Tartan's fold 08 at epoch 3, whichever epoch happened to score best
+    on the very sequence the paper then reports. The seven classical filters do
+    not get that: ins_genetic_cv.py excludes the held-out drive from the
+    objective entirely (`list_kitti_datasets(held_out=...)`), and deep_iekf
+    deploys its final epoch. So the comparison was not like-for-like.
+
+    The fix is a nested split: one sequence is carved out of the six TRAINING
+    sequences to serve as the inner validation set, and every fitting decision
+    (best-checkpoint, LR schedule, early stopping) is made against that. The
+    held-out sequence is then never loaded during training at all.
+
+    The rule
+    --------
+    Deterministic rotation: the inner validation sequence is the first sequence
+    FOLLOWING the held-out one in the canonical clean-sequence list (cyclically)
+    that is not in SHORT_SEQS. It has to be reproducible and stateable in the
+    paper, and rotating spreads the role across drives instead of always
+    spending the same one:
+
+        held-out 01 -> inner val 06     held-out 08 -> inner val 09
+        held-out 04 -> inner val 06     held-out 09 -> inner val 10
+        held-out 06 -> inner val 07     held-out 10 -> inner val 01
+        held-out 07 -> inner val 08
+
+    SHORT_SEQS exists because KITTI seq 04 is 29.7 s against 113.6-536.6 s for
+    every other clean drive. Plain rotation would have made it fold 01's inner
+    validation set, i.e. selected TLIO's deployed epoch on 574 windows — swapping
+    a biased selection signal for a merely noisy one. It stays a training
+    sequence throughout; only its turn as validator is skipped.
+
+    Returns (train_seqs, inner_val_seq).
+    """
+    if held_out not in clean_seqs:
+        raise ValueError(f"held_out {held_out!r} not in {clean_seqs}")
+    if len(clean_seqs) < 3:
+        raise ValueError(
+            f"need >=3 sequences to hold one out AND keep an inner validation "
+            f"sequence, got {len(clean_seqs)}: {clean_seqs}")
+    n = len(clean_seqs)
+    i = clean_seqs.index(held_out)
+    inner_val = None
+    for k in range(1, n):
+        cand = clean_seqs[(i + k) % n]
+        if cand not in SHORT_SEQS:
+            inner_val = cand
+            break
+    if inner_val is None:      # every other sequence is short — take the next one
+        inner_val = clean_seqs[(i + 1) % n]
+    train_seqs = [s for s in clean_seqs if s not in (held_out, inner_val)]
+    return train_seqs, inner_val
+
+
 def validate_with_journal_metric(
     filter_module,
     val_seq: str,
